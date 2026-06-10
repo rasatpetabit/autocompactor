@@ -48,7 +48,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from transcript_lib import (analyze, active_signals,  # noqa: E402
                             build_preservation_instructions, detect_phase,
-                            find_last_boundary_offset)
+                            find_last_boundary_offset, observe_only)
 import artifacts  # noqa: E402
 from stats import log_event  # noqa: E402
 
@@ -169,8 +169,12 @@ def main() -> int:
     sig_pairs = active_signals(st, prompt=prompt, window=window,
                                stale_frac_thr=stale_frac_thr)
     signals = [desc for _, desc in sig_pairs]
+    # Observe-only signals are logged (telemetry keeps measuring them)
+    # but never justify a recommendation — they tested anti-predictive.
+    observe = observe_only()
+    gating = [desc for name, desc in sig_pairs if name not in observe]
 
-    recommend = (occupancy >= hard or (occupancy >= soft and bool(signals)))
+    recommend = (occupancy >= hard or (occupancy >= soft and bool(gating)))
     # Min-savings guard: a compaction can only reclaim what sits above the
     # post-compaction floor (system prompt + tools + CLAUDE.md + summary —
     # measured ~69k median on this machine). Below that margin a compaction
@@ -201,8 +205,8 @@ def main() -> int:
 
     reason = ("context is at "
               f"{occupancy:.0%} (~{st.context_tokens:,} tokens)")
-    if signals:
-        reason += " and " + "; ".join(signals)
+    if gating:
+        reason += " and " + "; ".join(gating)
 
     out = {
         "hookSpecificOutput": {

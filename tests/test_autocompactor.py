@@ -425,6 +425,41 @@ def test_monitor_min_savings_guard_suppresses(tmp_path):
     assert 0 < ev["est_reclaim"] < 30_000
 
 
+def test_observe_only_signals_never_gate(tmp_path):
+    """Anti-predictive signals (error_resolved et al.) keep flowing into
+    telemetry but must not appear in — or justify — a recommendation."""
+    payload = json.dumps({
+        "session_id": "obsonly", "cwd": "/tmp",
+        "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "now plan the website redesign"})
+    r = _run_hook(MONITOR, payload, tmp_path)
+    assert r.returncode == 0
+    assert "Good moment to compact" in r.stdout       # gates on todo_step etc.
+    assert "debug loop just concluded" not in r.stdout
+    ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
+                     / "events.jsonl").read_text().splitlines()[-1])
+    assert "a debug loop just concluded" in ev["signals"]  # still observed
+
+
+def test_observe_only_env_override(tmp_path):
+    """AUTOCOMPACTOR_OBSERVE_ONLY= (empty) restores full gating, so the
+    demotion is a tunable, not a hardcode."""
+    payload = json.dumps({
+        "session_id": "obsoverride", "cwd": "/tmp",
+        "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "now plan the website redesign"})
+    env = _hook_env(tmp_path)
+    env["AUTOCOMPACTOR_OBSERVE_ONLY"] = ""
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=payload, capture_output=True, text=True, env=env,
+        cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    assert "debug loop just concluded" in r.stdout
+
+
 def test_monitor_tail_parse_after_boundary(tmp_path):
     """Past MAX_FULL_PARSE_MB the monitor parses only the active segment
     after the last compaction boundary; telemetry records tail_parse and

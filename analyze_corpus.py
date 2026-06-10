@@ -47,10 +47,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from transcript_lib import (analyze, detect_phase,  # noqa: E402
-                            load_transcript)
+                            load_transcript, observe_only)
 from transcript_lib import active_signals as _registry_signals  # noqa: E402
 
 DROP_FRAC = 0.30   # context drop that we treat as a compaction event
+_OBSERVE = observe_only()   # anti-predictive signals: measured, never gating
 
 
 def usage_tokens(entry: dict) -> int:
@@ -141,7 +142,10 @@ def backtest_session(path: str, window: float, soft: float, hard: float,
             continue
         st = analyze_prefix(entries, entry_idx)
         sigs = active_signals(st)
-        if want_reco and (occ >= hard or sigs):
+        # Mirror the monitor exactly: observe-only signals are measured
+        # for precision below but never justify a replayed recommendation.
+        gating = [s for s in sigs if s not in _OBSERVE]
+        if want_reco and (occ >= hard or gating):
             first_reco = {"tokens": tokens, "occupancy": occ, "signals": sigs}
             reco_signals = sigs
         if want_prec:

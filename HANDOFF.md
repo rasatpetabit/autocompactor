@@ -285,8 +285,26 @@ fixture sits at ~84k context, below the default guard threshold —
 tests and smoke pin POST_FLOOR=50000/MIN_SAVINGS=20000; enlarge
 fixtures instead if that ever chafes.
 
+Signal demotion executed (owner-approved same day): error_resolved,
+tests_pass, idle_gap are observe-only — active_signals() still reports
+them (telemetry + backtester precision unchanged), but the monitor's
+recommendation gate and the backtester's recommendation replay filter
+them via transcript_lib.observe_only() (AUTOCOMPACTOR_OBSERVE_ONLY,
+default "error_resolved,tests_pass,idle_gap", empty = full gating).
+39 pytest cases + smoke green.
+
+Project moved 2026-06-10 to /srv/dev/ras/autocompactor (public repo
+github.com/rasatpetabit/autocompactor); settings.json hook paths and
+the nightly crontab entry updated to the new location. Local-only
+artifacts (report*.json, backtest logs, the handoff tgz, .serena/) are
+gitignored — backtest reports reference real session paths and must
+never be pushed.
+
 Open: confirm ~135k auto trigger under the 200k ceiling (tomorrow's
-nightly); execute approved floor cuts; topic_shift precision via
+nightly); execute approved floor cuts (global CLAUDE.md diet must NOT
+weaken AUQ enforcement — past diets regressed it; subagent-models
+digest must STRENGTHEN qwen-first; AUQ process overhaul: "Chat about
+this" surfaces as declined + auto-advance); topic_shift precision via
 prompt replay; --events reduction-by-phase after a few live days.
 
 ## Known limitations

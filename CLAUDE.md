@@ -41,9 +41,10 @@ clamp).
 4. After a few live days: `python3 analyze_corpus.py --events` —
    reduction-ratio-by-phase to tune phase addenda.
 5. Open refinements: topic_shift precision (needs prompt replay at
-   backtest sample points); demote error_resolved/tests_pass/idle_gap
-   from the gating set (anti-predictive on both 14-day and day-one
-   data); watch stale_output (below baseline at 0.90).
+   backtest sample points); watch stale_output (below baseline at
+   0.90). DONE 2026-06-10: error_resolved/tests_pass/idle_gap demoted
+   to observe-only (AUTOCOMPACTOR_OBSERVE_ONLY) — telemetry and the
+   backtester keep measuring them, they no longer gate recommendations.
 
 ## Conventions
 

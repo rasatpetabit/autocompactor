@@ -388,6 +388,21 @@ def active_signals(st: TranscriptStats, prompt: str = "",
     return sigs
 
 
+# Signals measured as anti-predictive on BOTH the 14-day backtest and the
+# day-one nightly (precision at or below the signal-agnostic baseline:
+# error_resolved 3%/0.1x, tests_pass 9%/0.4x, idle_gap 0 firings).
+# They stay in the registry so telemetry and the backtester keep
+# measuring them, but neither the monitor nor the backtester's
+# recommendation replay may GATE a recommendation on them. Tunable:
+# AUTOCOMPACTOR_OBSERVE_ONLY (comma-separated signal names).
+OBSERVE_ONLY_DEFAULT = "error_resolved,tests_pass,idle_gap"
+
+
+def observe_only() -> frozenset:
+    raw = os.environ.get("AUTOCOMPACTOR_OBSERVE_ONLY", OBSERVE_ONLY_DEFAULT)
+    return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
 BASE_SCHEMA = (
     "Produce a structured handoff, not prose. Sections: GOAL; USER "
     "CONSTRAINTS & PREFERENCES (verbatim where stated); PLAN & POSITION "

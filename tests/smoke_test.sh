@@ -21,7 +21,10 @@ echo "1) monitor recommends at boundary (rich fixture, new-topic prompt)"
 OUT=$(echo '{"session_id":"smoke","transcript_path":"'$FIX'/rich_transcript.jsonl","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"now plan the website redesign"}' \
   | python3 context_monitor.py)
 echo "$OUT" | grep -q "Good moment to compact" || fail "no recommendation"
-echo "$OUT" | grep -q "debug loop just concluded" || fail "error_resolved signal missing"
+echo "$OUT" | grep -q "plan step was just completed" || fail "todo_step signal missing"
+# error_resolved is observe-only (anti-predictive on live data): it must
+# keep flowing into telemetry but never into the recommendation reason.
+echo "$OUT" | grep -q "debug loop just concluded" && fail "observe-only signal leaked into reason" || true
 
 echo "2) cooldown suppresses immediate re-recommendation"
 OUT2=$(echo '{"session_id":"smoke","transcript_path":"'$FIX'/rich_transcript.jsonl","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"again"}' \
