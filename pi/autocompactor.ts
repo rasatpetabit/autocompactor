@@ -79,6 +79,7 @@ export default function autocompactor(pi: ExtensionAPI) {
   // In-memory cooldown: token reading at the last recommendation.
   let lastRecTokens = -Infinity
   let selfTriggered = false // reentrancy flag for actuate mode
+  let compactionPreTokens = 0 // captured in session_before_compact for post summary
 
   // agent_end: the boundary moment. Zero-spawn pre-gate, then bridge evaluate.
   pi.on("agent_end", async (_event, ctx) => {
@@ -103,6 +104,7 @@ export default function autocompactor(pi: ExtensionAPI) {
         // Set selfTriggered BEFORE the prepare call to block overlapping
         // agent_end handlers from both triggering compaction.
         selfTriggered = true
+        compactionPreTokens = usage.tokens
         const prep = await bridge(pi, ctx, "prepare", ["--trigger", "actuate"])
         ctx.compact({
           customInstructions: prep?.customInstructions,
@@ -110,14 +112,11 @@ export default function autocompactor(pi: ExtensionAPI) {
           onError: () => { selfTriggered = false },
         })
       } else {
-        // advise mode: show recommendation with context state
-        const ctxNote = verdict.contextState
-          ? ` [${verdict.contextState}]`
-          : ``
+        // advise mode: concise recommendation
         pi.sendMessage(
           {
             customType: "autocompactor.advice",
-            content: `autocompactor: compaction recommended — ${verdict.reason ?? "boundary reached"} (context ~${verdict.context_tokens ?? usage.tokens} of ${window}). Run /compact.${ctxNote}`,
+            content: `autocompactor: compaction recommended (${usage.tokens?.toLocaleString() ?? "?"} tokens). Run /compact.`,
             display: true,
           },
           { deliverAs: "nextTurn" },
@@ -133,25 +132,14 @@ export default function autocompactor(pi: ExtensionAPI) {
   pi.on("session_before_compact", async (_event, ctx) => {
     try {
       const usage = ctx.getContextUsage()
+      // Capture pre-compaction tokens for the post-compaction summary.
+      if (usage && usage.tokens != null) {
+        compactionPreTokens = usage.tokens
+      }
       // Fire-and-forget prepare for backup + artifacts + founding-goal.
       // Non-intercept: do NOT await — native compaction proceeds immediately.
-      // The before-contextState is derived from TS-available usage data;
-      // the Python analysis (phase, signals, stale_frac) is too slow to
-      // block the handler for.
       if (!interceptEnabled() || selfTriggered) {
         void bridge(pi, ctx, "prepare", ["--trigger", "native"])
-        if (usage && usage.tokens != null) {
-          const window = (usage.contextWindow ?? 0) - RESERVE_FALLBACK
-          const occ = window > 0 ? (usage.tokens / window) : 0
-          pi.sendMessage(
-            {
-              customType: "autocompactor.before",
-              content: `[autocompactor] Compacting — ${usage.tokens?.toLocaleString() ?? "?"} tokens (${occ.toFixed(0)}% of ${window.toLocaleString()}).`,
-              display: true,
-            },
-            { deliverAs: "nextTurn" },
-          )
-        }
         return
       }
       // Intercept mode: cancel native compaction and re-trigger with
@@ -170,7 +158,7 @@ export default function autocompactor(pi: ExtensionAPI) {
   })
 
   // session_compact: re-inject the artifact digest as a persisted one-shot,
-  // and show the after-compaction context state to the user.
+  // and show a clear post-compaction summary to the user.
   pi.on("session_compact", async (_event, ctx) => {
     try {
       const inj = await bridge(pi, ctx, "reinject")
@@ -187,17 +175,22 @@ export default function autocompactor(pi: ExtensionAPI) {
         { deliverAs: "nextTurn" },
       )
 
-      // After-compaction context overview (visible to the user)
-      if (inj.contextState) {
-        pi.sendMessage(
-          {
-            customType: "autocompactor.after",
-            content: `[autocompactor] Done — ${inj.contextState}.`,
-            display: true,
-          },
-          { deliverAs: "nextTurn" },
-        )
-      }
+      // Post-compaction summary: explicit, hard to miss, shows savings.
+      const usage = ctx.getContextUsage()
+      const postTokens = usage?.tokens ?? 0
+      const reclaimed = compactionPreTokens - postTokens
+      const window = (usage?.contextWindow ?? 0) - RESERVE_FALLBACK
+      const postOcc = window > 0 ? (postTokens / window) : 0
+
+      pi.sendMessage(
+        {
+          customType: "autocompactor.after",
+          content: `>>> AUTOCOMPACTOR COMPACTED <<<\nContext: ${compactionPreTokens?.toLocaleString() ?? "?"} → ${postTokens?.toLocaleString()} tokens (${postOcc.toFixed(0)}%). Reclaimed ~${reclaimed.toLocaleString()} tokens.`,
+          display: true,
+        },
+        { deliverAs: "nextTurn" },
+      )
+      compactionPreTokens = 0 // reset for next compaction
     } catch {
       /* never break Pi */
     }
