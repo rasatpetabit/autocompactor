@@ -1,7 +1,7 @@
 ---
 schema_version: 8
 slug: pi-harness
-status: in-progress
+status: archived
 phase: execute
 topic: "Pi coding harness support with 100% Claude Code compatibility"
 complexity: null
