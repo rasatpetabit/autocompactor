@@ -412,7 +412,12 @@ BASE_SCHEMA = (
     "WORKING COMMANDS & CONFIG (verbatim); ENVIRONMENT FACTS (versions, "
     "ports, hardware quirks, anything discovered empirically); OPEN "
     "QUESTIONS.\n"
-    "Rules: copy identifiers, paths, commands, error strings, and numeric "
+    "Rules: preserve the user's own input prompts VERBATIM -- especially "
+    "the initial ones that framed the task; quote them in full, never "
+    "compress or paraphrase them (later instructions may be shortened only "
+    "if purely procedural, but anything stating intent, scope, constraints, "
+    "or preferences is quoted exactly). Copy identifiers, paths, commands, "
+    "error strings, and numeric "
     "constants verbatim -- never paraphrase them. Keep anything that took "
     "multiple tool calls to discover and cannot be re-derived by re-reading "
     "the repo; drop anything recoverable from disk (file contents, applied "
@@ -475,7 +480,7 @@ def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:
         "Session-specific anchors (seed the sections above with these):",
     ]
     if st.last_user_task:
-        lines.append(f"- The current task/goal: {st.last_user_task[:300]}")
+        lines.append(f"- The current task/goal: {st.last_user_task[:1500]}")
     if st.edited_files:
         lines.append("- Full paths of all files modified this session: "
                      + ", ".join(st.edited_files[-15:]))
