@@ -642,6 +642,28 @@ def test_analyzer_summary_reports_staged_instructions(tmp_path):
     assert "instructions: staged by monitor" in out["systemMessage"]
 
 
+def test_analyzer_restates_founding_goal_when_staged_lacks_it(tmp_path):
+    """Owner directive: every compaction pass must restate the founding
+    goal verbatim. Staged instructions built from a tail-only parse can
+    miss the original prompts; the analyzer must append them from the
+    merged artifacts (old-wins) so they cannot decay across passes."""
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    (state_dir / "artifacts").mkdir(parents=True)
+    (state_dir / "sum4.state.json").write_text(json.dumps(
+        {"staged_instructions": "STAGED (tail-parsed, no founding goal)"}))
+    (state_dir / "artifacts" / "sum4.json").write_text(json.dumps(
+        {"initial_prompts": ["build the frobnicator with 100% compat"]}))
+    payload = json.dumps({
+        "session_id": "sum4", "cwd": "/tmp",
+        "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+        "hook_event_name": "PreCompact", "trigger": "auto"})
+    r = _run_hook(ANALYZER, payload, tmp_path)
+    assert r.returncode == 0
+    instr = json.loads(r.stdout)["hookSpecificOutput"]["customInstructions"]
+    assert "build the frobnicator with 100% compat" in instr
+    assert "ORIGINAL user request" in instr
+
+
 def test_analyzer_summary_feeds_digest_header(tmp_path):
     """The same summary must arrive on the second surface: the header of
     the one-shot artifact digest re-injected on the first post-compaction

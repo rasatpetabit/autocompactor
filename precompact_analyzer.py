@@ -122,6 +122,17 @@ def main() -> int:
         arts = artifacts.merge(artifacts.load(session_id),
                                artifacts.extract(st))
         art_sizes = artifacts.save(session_id, arts)
+        # Founding-goal restatement (owner directive): staged instructions
+        # built from a tail-only parse can miss the session's original
+        # prompts; the merged artifacts always carry them (old-wins merge).
+        # Every compaction pass must restate the founding goal verbatim.
+        founding = [p.replace("\n", " ")
+                    for p in arts.get("initial_prompts") or []]
+        if founding and founding[0][:200] not in instructions:
+            instructions += (
+                "\n\nThe ORIGINAL user request(s) that framed this session "
+                "(quote these VERBATIM in GOAL; never paraphrase):\n"
+                + "\n".join("    * " + p for p in founding))
         instructions += (
             "\n\nNOTE: the following are preserved on disk and will be "
             "re-injected after compaction -- do NOT spend summary space "
