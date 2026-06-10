@@ -31,43 +31,28 @@ TodoWrite state, recent errors, last task statement).
 
 ## Install
 
-1. Copy the three `.py` files to `~/.claude/hooks/` and make them
-   executable (`chmod +x ~/.claude/hooks/*.py`).
-2. Merge into `~/.claude/settings.json` (or a project's
-   `.claude/settings.json`):
+Clone anywhere and run the installer — hooks reference this checkout in
+place (no files are copied):
 
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command",
-            "command": "python3 ~/.claude/hooks/context_monitor.py" }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "matcher": "manual",
-        "hooks": [
-          { "type": "command",
-            "command": "python3 ~/.claude/hooks/precompact_analyzer.py" }
-        ]
-      },
-      {
-        "matcher": "auto",
-        "hooks": [
-          { "type": "command",
-            "command": "python3 ~/.claude/hooks/precompact_analyzer.py" }
-        ]
-      }
-    ]
-  }
-}
+```bash
+git clone <repo-url> autocompactor && cd autocompactor
+python3 install.py            # hooks + missing env defaults
+python3 install.py --cron     # ... and the 03:30 nightly self-evaluation
+python3 install.py --verify   # pytest + smoke + live transcript probe
 ```
 
-3. Run `/hooks` inside Claude Code to verify registration.
+Then run `/hooks` inside Claude Code to confirm registration.
+
+Installer flags (all idempotent — safe to re-run any of them):
+
+| Flag | Effect |
+|---|---|
+| *(none)* | Register both hooks in `~/.claude/settings.json`; fill in any **missing** `AUTOCOMPACTOR_*` env keys + `CLAUDE_CODE_AUTO_COMPACT_WINDOW` with the defaults below. Tuned values are never overwritten. |
+| `--force-env` | Reset all managed env keys to the code defaults. |
+| `--cron` | Also register the nightly `nightly_eval.py` cron job (marker `# autocompactor-nightly`, 03:30). |
+| `--verify` | Run the pytest suite, the smoke test, and probe the newest real transcript through `context_monitor.py`. Nonzero exit on any failure. |
+| `--status` | Doctor: hooks registered? env keys present (and which are tuned away from defaults)? cron registered? state dir writable? newest nightly report age? CLI version vs the last nightly-validated one? |
+| `--remove` | Unregister hooks, delete `AUTOCOMPACTOR_*` env keys, remove the cron job. Leaves `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (a native Claude Code setting) with a note. |
 
 ## Tunables (environment variables)
 
