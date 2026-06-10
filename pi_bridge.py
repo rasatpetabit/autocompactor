@@ -70,6 +70,31 @@ def env_f(name: str, default: float) -> float:
     return default
 
 
+def env_f_windowed(name: str, default: float, context_window: int) -> float:
+    """Window-aware env lookup: first check AUTOCOMPACTOR_PI_X_WIDE or
+    AUTOCOMPACTOR_X_WIDE for large windows (>=300k), then the plain name.
+
+    Lets you set AUTOCOMPACTOR_PI_HARD_PCT=0.90 for 256k models while
+    keeping AUTOCOMPACTOR_PI_HARD_PCT_WIDE=0.62 for 1M window models.
+    """
+    is_wide = context_window >= 300_000
+    # Window-specific override takes highest priority
+    wide_suffix = "_WIDE"
+    for prefix in ("AUTOCOMPACTOR_PI_", "AUTOCOMPACTOR_"):
+        if is_wide:
+            key = prefix + name + wide_suffix
+        else:
+            key = prefix + name
+        raw = os.environ.get(key)
+        if raw:
+            try:
+                return float(raw)
+            except ValueError:
+                pass
+    # Fall back to plain name (handles the case where only the base var is set)
+    return env_f(name, default)
+
+
 def _parse_args(argv: list) -> dict:
     """Tolerant --flag value parser; unknown flags ignored, never raises."""
     opts = {}
@@ -143,8 +168,9 @@ def cmd_evaluate(opts: dict) -> dict:
     window = float(max(context_window - reserve, 1))
     occupancy = context_tokens / window
 
-    soft = env_f("SOFT_PCT", 0.40)
-    hard = env_f("HARD_PCT", 0.65)
+    # Window-aware thresholds: WIDE suffix for large windows (>=300k)
+    soft = env_f_windowed("SOFT_PCT", 0.40, context_window)
+    hard = env_f_windowed("HARD_PCT", 0.65, context_window)
     cooldown = env_f("COOLDOWN", 25_000)
     stale_frac_thr = env_f("STALE_FRAC", 0.50)
     post_floor = env_f("POST_FLOOR", 70_000)
