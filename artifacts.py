@@ -13,6 +13,10 @@ injection lands in the freshly compacted context and persists from there
 — same durability, no steady-state token tax.
 
 Artifact classes (priority order — higher survives budget trimming first):
+  initial_prompts  the user's founding request(s), verbatim — re-injected
+                   after EVERY compaction so the original goal cannot decay
+                   across passes (merge is old-wins: the earliest capture
+                   is canonical)
   corrections      user redirects/preferences, verbatim
   error_ledger     deduplicated error texts with occurrence counts
   working_commands commands whose results were clean
@@ -29,8 +33,8 @@ import statedir
 
 ART_DIR = os.path.expanduser("~/.claude/autocompactor/artifacts")
 
-PRIORITY = ["corrections", "error_ledger", "working_commands",
-            "hex_constants", "files"]
+PRIORITY = ["initial_prompts", "corrections", "error_ledger",
+            "working_commands", "hex_constants", "files"]
 
 
 def _artifact_dir(harness: str = "claude") -> str:
@@ -81,6 +85,10 @@ def merge(old: dict, new: dict) -> dict:
                                   e.get("count", 1))
     of, nf = old.get("files") or {}, new.get("files") or {}
     return {
+        # Old-wins: the earliest captured prompts are the founding goal;
+        # a post-compaction re-extraction must never displace them.
+        "initial_prompts": (old.get("initial_prompts")
+                            or new.get("initial_prompts") or []),
         "corrections": _dedupe_keep_last(
             (old.get("corrections") or []) + (new.get("corrections") or []),
             30),
@@ -104,6 +112,7 @@ def merge(old: dict, new: dict) -> dict:
 def extract(st) -> dict:
     """Mechanical extraction from a TranscriptStats. No LLM calls."""
     return {
+        "initial_prompts": list(getattr(st, "initial_user_prompts", []) or []),
         "corrections": st.corrections,
         "error_ledger": [{"error": k, "count": v}
                          for k, v in list(st.error_ledger.items())[-20:]],
@@ -144,6 +153,12 @@ def build_digest(arts: dict, budget_tokens: int = 1500,
     if not arts:
         return ""
     sections = {}
+    if arts.get("initial_prompts"):
+        sections["initial_prompts"] = (
+            "FOUNDING GOAL -- the user's original request(s), verbatim "
+            "(this is what the session was started to do; re-anchor on it "
+            "before continuing):\n" + "\n".join(
+                "- " + p for p in arts["initial_prompts"]))
     if arts.get("corrections"):
         sections["corrections"] = ("USER CORRECTIONS (verbatim, still "
                                    "binding):\n" + "\n".join(

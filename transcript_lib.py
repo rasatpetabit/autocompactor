@@ -36,6 +36,7 @@ class TranscriptStats:
     todos: list = field(default_factory=list)          # latest TodoWrite state
     recent_errors: list = field(default_factory=list)  # last few error strings
     last_user_task: str = ""
+    initial_user_prompts: list = field(default_factory=list)  # founding prompts, verbatim
     recent_commit: bool = False      # git commit in recent window
     recent_tests_pass: bool = False  # test-success marker in recent window
     todos_all_done: bool = False
@@ -89,6 +90,10 @@ CORRECTION_RE = re.compile(
     re.IGNORECASE,
 )
 TASK_CREATED_RE = re.compile(r"Task #(\d+) created")
+# Founding-goal capture: the first few genuine human prompts, kept verbatim
+# so every compaction pass can restate what the session was started to do.
+INITIAL_PROMPTS_MAX = 3
+INITIAL_PROMPT_CHARS = 2000
 HEX_RE = re.compile(r"0x[0-9A-Fa-f]{2,16}\b")
 WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 _STOPWORDS = frozenset(
@@ -292,9 +297,16 @@ def analyze(path: str = "", recent_window: int = 30,
                             st.recent_tests_pass = True
             else:
                 # A genuine human turn. Track the last substantive one.
+                # Harness-injected entries (compaction summaries, meta
+                # caveats) are not the user's voice — never capture them.
+                if entry.get("isCompactSummary") or entry.get("isMeta"):
+                    continue
                 text = "\n".join(_block_text(b) for b in blocks).strip()
                 if text and not text.startswith("/") and "<command-name>" not in text:
                     st.last_user_task = text[:500]
+                    if len(st.initial_user_prompts) < INITIAL_PROMPTS_MAX:
+                        st.initial_user_prompts.append(
+                            text[:INITIAL_PROMPT_CHARS])
                     if is_recent:
                         st.recent_words |= _content_words(text)
                     if CORRECTION_RE.search(text):
@@ -418,7 +430,12 @@ BASE_SCHEMA = (
     "if purely procedural, but anything stating intent, scope, constraints, "
     "or preferences is quoted exactly). Copy identifiers, paths, commands, "
     "error strings, and numeric "
-    "constants verbatim -- never paraphrase them. Keep anything that took "
+    "constants verbatim -- never paraphrase them. If the transcript already "
+    "contains a prior compaction summary, treat its GOAL and USER "
+    "CONSTRAINTS & PREFERENCES sections as canonical: carry them forward "
+    "UNCHANGED (including every quoted user prompt) rather than "
+    "re-summarizing them -- each re-summarization pass decays the founding "
+    "intent. Keep anything that took "
     "multiple tool calls to discover and cannot be re-derived by re-reading "
     "the repo; drop anything recoverable from disk (file contents, applied "
     "diffs, passing test output, old reasoning). If unsure whether to keep "
@@ -479,6 +496,12 @@ def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:
         "",
         "Session-specific anchors (seed the sections above with these):",
     ]
+    if st.initial_user_prompts:
+        lines.append("- The ORIGINAL user request(s) that framed this "
+                     "session (quote these VERBATIM in GOAL; never "
+                     "paraphrase):")
+        for p in st.initial_user_prompts:
+            lines.append("    * " + p.replace("\n", " "))
     if st.last_user_task:
         lines.append(f"- The current task/goal: {st.last_user_task[:1500]}")
     if st.edited_files:

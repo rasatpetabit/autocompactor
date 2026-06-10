@@ -246,6 +246,22 @@ def analyze(path: str = "", recent_window: int = 30) -> transcript_lib.Transcrip
     st.entries = active
     st.compaction_count = compaction_count
 
+    # Founding-goal capture walks the FULL path, not the active segment:
+    # the prompts that framed the session live before the last compaction.
+    for entry in full_path:
+        if (len(st.initial_user_prompts)
+                >= transcript_lib.INITIAL_PROMPTS_MAX):
+            break
+        if entry.get("type") == "compaction":
+            continue
+        msg = _message(entry)
+        if msg.get("role") != "user":
+            continue
+        text = _message_text(msg).strip()
+        if text and not text.startswith("/") and "<command-name>" not in text:
+            st.initial_user_prompts.append(
+                text[:transcript_lib.INITIAL_PROMPT_CHARS])
+
     edited, read = {}, {}
     pending_bash = {}
     recent_result_flags = []
