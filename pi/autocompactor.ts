@@ -100,18 +100,24 @@ export default function autocompactor(pi: ExtensionAPI) {
       lastRecTokens = usage.tokens
 
       if (mode() === "actuate" && !selfTriggered) {
-        const prep = await bridge(pi, ctx, "prepare", ["--trigger", "actuate"])
+        // Set selfTriggered BEFORE the prepare call to block overlapping
+        // agent_end handlers from both triggering compaction.
         selfTriggered = true
+        const prep = await bridge(pi, ctx, "prepare", ["--trigger", "actuate"])
         ctx.compact({
           customInstructions: prep?.customInstructions,
           onComplete: () => { selfTriggered = false },
           onError: () => { selfTriggered = false },
         })
       } else {
+        // advise mode: show recommendation with context state
+        const ctxNote = verdict.contextState
+          ? ` [${verdict.contextState}]`
+          : ``
         pi.sendMessage(
           {
             customType: "autocompactor.advice",
-            content: `autocompactor: compaction recommended — ${verdict.reason ?? "boundary reached"} (context ~${verdict.context_tokens ?? usage.tokens} of ${window}). Run /compact.`,
+            content: `autocompactor: compaction recommended — ${verdict.reason ?? "boundary reached"} (context ~${verdict.context_tokens ?? usage.tokens} of ${window}). Run /compact.${ctxNote}`,
             display: true,
           },
           { deliverAs: "nextTurn" },
@@ -126,14 +132,32 @@ export default function autocompactor(pi: ExtensionAPI) {
   // optional cancel-and-retrigger enrichment, default OFF.
   pi.on("session_before_compact", async (_event, ctx) => {
     try {
-      const prepPromise = bridge(pi, ctx, "prepare", ["--trigger", "native"])
+      const usage = ctx.getContextUsage()
+      // Fire-and-forget prepare for backup + artifacts + founding-goal.
+      // Non-intercept: do NOT await — native compaction proceeds immediately.
+      // The before-contextState is derived from TS-available usage data;
+      // the Python analysis (phase, signals, stale_frac) is too slow to
+      // block the handler for.
       if (!interceptEnabled() || selfTriggered) {
-        void prepPromise
+        void bridge(pi, ctx, "prepare", ["--trigger", "native"])
+        if (usage && usage.tokens != null) {
+          const window = (usage.contextWindow ?? 0) - RESERVE_FALLBACK
+          const occ = window > 0 ? (usage.tokens / window) : 0
+          pi.sendMessage(
+            {
+              customType: "autocompactor.before",
+              content: `[autocompactor] Compacting — ${usage.tokens?.toLocaleString() ?? "?"} tokens (${occ.toFixed(0)}% of ${window.toLocaleString()}).`,
+              display: true,
+            },
+            { deliverAs: "nextTurn" },
+          )
+        }
         return
       }
-      const prep = await prepPromise
+      // Intercept mode: cancel native compaction and re-trigger with
+      // our customInstructions. SelfTriggered is already true here.
+      const prep = await bridge(pi, ctx, "prepare", ["--trigger", "native"])
       if (!prep?.customInstructions) return
-      selfTriggered = true
       ctx.compact({
         customInstructions: prep.customInstructions,
         onComplete: () => { selfTriggered = false },
@@ -145,11 +169,15 @@ export default function autocompactor(pi: ExtensionAPI) {
     }
   })
 
-  // session_compact: re-inject the artifact digest as a persisted one-shot.
+  // session_compact: re-inject the artifact digest as a persisted one-shot,
+  // and show the after-compaction context state to the user.
   pi.on("session_compact", async (_event, ctx) => {
     try {
       const inj = await bridge(pi, ctx, "reinject")
       if (!inj?.text) return
+
+      // Artifact digest (persisted in context for the model — display: false
+      // keeps it out of the user-facing chat history)
       pi.sendMessage(
         {
           customType: inj.customType ?? "autocompactor.digest",
@@ -158,6 +186,18 @@ export default function autocompactor(pi: ExtensionAPI) {
         },
         { deliverAs: "nextTurn" },
       )
+
+      // After-compaction context overview (visible to the user)
+      if (inj.contextState) {
+        pi.sendMessage(
+          {
+            customType: "autocompactor.after",
+            content: `[autocompactor] Done — ${inj.contextState}.`,
+            display: true,
+          },
+          { deliverAs: "nextTurn" },
+        )
+      }
     } catch {
       /* never break Pi */
     }

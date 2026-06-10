@@ -485,6 +485,39 @@ def detect_phase(st: TranscriptStats) -> str:
     return "exploration"
 
 
+def build_context_state(st: TranscriptStats, window: float = 0.0,
+                        harness: str = "claude") -> str:
+    """Produce a concise before-compaction context overview for human display
+    and/or inclusion in compaction instructions.
+
+    Returns a multi-line string with token counts, occupancy, phase, active
+    signals, and key session facts.  Same function used by both the Claude
+    precompact hook (embedded in instructions) and the Pi bridge (emitted as
+    a separate JSON field so the TS shim can post it as a visible message).
+    """
+    phase = detect_phase(st)
+    signals = active_signals(st)
+    lines = [
+        f"Context: {st.context_tokens:,} tokens",
+        f"Phase: {phase}",
+    ]
+    if window > 0:
+        occ = st.context_tokens / window
+        lines.append(f"Occupancy: {occ:.0%}")
+    stale_frac = (st.stale_tool_chars / st.total_tool_chars
+                  if st.total_tool_chars else 0.0)
+    lines.append(f"Stale tool output: {stale_frac:.0%}")
+    lines.append(f"Edited files: {len(st.edited_files)}")
+    lines.append(f"Read files: {len(st.read_files)}")
+    if signals:
+        gating = [desc for name, desc in signals if name not in observe_only()]
+        lines.append(f"Active signals: {', '.join(gating) if gating else 'none'}")
+    else:
+        lines.append("Active signals: none")
+    lines.append(f"Compaction count: {st.compaction_count}")
+    return " | ".join(lines)
+
+
 def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:
     """Compose compaction custom instructions from transcript analysis:
     structured-handoff schema + phase addendum + session-specific facts."""

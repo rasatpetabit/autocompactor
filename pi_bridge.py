@@ -179,6 +179,11 @@ def cmd_evaluate(opts: dict) -> dict:
         "suppressed_by_cooldown": recommend and suppressed,
     }, harness=HARNESS)
 
+    # Pre-compaction context overview — for the TS shim to display and
+    # for the compaction instructions to embed.
+    ctx_state = transcript_lib.build_context_state(
+        st, window=window, harness=HARNESS)
+
     if recommend and not suppressed:
         # Stage instructions for prepare and start the cooldown.
         state.update({
@@ -186,6 +191,7 @@ def cmd_evaluate(opts: dict) -> dict:
             "staged_instructions":
                 transcript_lib.build_preservation_instructions(
                     st, opts.get("cwd", "")),
+            "context_state": ctx_state,
         })
         _save_state(session_id, state)
 
@@ -200,7 +206,8 @@ def cmd_evaluate(opts: dict) -> dict:
 
     return {"recommend": bool(recommend and not suppressed),
             "reason": reason,
-            "context_tokens": context_tokens}
+            "context_tokens": context_tokens,
+            "contextState": ctx_state}
 
 
 def cmd_prepare(opts: dict) -> dict:
@@ -260,6 +267,15 @@ def cmd_prepare(opts: dict) -> dict:
     ])
     _save_state(session_id, state)
 
+    # Pre-compaction context overview — produced at prepare time so it
+    # reflects the exact state when compaction starts (not when evaluate
+    # fired, which may be several turns earlier).
+    effective_window = float(max(
+        int(env_f("WINDOW", 200_000)) - int(env_f("RESERVE", RESERVE_FALLBACK)),
+        1))
+    ctx_state = transcript_lib.build_context_state(
+        st, window=effective_window, harness=HARNESS)
+
     log_event({
         "type": "precompact", "session_id": session_id, "trigger": trigger,
         "context_tokens": st.context_tokens, "phase": phase,
@@ -267,11 +283,13 @@ def cmd_prepare(opts: dict) -> dict:
         "instr_chars": len(instructions), "artifact_chars": art_sizes,
     }, harness=HARNESS)
 
-    return {"customInstructions": instructions}
+    return {"customInstructions": instructions,
+            "contextState": ctx_state}
 
 
 def cmd_reinject(opts: dict) -> dict:
-    session_id = _session_id(opts.get("session", ""))
+    session = opts.get("session", "")
+    session_id = _session_id(session)
     arts = artifacts.load(session_id, harness=HARNESS)
     state = _load_state(session_id)
     digest = artifacts.build_digest(
@@ -284,10 +302,25 @@ def cmd_reinject(opts: dict) -> dict:
 
     if not digest:
         return {}
+
+    # Post-compaction context overview: re-analyze the session
+    # (which now has the compaction entry + truncated active segment)
+    # to get the post-compaction token count, phase, occupancy.
+    post_st = _analyze(session)
+    effective_window = float(max(
+        int(env_f("WINDOW", 200_000)) - int(env_f("RESERVE", RESERVE_FALLBACK)),
+        1))
+    post_state = transcript_lib.build_context_state(
+        post_st, window=effective_window, harness=HARNESS)
+
     log_event({"type": "reinject", "session_id": session_id,
                "digest_tokens": len(digest) // 4,
-               "artifact_keys": list(arts.keys())}, harness=HARNESS)
-    return {"text": digest, "customType": DIGEST_CUSTOM_TYPE}
+               "artifact_keys": list(arts.keys()),
+               "post_tokens": post_st.context_tokens,
+               "post_phase": transcript_lib.detect_phase(post_st)},
+              harness=HARNESS)
+    return {"text": digest, "customType": DIGEST_CUSTOM_TYPE,
+            "contextState": post_state}
 
 
 def main(argv: list) -> int:
