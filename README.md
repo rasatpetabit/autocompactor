@@ -54,6 +54,26 @@ Installer flags (all idempotent — safe to re-run any of them):
 | `--status` | Doctor: hooks registered? env keys present (and which are tuned away from defaults)? cron registered? state dir writable? newest nightly report age? CLI version vs the last nightly-validated one? |
 | `--remove` | Unregister hooks, delete `AUTOCOMPACTOR_*` env keys, remove the cron job. Leaves `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (a native Claude Code setting) with a note. |
 
+### Pi harness (optional)
+
+The same advisor runs inside the [Pi coding agent]
+(`@earendil-works/pi-coding-agent`) via a TypeScript extension that
+shells out to the same Python core. Separate installer, same idempotency
+rules:
+
+```bash
+python3 install_pi.py            # extension -> ~/.pi/agent/extensions/ (bridge path baked in)
+python3 install_pi.py --status   # doctor: placeholder rewritten? bridge reachable? version drift?
+python3 install_pi.py --remove   # delete only our shim + version pin
+```
+
+The installer copies `pi/autocompactor.ts` with this checkout's
+`pi_bridge.py` path rewritten in (a symlink can't carry the path), pins
+the Pi package version observed at install time, and never touches
+anything else under `~/.pi`. Restart Pi to load the extension. Pi-side
+state and telemetry live under `~/.autocompactor/pi/` (the Claude state
+dir is untouched).
+
 ## Tunables (environment variables)
 
 | Variable                  | Default | Meaning                                  |
@@ -69,6 +89,10 @@ Installer flags (all idempotent — safe to re-run any of them):
 | `AUTOCOMPACTOR_OBSERVE_ONLY` | `error_resolved,tests_pass,idle_gap` | Signals logged to telemetry but never allowed to justify a recommendation (defaults measured anti-predictive on real corpora). Set empty to restore full gating. |
 | `AUTOCOMPACTOR_ARTIFACT_BUDGET` | 1500 | Token budget for the post-compaction artifact digest. |
 | `AUTOCOMPACTOR_LLM`       | unset   | `1` = PreCompact also runs `claude -p --model haiku` over the transcript tail for a smarter must-preserve digest. Adds latency and its own (small) token cost. |
+| `AUTOCOMPACTOR_PI_MODE`   | `advise` | Pi only. `advise` = post a recommendation message; `actuate` = the extension calls `ctx.compact()` itself with the bridge-built instructions. Flip only after a day of clean Pi telemetry (see HANDOFF). |
+| `AUTOCOMPACTOR_PI_INTERCEPT` | unset | Pi only. `1` = cancel a native auto-compaction and re-trigger it enriched with our instructions. Default off; auto-disabled when `pi-custom-compactor` is configured. |
+| `AUTOCOMPACTOR_PI_<NAME>` | —       | Pi-specific override for any tunable above (e.g. `AUTOCOMPACTOR_PI_SOFT_PCT`); falls back to the generic `AUTOCOMPACTOR_<NAME>`, then the default. |
+| `AUTOCOMPACTOR_STATE_DIR` | unset   | Override the state root for BOTH harnesses (used by tests). Defaults: Claude `~/.claude/autocompactor`, Pi `~/.autocompactor/pi`. |
 
 ## Boundary signals detected
 
@@ -82,6 +106,11 @@ Installer flags (all idempotent — safe to re-run any of them):
 Observe-only (telemetry, never gating — measured anti-predictive on
 real corpora; see `AUTOCOMPACTOR_OBSERVE_ONLY`): test-suite success
 markers, debug-loop conclusion, long idle gap.
+
+On Pi the todo-completion signal is dormant (Pi has no TodoWrite
+analog), so boundary timing is carried by the commit, subagent-done,
+stale-output, and burn-rate signals; the registry is shared, so the
+signal simply never fires rather than being special-cased.
 
 ## Billing note
 
@@ -114,3 +143,24 @@ echo '{"session_id":"s1","transcript_path":"/path/to/real/session.jsonl","cwd":"
 
 Point it at a real transcript under `~/.claude/projects/` and confirm it
 emits JSON (or exits silently below threshold).
+
+### Full test matrix (Claude + Pi)
+
+One sequence runs every gate in the repo — the Claude compat baseline
+(unchanged from above) plus the Pi harness suites:
+
+```bash
+python3 -m pytest tests/ -q          # all harnesses' pytest cases
+bash tests/smoke_test.sh             # Claude hook contract, isolated HOME
+PI_SMOKE=1 bash tests/smoke_test_pi.sh  # Pi bridge contract, isolated HOME
+node --test 'pi/test/*.test.mjs'     # Pi TS shim against stubbed pi/ctx
+```
+
+Per-harness expectations: the first two commands are the 100%
+Claude-compatibility gate and must pass byte-identically with or without
+the Pi files present; `smoke_test_pi.sh` is a no-op (exit 0) unless
+`PI_SMOKE=1`, so plain CI runs are unaffected; the `node --test` suite
+transpiles `pi/autocompactor.ts` with esbuild on the fly and needs no
+Pi installation (note: pass the glob, not the bare directory — node 22
+resolves a positional directory as a module and fails). Run the full matrix before any commit that touches
+`pi_bridge.py`, `pi_session_lib.py`, `statedir.py`, or `pi/`.
