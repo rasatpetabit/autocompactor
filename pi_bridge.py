@@ -48,51 +48,12 @@ import artifacts                                   # noqa: E402
 import pi_session_lib                              # noqa: E402
 import statedir                                    # noqa: E402
 import transcript_lib                              # noqa: E402
+from config_lib import cfg                        # noqa: E402
 from stats import log_event                       # noqa: E402
 
 HARNESS = "pi"
 DIGEST_CUSTOM_TYPE = "autocompactor.digest"
-# This host pins Pi reserveTokens to 40k in settings (Pi default 16,384);
-# the shim passes the live value when it has one, this is the fallback.
 RESERVE_FALLBACK = 40_000
-
-
-def env_f(name: str, default: float) -> float:
-    """Float env with Pi-override chain: AUTOCOMPACTOR_PI_X, then
-    AUTOCOMPACTOR_X, then the default."""
-    for key in ("AUTOCOMPACTOR_PI_" + name, "AUTOCOMPACTOR_" + name):
-        raw = os.environ.get(key)
-        if raw:
-            try:
-                return float(raw)
-            except ValueError:
-                pass
-    return default
-
-
-def env_f_windowed(name: str, default: float, context_window: int) -> float:
-    """Window-aware env lookup: first check AUTOCOMPACTOR_PI_X_WIDE or
-    AUTOCOMPACTOR_X_WIDE for large windows (>=300k), then the plain name.
-
-    Lets you set AUTOCOMPACTOR_PI_HARD_PCT=0.90 for 256k models while
-    keeping AUTOCOMPACTOR_PI_HARD_PCT_WIDE=0.62 for 1M window models.
-    """
-    is_wide = context_window >= 300_000
-    # Window-specific override takes highest priority
-    wide_suffix = "_WIDE"
-    for prefix in ("AUTOCOMPACTOR_PI_", "AUTOCOMPACTOR_"):
-        if is_wide:
-            key = prefix + name + wide_suffix
-        else:
-            key = prefix + name
-        raw = os.environ.get(key)
-        if raw:
-            try:
-                return float(raw)
-            except ValueError:
-                pass
-    # Fall back to plain name (handles the case where only the base var is set)
-    return env_f(name, default)
 
 
 def _parse_args(argv: list) -> dict:
@@ -162,19 +123,19 @@ def cmd_evaluate(opts: dict) -> dict:
     if context_tokens is None:
         context_tokens = st.context_tokens
     context_window = _to_int(opts.get("context_window"),
-                             int(env_f("WINDOW", 200_000)))
+                             int(cfg.float("WINDOW", harness=HARNESS, default=200_000)))
     reserve = _to_int(opts.get("reserve"),
-                      int(env_f("RESERVE", RESERVE_FALLBACK)))
+                      int(cfg.float("RESERVE", harness=HARNESS, default=RESERVE_FALLBACK)))
     window = float(max(context_window - reserve, 1))
     occupancy = context_tokens / window
 
     # Window-aware thresholds: WIDE suffix for large windows (>=300k)
-    soft = env_f_windowed("SOFT_PCT", 0.40, context_window)
-    hard = env_f_windowed("HARD_PCT", 0.65, context_window)
-    cooldown = env_f("COOLDOWN", 25_000)
-    stale_frac_thr = env_f("STALE_FRAC", 0.50)
-    post_floor = env_f("POST_FLOOR", 70_000)
-    min_savings = env_f("MIN_SAVINGS", 30_000)
+    soft = cfg.float_windowed("SOFT_PCT", context_window, HARNESS, 0.40)
+    hard = cfg.float_windowed("HARD_PCT", context_window, HARNESS, 0.65)
+    cooldown = cfg.float("COOLDOWN", harness=HARNESS, default=25_000)
+    stale_frac_thr = cfg.float("STALE_FRAC", harness=HARNESS, default=0.50)
+    post_floor = cfg.float("POST_FLOOR", harness=HARNESS, default=70_000)
+    min_savings = cfg.float("MIN_SAVINGS", harness=HARNESS, default=30_000)
 
     state = _load_state(session_id)
     last_reco = state.get("last_reco_tokens", -10**9)
@@ -297,7 +258,7 @@ def cmd_prepare(opts: dict) -> dict:
     # reflects the exact state when compaction starts (not when evaluate
     # fired, which may be several turns earlier).
     effective_window = float(max(
-        int(env_f("WINDOW", 200_000)) - int(env_f("RESERVE", RESERVE_FALLBACK)),
+        int(cfg.float("WINDOW", harness=HARNESS, default=200_000)) - int(cfg.float("RESERVE", harness=HARNESS, default=RESERVE_FALLBACK)),
         1))
     ctx_state = transcript_lib.build_context_state(
         st, window=effective_window, harness=HARNESS)
@@ -319,7 +280,7 @@ def cmd_reinject(opts: dict) -> dict:
     arts = artifacts.load(session_id, harness=HARNESS)
     state = _load_state(session_id)
     digest = artifacts.build_digest(
-        arts, budget_tokens=int(env_f("ARTIFACT_BUDGET", 1500)),
+        arts, budget_tokens=int(cfg.float("ARTIFACT_BUDGET", harness=HARNESS, default=1500)),
         stats_line=state.get("last_compaction_stats", ""))
 
     state["pending_reinject"] = False
@@ -334,7 +295,7 @@ def cmd_reinject(opts: dict) -> dict:
     # to get the post-compaction token count, phase, occupancy.
     post_st = _analyze(session)
     effective_window = float(max(
-        int(env_f("WINDOW", 200_000)) - int(env_f("RESERVE", RESERVE_FALLBACK)),
+        int(cfg.float("WINDOW", harness=HARNESS, default=200_000)) - int(cfg.float("RESERVE", harness=HARNESS, default=RESERVE_FALLBACK)),
         1))
     post_state = transcript_lib.build_context_state(
         post_st, window=effective_window, harness=HARNESS)

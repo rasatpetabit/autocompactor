@@ -1,0 +1,19 @@
+{
+  "_comment": "autocompactor unified config. Synced to bashrc + Claude settings by sync_config.py.",
+
+  "WINDOW": 200000,
+  "SOFT_PCT": 0.40,
+  "HARD_PCT": 0.65,
+  "HARD_PCT_WIDE": 0.60,
+  "STALE_FRAC": 0.90,
+  "COOLDOWN": 20000,
+  "POST_FLOOR": 70000,
+  "MIN_SAVINGS": 30000,
+  "MAX_FULL_PARSE_MB": 8,
+  "OBSERVE_ONLY": "error_resolved,tests_pass,idle_gap",
+  "ARTIFACT_BUDGET": 1500,
+
+  "pi": {
+    "RESERVE": 40000
+  }
+}

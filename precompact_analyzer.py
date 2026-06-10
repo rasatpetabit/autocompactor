@@ -33,6 +33,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config_lib  # noqa: E402
 from transcript_lib import (analyze, active_signals,  # noqa: E402
                             build_preservation_instructions, detect_phase)
 import artifacts  # noqa: E402
@@ -158,7 +159,7 @@ def main() -> int:
     phase = detect_phase(st) if st else None
     if st is not None:
         try:
-            window = float(os.environ.get("AUTOCOMPACTOR_WINDOW", 200_000))
+            window = config_lib.cfg.float("WINDOW", default=200_000)
         except ValueError:
             window = 200_000.0
         # Same effective-window clamp as the monitor: sessions that never

@@ -37,7 +37,7 @@ Tunables via env (set in settings.json "env" or your shell):
   AUTOCOMPACTOR_STALE_FRAC    stale-tool-output frac  (default 0.50)
   AUTOCOMPACTOR_POST_FLOOR    est. post-compaction context (default 70000)
   AUTOCOMPACTOR_MIN_SAVINGS   min est. reclaim to recommend (default 30000)
-  AUTOCOMPACTOR_MAX_FULL_PARSE_MB  above this transcript size, parse only
+  MAX_FULL_PARSE_MB  above this transcript size, parse only
                               the post-boundary active segment (default 8)
 """
 
@@ -46,6 +46,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config_lib  # noqa: E402
 from transcript_lib import (analyze, active_signals,  # noqa: E402
                             build_preservation_instructions, detect_phase,
                             find_last_boundary_offset, observe_only)
@@ -54,12 +55,6 @@ from stats import log_event  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 
-
-def env_f(name, default):
-    try:
-        return float(os.environ.get(name, default))
-    except ValueError:
-        return float(default)
 
 
 def main() -> int:
@@ -74,14 +69,14 @@ def main() -> int:
     if not transcript or not os.path.exists(os.path.expanduser(transcript)):
         return 0
 
-    window = env_f("AUTOCOMPACTOR_WINDOW", 200_000)
-    soft = env_f("AUTOCOMPACTOR_SOFT_PCT", 0.40)
-    hard = env_f("AUTOCOMPACTOR_HARD_PCT", 0.65)
-    cooldown = env_f("AUTOCOMPACTOR_COOLDOWN", 25_000)
-    stale_frac_thr = env_f("AUTOCOMPACTOR_STALE_FRAC", 0.50)
-    post_floor = env_f("AUTOCOMPACTOR_POST_FLOOR", 70_000)
-    min_savings = env_f("AUTOCOMPACTOR_MIN_SAVINGS", 30_000)
-    max_full_mb = env_f("AUTOCOMPACTOR_MAX_FULL_PARSE_MB", 8)
+    window = config_lib.cfg.float("WINDOW", default=200_000)
+    soft = config_lib.cfg.float("AUTOCOMPACTOR_SOFT_PCT", default=0.40)
+    hard = config_lib.cfg.float("AUTOCOMPACTOR_HARD_PCT", default=0.65)
+    cooldown = config_lib.cfg.float("COOLDOWN", default=25_000)
+    stale_frac_thr = config_lib.cfg.float("AUTOCOMPACTOR_STALE_FRAC", default=0.50)
+    post_floor = config_lib.cfg.float("POST_FLOOR", default=70_000)
+    min_savings = config_lib.cfg.float("MIN_SAVINGS", default=30_000)
+    max_full_mb = config_lib.cfg.float("MAX_FULL_PARSE_MB", default=8)
 
     # Per-session state (cooldown, staged instructions, carried peak).
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -135,7 +130,7 @@ def main() -> int:
     # One-shot artifact re-injection on the first prompt after a compaction.
     if state.get("pending_reinject"):
         arts = artifacts.load(session_id)
-        budget = int(env_f("AUTOCOMPACTOR_ARTIFACT_BUDGET", 1500))
+        budget = int(config_lib.cfg.float("AUTOCOMPACTOR_ARTIFACT_BUDGET", default=1500))
         digest = artifacts.build_digest(
             arts, budget_tokens=budget,
             stats_line=state.get("last_compaction_stats", ""))
