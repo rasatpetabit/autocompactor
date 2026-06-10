@@ -9,6 +9,11 @@ directory is the rsync handoff. **Read HANDOFF.md first** — it contains
 the full decision record (including the pi-custom-compactor evaluation)
 and the prioritized open items.
 
+## Cross-cutting policies
+
+**Shell commands:** RTK is the default for all Bash invocations in `/srv/dev`. See [`AGENTS.md`](AGENTS.md) for the RTK shell-default policy and RTK reference (`/home/grojas/.claude/RTK.md`).
+
+
 ## Status (2026-06-10): INSTALLED, tuned to a 200k ceiling — see HANDOFF.md session log
 
 Hooks are registered user-wide in ~/.claude/settings.json and validated

@@ -5,7 +5,6 @@ backtest_*.log
 *.tgz
 
 # Tooling state
-.serena/
 __pycache__/
 *.pyc
 .pytest_cache/
