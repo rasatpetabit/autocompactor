@@ -300,12 +300,60 @@ artifacts (report*.json, backtest logs, the handoff tgz, .serena/) are
 gitignored — backtest reports reference real session paths and must
 never be pushed.
 
+Floor cuts executed 2026-06-10 (all four owner-approved):
+
+* Serena disabled until configured: four serena-hooks groups removed
+  from ~/.claude/settings.json (backup
+  settings.json.bak-pre-serena-disable-20260610) and the MCP server
+  entry removed from ~/.claude.json (backup
+  .claude.json.bak-pre-serena-disable-20260610). Restore:
+  `claude mcp add serena -s user -- serena start-mcp-server
+  --context=claude-code --project-from-cwd` + restore the hooks from
+  the settings backup.
+* Global config SPLIT per owner directive: multi-agent standardizable
+  policy moved to ~/AGENTS.md (file-convention rule called out there
+  and in CLAUDE.md; hindsight block untouched); ~/.claude/CLAUDE.md is
+  now Claude-specific only (AUQ, masterplan contracts, fluffmods
+  block verbatim, Claude Code tooling) + @~/AGENTS.md import.
+  25,153 -> 12,401 B CLAUDE.md + 6,313 B AGENTS.md. Backups:
+  CLAUDE.md.bak-pre-diet-20260610, AGENTS.md.bak-pre-split-20260610.
+* Dispatch policy UPGRADED (owner correction 2026-06-10): sonnet is no
+  longer the fallback — Claude is reserved for Opus/Fable-tier work.
+  Sub-frontier routes to skynet-qwen (any tier) or codex-5.5 (medium
+  mechanical, high/xhigh demanding); if neither fits, that is an ERROR
+  CONDITION — halt and AskUserQuestion; sonnet only on explicit user
+  override. Applied to both refs/subagent-models.md and the digest.
+* Global CLAUDE.md diet: AUQ
+  enforcement sections kept at full strength (owner caveat: past diets
+  regressed AUQ) and EXTENDED with a "rejected AUQ = DISCUSS signal"
+  section — a declined/Esc'd AskUserQuestion ("The user doesn't want
+  to proceed with this tool use", 356 occurrences in transcripts) is a
+  talk request, not consent; batched answers alongside a rejection are
+  suspect (UI auto-advances); batch only independent questions. The
+  Stop hook (auq-guard.sh) already counts a rejected AUQ as an AUQ, so
+  no hook change was needed. fluffmods-managed block kept verbatim.
+* subagent-models SessionStart injection -> digest: full ref stays at
+  ~/.claude/refs/subagent-models.md; injection swapped to
+  refs/subagent-models-digest.md (12,944 -> 2,300 B, ~-2.7k tok),
+  rewritten as a mandatory numbered pre-dispatch checklist encoding
+  the upgraded policy (HAIKU FORBIDDEN; qwen/codex-5.5 for all
+  sub-frontier work; sonnet = ERROR CONDITION until user override;
+  enumerate-before-asserting-absence) per owner caveat "strengthen
+  without making them unnecessarily long".
+* Plugin prune: of 19 enabledPlugins, transcript-wide invocation
+  counts showed 6 in active use (superpowers, masterplan, codex,
+  feature-dev, context7, cloudflare) — kept; 12 with zero invocations
+  disabled (claude-code-setup, claude-md-management, code-review,
+  code-simplifier, commit-commands, frontend-design, github, gemini,
+  pragma, rust-analyzer-lsp, security-guidance, skill-creator);
+  playwright was already off. Re-enable = one settings.json flip.
+
+Combined CLAUDE.md+digest cut ~5.2k tok off the ~53k interactive
+floor (~10% of all cache-read volume) before plugin savings.
+
 Open: confirm ~135k auto trigger under the 200k ceiling (tomorrow's
-nightly); execute approved floor cuts (global CLAUDE.md diet must NOT
-weaken AUQ enforcement — past diets regressed it; subagent-models
-digest must STRENGTHEN qwen-first; AUQ process overhaul: "Chat about
-this" surfaces as declined + auto-advance); topic_shift precision via
-prompt replay; --events reduction-by-phase after a few live days.
+nightly); topic_shift precision via prompt replay; --events
+reduction-by-phase after a few live days.
 
 ## Known limitations
 
