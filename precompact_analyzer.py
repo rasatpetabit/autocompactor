@@ -19,18 +19,22 @@ Does three things:
      artifact sizes, instruction source) as a systemMessage before the
      compaction runs, and reuses it as the post-compaction digest header.
 
-Optional deeper analysis: set AUTOCOMPACTOR_LLM=1 to shell out to
-`claude -p` with a cheap model for a smarter digest of what to preserve.
-Off by default — hooks have a 60s timeout and this adds latency + token
-spend of its own.
+Optional deeper analysis: set AUTOCOMPACTOR_LLM=1 to call a configured
+LLM for a smarter digest of what to preserve. Defaults remain off and,
+when enabled without overrides, use `claude -p --model haiku`. Local users
+can point this at an OpenAI-compatible endpoint or command via env vars
+without changing public repo defaults. Hooks have a 60s timeout, so this
+adds latency + token spend of its own.
 """
 
 import datetime
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config_lib  # noqa: E402
@@ -43,8 +47,98 @@ STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 BACKUP_DIR = os.path.join(STATE_DIR, "backups")
 
 
+def _env(name: str, default: str = "") -> str:
+    """Runtime LLM knobs are deliberately env-only by default.
+
+    Public config.json should not need to carry site-local model names,
+    endpoints, or command paths. AUTOCOMPACTOR_* values still let a user
+    opt in locally through Claude settings.json or the Pi shell env.
+    """
+    return os.environ.get(name, default)
+
+
+def _llm_timeout() -> float:
+    try:
+        return float(_env("AUTOCOMPACTOR_LLM_TIMEOUT", "45"))
+    except ValueError:
+        return 45.0
+
+
+def _openai_url(base: str) -> str:
+    base = base.rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    if base.endswith("/v1"):
+        return base + "/chat/completions"
+    return base + "/v1/chat/completions"
+
+
+def _llm_digest_openai(prompt: str, model: str, timeout: float) -> str:
+    base = _env("AUTOCOMPACTOR_LLM_BASE_URL")
+    if not base:
+        return ""
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Return terse bullets only."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "max_tokens": int(float(_env("AUTOCOMPACTOR_LLM_MAX_TOKENS", "512"))),
+    }
+    raw_extra = _env("AUTOCOMPACTOR_LLM_EXTRA_JSON")
+    if raw_extra:
+        try:
+            extra = json.loads(raw_extra)
+            if isinstance(extra, dict):
+                payload.update(extra)
+        except Exception:
+            pass
+    req = urllib.request.Request(
+        _openai_url(base),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + _env(
+                "AUTOCOMPACTOR_LLM_API_KEY",
+                _env("OPENAI_API_KEY", "EMPTY"),
+            ),
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return ((data.get("choices") or [{}])[0]
+            .get("message", {}).get("content", "").strip())
+
+
+def _llm_digest_command(prompt: str, model: str, timeout: float) -> str:
+    template = _env("AUTOCOMPACTOR_LLM_CMD")
+    if not template:
+        return ""
+    uses_prompt_arg = "{prompt}" in template
+    rendered = template.format(model=model, prompt=prompt)
+    cmd = shlex.split(rendered)
+    res = subprocess.run(
+        cmd,
+        input=None if uses_prompt_arg else prompt,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    return res.stdout.strip() if res.returncode == 0 else ""
+
+
+def _llm_digest_claude(prompt: str, model: str, timeout: float) -> str:
+    res = subprocess.run(
+        ["claude", "-p", "--model", model, prompt],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return res.stdout.strip() if res.returncode == 0 else ""
+
+
 def llm_digest(transcript_path: str) -> str:
-    """Optional: ask a cheap model what must survive compaction."""
+    """Optional: ask a configured cheap model what must survive compaction."""
     try:
         tail_lines = []
         with open(os.path.expanduser(transcript_path), encoding="utf-8") as fh:
@@ -56,11 +150,16 @@ def llm_digest(transcript_path: str) -> str:
             "decisions, working commands, unresolved errors. Bullets only.\n\n"
             + "".join(tail_lines)[-30_000:]
         )
-        res = subprocess.run(
-            ["claude", "-p", "--model", "haiku", prompt],
-            capture_output=True, text=True, timeout=45,
-        )
-        return res.stdout.strip() if res.returncode == 0 else ""
+        model = _env("AUTOCOMPACTOR_LLM_MODEL", "haiku")
+        timeout = _llm_timeout()
+        provider = _env("AUTOCOMPACTOR_LLM_PROVIDER", "claude").lower()
+        if _env("AUTOCOMPACTOR_LLM_CMD"):
+            provider = "command"
+        if provider in ("openai", "openai-compatible", "vllm"):
+            return _llm_digest_openai(prompt, model, timeout)
+        if provider == "command":
+            return _llm_digest_command(prompt, model, timeout)
+        return _llm_digest_claude(prompt, model, timeout)
     except Exception:
         return ""
 

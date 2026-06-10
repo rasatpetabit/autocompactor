@@ -22,6 +22,7 @@ sys.path.insert(0, REPO)
 
 import analyze_corpus  # noqa: E402
 import artifacts  # noqa: E402
+import precompact_analyzer as pa  # noqa: E402
 import transcript_lib as tl  # noqa: E402
 
 
@@ -585,6 +586,59 @@ def test_hooks_never_raise(script, payload, tmp_path):
     r = _run_hook(script, payload, tmp_path)
     assert r.returncode == 0, r.stderr
     assert "Traceback" not in r.stderr
+
+
+def test_llm_digest_default_uses_claude_haiku(tmp_path, monkeypatch):
+    t = tmp_path / "t.jsonl"
+    t.write_text(json.dumps(_human("keep this task")) + "\n")
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["kwargs"] = kwargs
+        return subprocess.CompletedProcess(cmd, 0, stdout="- keep task\n", stderr="")
+
+    monkeypatch.delenv("AUTOCOMPACTOR_LLM_CMD", raising=False)
+    monkeypatch.delenv("AUTOCOMPACTOR_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("AUTOCOMPACTOR_LLM_MODEL", raising=False)
+    monkeypatch.setattr(pa.subprocess, "run", fake_run)
+    assert pa.llm_digest(str(t)) == "- keep task"
+    assert seen["cmd"][:4] == ["claude", "-p", "--model", "haiku"]
+
+
+def test_llm_digest_openai_override_is_env_only(tmp_path, monkeypatch):
+    t = tmp_path / "t.jsonl"
+    t.write_text(json.dumps(_human("keep this task")) + "\n")
+    seen = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "- local model fact"}}]}).encode()
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        seen["timeout"] = timeout
+        seen["body"] = json.loads(req.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setenv("AUTOCOMPACTOR_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("AUTOCOMPACTOR_LLM_BASE_URL", "http://local.test:8000/v1")
+    monkeypatch.setenv("AUTOCOMPACTOR_LLM_MODEL", "local-test-model")
+    monkeypatch.setattr(pa.urllib.request, "urlopen", fake_urlopen)
+    assert pa.llm_digest(str(t)) == "- local model fact"
+    assert seen["url"] == "http://local.test:8000/v1/chat/completions"
+    assert seen["body"]["model"] == "local-test-model"
+
+
+def test_public_config_does_not_pin_site_local_llm_defaults():
+    cfg_text = open(os.path.join(REPO, "config.json"), encoding="utf-8").read().lower()
+    assert "llm_model" not in cfg_text
+    assert "llm_base_url" not in cfg_text
+    assert "192.168." not in cfg_text
 
 
 def test_analyzer_emits_instructions_and_artifacts(tmp_path):

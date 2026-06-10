@@ -16,9 +16,13 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 BRIDGE = REPO_ROOT / "pi_bridge.py"
 
 
-def run_bridge(args, state_dir, stdin_text=None):
+def run_bridge(args, state_dir, stdin_text=None, extra_env=None):
     """Run pi_bridge.py with the given args and state dir."""
-    env = {**os.environ, "AUTOCOMPACTOR_STATE_DIR": str(state_dir)}
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("AUTOCOMPACTOR_")}
+    env["AUTOCOMPACTOR_STATE_DIR"] = str(state_dir)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(BRIDGE)] + args,
         input=stdin_text,
@@ -131,6 +135,25 @@ def test_prepare_emits_instructions_and_side_effects(tmp_path):
     assert artifacts_dir.exists()
     json_files = list(artifacts_dir.glob("*.json"))
     assert len(json_files) >= 1
+
+
+def test_prepare_can_include_optional_llm_digest(tmp_path):
+    state_dir = tmp_path / "state"
+    fixture_path = REPO_ROOT / "tests" / "fixtures" / "pi" / "with_compaction.jsonl"
+    helper = tmp_path / "digest_helper.py"
+    helper.write_text("import sys; print('- helper fact')\n")
+    result = run_bridge(
+        ["prepare", "--session", str(fixture_path)],
+        state_dir,
+        extra_env={
+            "AUTOCOMPACTOR_LLM": "1",
+            "AUTOCOMPACTOR_LLM_CMD": f"{sys.executable} {helper}",
+        },
+    )
+    assert result.returncode == 0
+    data = parse_single_json(result.stdout)
+    assert "Additional must-preserve facts" in data["customInstructions"]
+    assert "- helper fact" in data["customInstructions"]
 
 
 def test_reinject_after_prepare(tmp_path):

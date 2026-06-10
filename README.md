@@ -88,7 +88,11 @@ dir is untouched).
 | `AUTOCOMPACTOR_MAX_FULL_PARSE_MB` | 8 | Above this transcript size, parse only the active segment after the last compaction boundary (bounds worst-case hook latency). |
 | `AUTOCOMPACTOR_OBSERVE_ONLY` | `error_resolved,tests_pass,idle_gap` | Signals logged to telemetry but never allowed to justify a recommendation (defaults measured anti-predictive on real corpora). Set empty to restore full gating. |
 | `AUTOCOMPACTOR_ARTIFACT_BUDGET` | 1500 | Token budget for the post-compaction artifact digest. |
-| `AUTOCOMPACTOR_LLM`       | unset   | `1` = PreCompact also runs `claude -p --model haiku` over the transcript tail for a smarter must-preserve digest. Adds latency and its own (small) token cost. |
+| `AUTOCOMPACTOR_LLM`       | unset   | `1` = PreCompact also runs a configured LLM over the transcript tail for a smarter must-preserve digest. Adds latency and its own token cost. |
+| `AUTOCOMPACTOR_LLM_PROVIDER` | `claude` | Optional digest provider: `claude` (default), `openai`/`vllm` for OpenAI-compatible endpoints, or `command` when `AUTOCOMPACTOR_LLM_CMD` is set. |
+| `AUTOCOMPACTOR_LLM_MODEL` | `haiku` | Model name for the optional digest. Site-local deployments can override this without changing public repo defaults. |
+| `AUTOCOMPACTOR_LLM_BASE_URL` | unset | Base URL for `openai`/`vllm` provider, e.g. an OpenAI-compatible `/v1` endpoint. |
+| `AUTOCOMPACTOR_LLM_CMD`   | unset   | Command template override for the optional digest. Supports `{model}` and `{prompt}` placeholders. |
 | `AUTOCOMPACTOR_PI_MODE`   | `advise` | Pi only. `advise` = post a recommendation message; `actuate` = the extension calls `ctx.compact()` itself with the bridge-built instructions. Flip only after a day of clean Pi telemetry (see HANDOFF). |
 | `AUTOCOMPACTOR_PI_INTERCEPT` | unset | Pi only. `1` = cancel a native auto-compaction and re-trigger it enriched with our instructions. Default off; auto-disabled when `pi-custom-compactor` is configured. |
 | `AUTOCOMPACTOR_PI_<NAME>` | —       | Pi-specific override for any tunable above (e.g. `AUTOCOMPACTOR_PI_SOFT_PCT`); falls back to the generic `AUTOCOMPACTOR_<NAME>`, then the default. |

@@ -49,6 +49,7 @@ import pi_session_lib                              # noqa: E402
 import statedir                                    # noqa: E402
 import transcript_lib                              # noqa: E402
 from config_lib import cfg                        # noqa: E402
+from precompact_analyzer import llm_digest        # noqa: E402
 from stats import log_event                       # noqa: E402
 
 HARNESS = "pi"
@@ -222,6 +223,11 @@ def cmd_prepare(opts: dict) -> dict:
     arts = artifacts.merge(artifacts.load(session_id, harness=HARNESS),
                            artifacts.extract(st))
     art_sizes = artifacts.save(session_id, arts, harness=HARNESS)
+    if os.environ.get("AUTOCOMPACTOR_LLM") == "1" and session:
+        extra = llm_digest(session)
+        if extra:
+            instructions += "\n\nAdditional must-preserve facts:\n" + extra
+
     # Founding-goal restatement (owner directive): every compaction pass
     # must restate the session's original prompts verbatim — staged
     # instructions may predate their capture, the old-wins artifact merge
