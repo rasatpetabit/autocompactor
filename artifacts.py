@@ -25,10 +25,19 @@ from __future__ import annotations
 import json
 import os
 
+import statedir
+
 ART_DIR = os.path.expanduser("~/.claude/autocompactor/artifacts")
 
 PRIORITY = ["corrections", "error_ledger", "working_commands",
             "hex_constants", "files"]
+
+
+def _artifact_dir(harness: str = "claude") -> str:
+    try:
+        return os.path.join(statedir.state_root(harness), "artifacts")
+    except Exception:
+        return ART_DIR
 
 
 def _dedupe_hex(items: list) -> list:
@@ -105,19 +114,23 @@ def extract(st) -> dict:
     }
 
 
-def save(session_id: str, arts: dict) -> dict:
+def save(session_id: str, arts: dict, harness: str = "claude") -> dict:
     """Persist; return per-artifact size accounting (chars ~ tokens*4)."""
-    os.makedirs(ART_DIR, exist_ok=True)
     sizes = {k: len(json.dumps(v)) for k, v in arts.items()}
-    with open(os.path.join(ART_DIR, f"{session_id}.json"), "w",
-              encoding="utf-8") as fh:
-        json.dump(arts, fh, indent=1)
-    return sizes
-
-
-def load(session_id: str) -> dict:
     try:
-        with open(os.path.join(ART_DIR, f"{session_id}.json"),
+        art_dir = _artifact_dir(harness)
+        os.makedirs(art_dir, exist_ok=True)
+        with open(os.path.join(art_dir, f"{session_id}.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(arts, fh, indent=1)
+        return sizes
+    except Exception:
+        return {}
+
+
+def load(session_id: str, harness: str = "claude") -> dict:
+    try:
+        with open(os.path.join(_artifact_dir(harness), f"{session_id}.json"),
                   encoding="utf-8") as fh:
             return json.load(fh)
     except Exception:
