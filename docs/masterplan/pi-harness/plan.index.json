@@ -1,351 +1,354 @@
 {
-  "schema_version": "6.0",
-  "tasks": [
-    {
-      "id": 1,
-      "description": "Author tests/test_compat_pins.py as the Wave-0 freeze-the-present guardrail every later subsystem's 'full suite green' gate leans on. Pure read of existing modules plus one new test file; touch NO existing source. Pin four invariants of the current behavior: (1) the active_signals() name-set — assert the exact set of signal names the registry can emit (commit, tests_pass, todos_done, todo_step, error_resolved, subagent_done, idle_gap, stale_output, burn_rate, topic_shift) and that transcript_lib.OBSERVE_ONLY_DEFAULT == 'error_resolved,tests_pass,idle_gap'; (2) a golden build_preservation_instructions(st) output computed on the rich fixture (tests/fixtures/rich_transcript.jsonl) parsed via the library's normal stats path — capture the current string and assert byte-equality so any later refactor that changes summarization instructions is caught; (3) the claude state-dir default — assert context_monitor.STATE_DIR and precompact_analyzer.STATE_DIR both resolve to os.path.expanduser('~/.claude/autocompactor'); (4) the hook stdout top-level key schema — run the monitor and analyzer entrypoints against fixtures and assert each emitted JSON object's top-level keys are exactly the expected set (monitor recommendation: {'hookSpecificOutput','systemMessage'} or empty stdout when not recommending; analyzer: subset of {'hookSpecificOutput','systemMessage'} with hookSpecificOutput.hookEventName == 'PreCompact'). Design judgment is required in choosing how to capture the golden deterministically (stub out any cwd/time/env nondeterminism) and how to drive the hook entrypoints without raising into the hook path. All four pins live in one file, so they are one task — they cannot be split into disjoint-file parallel tasks. This task depends on nothing and must land in Wave 0 before any other subsystem; siblings reference it via deps:['compat.pins-suite'].",
-      "wave": 0,
-      "files": [
-        "tests/test_compat_pins.py"
-      ],
-      "verify_commands": [
-        "python3 -m pytest tests/test_compat_pins.py -q",
-        "python3 -m pytest tests/ -q",
-        "bash tests/smoke_test.sh"
-      ],
-      "codex": null,
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L95-L101",
-        "docs/masterplan/pi-harness/spec.md#L82-L91"
-      ]
-    },
-    {
-      "id": 2,
-      "description": "Add new sibling module statedir.py exposing state_root(harness) that namespaces autocompactor state roots: harness 'claude' (the default) resolves to ~/.claude/autocompactor UNCHANGED, harness 'pi' resolves to ~/.autocompactor/pi. Honor an AUTOCOMPACTOR_STATE_DIR env override when set. Self-contained, no other module imports it yet; downstream Pi subsystems consume this rather than re-touching shared files.",
-      "wave": 0,
-      "files": [
-        "statedir.py"
-      ],
-      "verify_commands": [
-        "python3 -c \"import statedir; assert statedir.state_root('claude').rstrip('/').endswith('.claude/autocompactor'), statedir.state_root('claude'); assert statedir.state_root('pi').rstrip('/').endswith('.autocompactor/pi'), statedir.state_root('pi'); print('ok')\"",
-        "python3 -c \"import os; os.environ['AUTOCOMPACTOR_STATE_DIR']='/tmp/acx'; import statedir; assert statedir.state_root('pi')=='/tmp/acx' or '/tmp/acx' in statedir.state_root('pi'); print('ok')\""
-      ],
-      "codex": "ok",
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L52-L53",
-        "docs/masterplan/pi-harness/spec.md#L104"
-      ]
-    },
-    {
-      "id": 3,
-      "description": "Thread the harness/state-dir seam through artifacts.py: keep module constant ART_DIR at its claude default (~/.claude/autocompactor/artifacts) so the wave-0 state-dir-default compat pin stays green, but resolve the artifacts directory via statedir.state_root + AUTOCOMPACTOR_STATE_DIR so save()/load() can target the Pi root when a harness/state-dir is selected. Byte-stable behavior for the existing claude install base. This edits pin-guarded entry-point source, so default resolution must remain exactly the claude path.",
-      "wave": 1,
-      "files": [
-        "artifacts.py"
-      ],
-      "verify_commands": [
-        "python3 -c \"import artifacts; assert artifacts.ART_DIR.rstrip('/').endswith('.claude/autocompactor/artifacts'), artifacts.ART_DIR; print('ok')\"",
-        "python3 -m pytest tests/ -q",
-        "bash tests/smoke_test.sh"
-      ],
-      "codex": "no",
-      "sensitive": true,
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L105-L107",
-        "docs/masterplan/pi-harness/spec.md#L40-L50"
-      ]
-    },
-    {
-      "id": 4,
-      "description": "Thread the seam through stats.py: keep module constant STATS_DIR at its claude default (~/.claude/autocompactor/stats) so the compat pin stays green, resolve the stats directory via statedir.state_root + AUTOCOMPACTOR_STATE_DIR, and add a new harness field on log_event defaulting to 'claude' so Pi events can route to the Pi state dir. Stays best-effort/never-raise and content-free. Edits pin-guarded entry-point source; the default path and existing event schema keys must remain unchanged for the claude base.",
-      "wave": 1,
-      "files": [
-        "stats.py"
-      ],
-      "verify_commands": [
-        "python3 -c \"import stats; assert stats.STATS_DIR.rstrip('/').endswith('.claude/autocompactor/stats'), stats.STATS_DIR; import inspect; assert 'harness' in inspect.getsource(stats); print('ok')\"",
-        "python3 -m pytest tests/ -q",
-        "bash tests/smoke_test.sh"
-      ],
-      "codex": "no",
-      "sensitive": true,
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L77-L80",
-        "docs/masterplan/pi-harness/spec.md#L108"
-      ]
-    },
-    {
-      "id": 5,
-      "description": "Add a --stats-dir flag to analyze_corpus.py that overrides the hardcoded ~/.claude/autocompactor/stats/events.jsonl path used by aggregate_events(), so the backtester's --events aggregation can read the Pi state dir. Default (flag absent) must resolve to the existing claude events path so the compat pin and current invocations stay byte-stable. Edits pin-guarded entry-point source.",
-      "wave": 1,
-      "files": [
-        "analyze_corpus.py"
-      ],
-      "verify_commands": [
-        "python3 analyze_corpus.py --help 2>&1 | grep -- --stats-dir",
-        "python3 -m pytest tests/ -q",
-        "bash tests/smoke_test.sh"
-      ],
-      "codex": "no",
-      "sensitive": true,
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L79-L80",
-        "docs/masterplan/pi-harness/spec.md#L109"
-      ]
-    },
-    {
-      "id": 6,
-      "description": "Add tests/test_statedir.py covering each seam: statedir.state_root claude/pi roots and AUTOCOMPACTOR_STATE_DIR override; artifacts and stats default constants unchanged at the claude paths; stats.log_event harness field defaults to 'claude' and routes to the resolved dir when harness/state-dir is set; analyze_corpus --stats-dir overrides the events path while the default stays the claude path. Run the full suite to confirm the compat gate stays green.",
-      "wave": 2,
-      "files": [
-        "tests/test_statedir.py"
-      ],
-      "verify_commands": [
-        "python3 -m pytest tests/test_statedir.py -q",
-        "python3 -m pytest tests/ -q",
-        "bash tests/smoke_test.sh"
-      ],
-      "codex": "no",
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L110",
-        "docs/masterplan/pi-harness/spec.md#L90-L91"
-      ]
-    },
-    {
-      "id": 7,
-      "description": "Create Pi v3 tree JSONL fixtures under tests/fixtures/pi/: a linear synthetic session, a branched session (multiple children of one parentId so the leaf->root walk is exercised), a session containing a type:\"compaction\" entry (so the active-segment cut after the last compaction is testable), and a small set of sanitized real-shape lines mirroring ~/.pi/agent/sessions/ entry shapes. Before authoring tool-call lines, verify the actual tool arg names (edit/write/read file_path-equivalent, bash command-equivalent, find/grep) against the installed package's dist/core/tools/*.d.ts so extraction patterns match real Pi output rather than guessed names.",
-      "wave": 0,
-      "files": [
-        "tests/fixtures/pi/"
-      ],
-      "verify_commands": [
-        "test -d tests/fixtures/pi",
-        "python3 -c \"import json,glob,sys; [json.loads(l) for f in glob.glob('tests/fixtures/pi/*.jsonl') for l in open(f) if l.strip()]; print('pi fixtures parse')\"",
-        "grep -rl '\"type\": *\"compaction\"' tests/fixtures/pi/",
-        "python3 -c \"import json,glob; assert any(any(json.loads(l).get('parentId') for l in open(f) if l.strip()) for f in glob.glob('tests/fixtures/pi/*.jsonl')), 'no parentId tree present'; print('tree shape ok')\""
-      ],
-      "codex": "no",
-      "spec_refs": [
-        "spec.md#L112-L124",
-        "spec.md#L51-L58"
-      ]
-    },
-    {
-      "id": 8,
-      "description": "Implement pi_session_lib.py: parse Pi v3 tree JSONL, perform a leaf->root walk to recover the active conversation path (sessions branch; the walk is mandatory), cut the active segment to entries after the last type:\"compaction\" on the leaf path, and normalize that segment into a transcript_lib.TranscriptStats consumed unchanged by active_signals/detect_phase/build_preservation_instructions/artifacts.extract. Reuse the harness-agnostic brain; only this producer is Pi-specific. No edits to existing source files. Extraction patterns (edited/read files, bash commands, errors) must use the Pi tool arg names confirmed from dist/core/tools/*.d.ts.",
-      "wave": 1,
-      "files": [
-        "pi_session_lib.py"
-      ],
-      "verify_commands": [
-        "python3 -c \"import pi_session_lib\"",
-        "python3 -c \"import pi_session_lib,transcript_lib; st=pi_session_lib.analyze('tests/fixtures/pi/branched.jsonl') if hasattr(pi_session_lib,'analyze') else pi_session_lib.load_pi('tests/fixtures/pi/branched.jsonl'); assert isinstance(st,transcript_lib.TranscriptStats); print('returns TranscriptStats')\"",
-        "python3 -m pytest tests/ -q",
-        "git status --porcelain transcript_lib.py context_monitor.py precompact_analyzer.py install.py nightly_eval.py artifacts.py stats.py | grep -q . && (echo 'existing source modified' && exit 1) || echo 'no existing source edits'"
-      ],
-      "codex": "no",
-      "spec_refs": [
-        "spec.md#L51-L58",
-        "spec.md#L112-L124"
-      ]
-    },
-    {
-      "id": 9,
-      "description": "Add tests/test_pi_session_lib.py: assert the leaf->root walk selects the active branch and ignores dead branches; assert the active segment begins after the last type:\"compaction\" entry; and run the parity check that a Pi fixture carrying the same logical content as a Claude fixture produces the same set of fired signals via active_signals() (the one-brain guarantee). Cover the no-compaction and single-line edge cases.",
-      "wave": 2,
-      "files": [
-        "tests/test_pi_session_lib.py"
-      ],
-      "verify_commands": [
-        "python3 -m pytest tests/test_pi_session_lib.py -q",
-        "python3 -m pytest tests/ -q"
-      ],
-      "codex": "no",
-      "spec_refs": [
-        "spec.md#L112-L124"
-      ]
-    },
-    {
-      "id": 10,
-      "description": "Implement pi_bridge.py: a never-raise JSON CLI with subcommands evaluate (occupancy via contextWindow-reserveTokens window + active_signals + cooldown state -> recommend JSON), prepare (backup + artifacts.extract + staged customInstructions), and reinject (digest JSON shaped for pi.sendMessage). It must always exit 0 and emit at most a single JSON object on stdout (or nothing), swallowing every exception and degrading silently. State roots come from statedir.py (Pi root ~/.autocompactor/pi) from the seams slice; cooldown state round-trips through that dir. No edits to existing source. The evaluate subcommand MUST also log a telemetry row via stats.log_event({'type':'monitor_eval', ..., 'harness':'pi'}) routed to the Pi state dir (the harness field threaded in seams.stats-statedir-harness) -- the spec's live-install verification greps ~/.autocompactor/pi/stats/events.jsonl for monitor_eval rows carrying harness:\"pi\", so the producer is this command.",
-      "wave": 2,
-      "files": [
-        "pi_bridge.py"
-      ],
-      "verify_commands": [
-        "python3 -c \"import pi_bridge\"",
-        "echo 'not json at all' | python3 pi_bridge.py evaluate; test $? -eq 0",
-        "python3 pi_bridge.py evaluate --session /nonexistent/path.jsonl; test $? -eq 0",
-        "python3 pi_bridge.py evaluate --session tests/fixtures/pi/linear.jsonl | python3 -c \"import sys,json; d=sys.stdin.read().strip(); json.loads(d) if d else None; print('single-json-or-empty ok')\"",
-        "python3 -m pytest tests/ -q"
-      ],
-      "codex": "no",
-      "sensitive": true,
-      "spec_refs": [
-        "spec.md#L56-L58",
-        "spec.md#L112-L124"
-      ]
-    },
-    {
-      "id": 11,
-      "description": "Add tests/test_pi_bridge.py: prove the never-raise contract end to end. Garbage stdin, a missing/unparseable session file, and an unknown subcommand all exit 0 with at most one JSON object (or empty) on stdout. Cooldown state writes then reads back across two evaluate calls (round-trip). evaluate on a near-ceiling fixture recommends; prepare emits backup+artifacts staging; reinject emits a digest object shaped for sendMessage.",
-      "wave": 3,
-      "files": [
-        "tests/test_pi_bridge.py"
-      ],
-      "verify_commands": [
-        "python3 -m pytest tests/test_pi_bridge.py -q",
-        "python3 -m pytest tests/ -q",
-        "bash tests/smoke_test.sh"
-      ],
-      "codex": "no",
-      "spec_refs": [
-        "spec.md#L112-L124"
-      ]
-    },
-    {
-      "id": 12,
-      "description": "Design and implement the logic-minimal Pi extension shim pi/autocompactor.ts (<~200 lines). This is taste/judgment work: decide the agent_end zero-spawn pre-gate (compare ctx.getContextUsage() occupancy against SOFT_PCT/MIN_SAVINGS plus an in-memory cooldown BEFORE any pi.exec, guarding the ctx.getContextUsage().tokens===null post-compaction case); only past the gate spawn pi.exec(\"python3\",[pi_bridge.py,\"evaluate\",...],{timeout:5000}). Wire session_before_compact to fire prepare fire-and-forget AND the env-gated AUTOCOMPACTOR_PI_INTERCEPT (default OFF) cancel-and-retrigger intercept. Wire session_compact to call bridge reinject then pi.sendMessage({customType:\"autocompactor.digest\"},{deliverAs:\"nextTurn\"}). Honor AUTOCOMPACTOR_PI_MODE=advise|actuate (ship advise/notify-only; actuate calls ctx.compact({customInstructions}) once under a reentrancy flag). try/catch every event handler so Pi never breaks if autocompactor or the bridge fails. The shim treats pi_bridge.py purely as a process boundary (CLI contract) and shares no files with piadapter.",
-      "wave": 3,
-      "files": [
-        "pi/autocompactor.ts"
-      ],
-      "verify_commands": [
-        "test -f pi/autocompactor.ts",
-        "npx --yes esbuild pi/autocompactor.ts > /dev/null",
-        "grep -q 'AUTOCOMPACTOR_PI_MODE' pi/autocompactor.ts",
-        "grep -q 'AUTOCOMPACTOR_PI_INTERCEPT' pi/autocompactor.ts",
-        "grep -q 'deliverAs' pi/autocompactor.ts",
-        "grep -Eq 'tokens === null|tokens===null|tokens == null' pi/autocompactor.ts"
-      ],
-      "codex": "no",
-      "spec_refs": [
-        "spec.md#L125-L135",
-        "spec.md#L59-L72"
-      ]
-    },
-    {
-      "id": 13,
-      "description": "Write pi/test/extension.test.mjs (node --test) exercising the shim against stubbed pi/ctx objects: assert the pre-gate skips spawning the bridge when occupancy is below SOFT_PCT/MIN_SAVINGS (spawn-skip), that the actuate path triggers ctx.compact exactly once and the reentrancy flag blocks a second concurrent compact, that all event handlers swallow errors when the bridge is absent or returns garbage (Pi never breaks), and that session_compact delivers the reinject digest via sendMessage with deliverAs:nextTurn. Must pass with `node --test`.",
-      "wave": 4,
-      "files": [
-        "pi/test/extension.test.mjs"
-      ],
-      "verify_commands": [
-        "node --test pi/test/extension.test.mjs"
-      ],
-      "codex": null,
-      "spec_refs": [
-        "spec.md#L130-L132"
-      ]
-    },
-    {
-      "id": 14,
-      "description": "Implement install_pi.py: idempotent copy/symlink of the shim into ~/.pi/agent/extensions/, pinning the validated Pi package version of @earendil-works/pi-coding-agent, with a --remove uninstall path. Mirror the existing install.py idempotency conventions (re-runnable, leaves unrelated files untouched, never raises into the host). Disjoint files from the shim; the validate run pins the version observed at install time.",
-      "wave": 4,
-      "files": [
-        "install_pi.py"
-      ],
-      "verify_commands": [
-        "python3 -m py_compile install_pi.py",
-        "python3 install_pi.py --help 2>/dev/null | grep -q -- '--remove' || grep -q -- '--remove' install_pi.py",
-        "grep -q 'extensions' install_pi.py"
-      ],
-      "codex": null,
-      "spec_refs": [
-        "spec.md#L133-L134",
-        "spec.md#L64"
-      ]
-    },
-    {
-      "id": 15,
-      "description": "Author tests/smoke_test_pi.sh, gated by PI_SMOKE=1 (no-op exit 0 when unset, mirroring how smoke_test.sh isolates HOME). In an isolated HOME with an AUTOCOMPACTOR_STATE_DIR pointed at a temp Pi root, drive end-to-end pi_bridge.py calls (evaluate -> prepare -> reinject) against the synthetic Pi v3 tree fixtures: assert evaluate recommends at a boundary fixture and stays quiet under cooldown, prepare writes backup + artifacts under the Pi state dir, and reinject emits a digest JSON object. Include the bridge-removed never-break case: invoke the bridge with garbage stdin and a missing session path and assert exit 0 with no stack trace, proving Pi can never be broken by an autocompactor failure.",
-      "wave": 3,
-      "files": [
-        "tests/smoke_test_pi.sh"
-      ],
-      "verify_commands": [
-        "PI_SMOKE=1 bash tests/smoke_test_pi.sh",
-        "bash -n tests/smoke_test_pi.sh",
-        "bash tests/smoke_test_pi.sh"
-      ],
-      "codex": "no",
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L137-L143"
-      ]
-    },
-    {
-      "id": 16,
-      "description": "Wire the full-matrix run so a single documented command runs the whole compat + Pi gate: pytest tests/ -q, bash tests/smoke_test.sh, node --test on pi/test, and PI_SMOKE=1 bash tests/smoke_test_pi.sh. Add it as a Smoke-test section addendum in README documenting the matrix command and the per-harness expectation, and ensure the Claude compat baseline (pytest + smoke) still passes unchanged. Decide whether the runner is a thin shell wrapper invoked from README or an inline documented sequence, keeping it byte-compatible with the existing single-harness instructions.",
-      "wave": 5,
-      "files": [
-        "README.md"
-      ],
-      "verify_commands": [
-        "python3 -m pytest tests/ -q",
-        "bash tests/smoke_test.sh",
-        "PI_SMOKE=1 bash tests/smoke_test_pi.sh",
-        "node --test pi/test"
-      ],
-      "codex": null,
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L140",
-        "docs/masterplan/pi-harness/spec.md#L90-L91"
-      ]
-    },
-    {
-      "id": 17,
-      "description": "Write the HANDOFF.md Pi sections: the architecture summary (additive adapters, statedir namespacing, advise-default actuator policy), the flip-to-actuate decision memo (advise ships now; actuate is a later deploy decision gated on Pi telemetry, with the AUTOCOMPACTOR_PI_MODE/INTERCEPT switches and reentrancy reasoning recorded), and the deferred/out-of-scope list (Claude plugin packaging, native-auto interception default-on, Pi backtester --harness pi, pi-custom-compactor compactionSpec integration, nightly Pi-version canary). Capture the verified ground-truth pins (validated Pi package version, reserveTokens override) so a future reader does not re-derive them.",
-      "wave": 5,
-      "files": [
-        "HANDOFF.md"
-      ],
-      "verify_commands": [
-        "grep -q 'flip-to-actuate' HANDOFF.md",
-        "grep -qi 'deferred' HANDOFF.md",
-        "grep -q '@earendil-works/pi-coding-agent' HANDOFF.md",
-        "grep -Eq 'reserveTokens.*40,?000|40,?000.*reserveTokens' HANDOFF.md"
-      ],
-      "codex": "no",
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L144-L145",
-        "docs/masterplan/pi-harness/spec.md#L156-L163"
-      ]
-    },
-    {
-      "id": 18,
-      "description": "Add the README Pi sections: install via install_pi.py, the AUTOCOMPACTOR_PI_MODE (advise|actuate) and AUTOCOMPACTOR_PI_INTERCEPT env vars and the Pi state-dir location (~/.autocompactor/pi) added to the tunables table, plus a Pi boundary-signals note covering the dormant-todo / commit / subagent_done / burn_rate carry. Keep the existing Claude-only tunables table and install instructions byte-stable except for the appended Pi rows.",
-      "wave": 6,
-      "files": [
-        "README.md"
-      ],
-      "verify_commands": [
-        "grep -q 'AUTOCOMPACTOR_PI_MODE' README.md",
-        "grep -q 'install_pi.py' README.md",
-        "grep -q 'AUTOCOMPACTOR_PI_INTERCEPT' README.md",
-        "grep -q '.autocompactor/pi' README.md"
-      ],
-      "codex": "no",
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L65-L80",
-        "docs/masterplan/pi-harness/spec.md#L86-L87"
-      ]
-    },
-    {
-      "id": 19,
-      "description": "FINAL owner-machine task (may be flagged for orchestrator-side execution). Run install_pi.py against the real ~/.pi in advise mode (AUTOCOMPACTOR_PI_MODE=advise), exercise a Pi session, and verify ~/.autocompactor/pi/stats/events.jsonl receives monitor_eval rows carrying harness:\"pi\". Confirm the Claude install base is untouched (hook command strings in ~/.claude/settings.json and ~/.claude/autocompactor state dir unchanged). This touches the live owner machine and the real Pi extensions dir, so it is owner-approval gated.",
-      "wave": 7,
-      "files": [],
-      "verify_commands": [
-        "test -f ~/.autocompactor/pi/stats/events.jsonl && grep -q '\"harness\": *\"pi\"' ~/.autocompactor/pi/stats/events.jsonl"
-      ],
-      "codex": "no",
-      "sensitive": true,
-      "spec_refs": [
-        "docs/masterplan/pi-harness/spec.md#L141-L143"
-      ]
-    }
-  ],
-  "plan_hash": "sha256:46cea64aee8064f3dabb90d0f4f963ef2523768d8e28f26dae04db678f7f65ac",
-  "generated_at": "2026-06-10T06:56:15.546Z"
+ "schema_version": "6.0",
+ "tasks": [
+  {
+   "id": 1,
+   "description": "Author tests/test_compat_pins.py as the Wave-0 freeze-the-present guardrail every later subsystem's 'full suite green' gate leans on. Pure read of existing modules plus one new test file; touch NO existing source. Pin four invariants of the current behavior: (1) the active_signals() name-set \u2014 assert the exact set of signal names the registry can emit (commit, tests_pass, todos_done, todo_step, error_resolved, subagent_done, idle_gap, stale_output, burn_rate, topic_shift) and that transcript_lib.OBSERVE_ONLY_DEFAULT == 'error_resolved,tests_pass,idle_gap'; (2) a golden build_preservation_instructions(st) output computed on the rich fixture (tests/fixtures/rich_transcript.jsonl) parsed via the library's normal stats path \u2014 capture the current string and assert byte-equality so any later refactor that changes summarization instructions is caught; (3) the claude state-dir default \u2014 assert context_monitor.STATE_DIR and precompact_analyzer.STATE_DIR both resolve to os.path.expanduser('~/.claude/autocompactor'); (4) the hook stdout top-level key schema \u2014 run the monitor and analyzer entrypoints against fixtures and assert each emitted JSON object's top-level keys are exactly the expected set (monitor recommendation: {'hookSpecificOutput','systemMessage'} or empty stdout when not recommending; analyzer: subset of {'hookSpecificOutput','systemMessage'} with hookSpecificOutput.hookEventName == 'PreCompact'). Design judgment is required in choosing how to capture the golden deterministically (stub out any cwd/time/env nondeterminism) and how to drive the hook entrypoints without raising into the hook path. All four pins live in one file, so they are one task \u2014 they cannot be split into disjoint-file parallel tasks. This task depends on nothing and must land in Wave 0 before any other subsystem; siblings reference it via deps:['compat.pins-suite'].",
+   "wave": 0,
+   "files": [
+    "tests/test_compat_pins.py"
+   ],
+   "verify_commands": [
+    "python3 -m pytest tests/test_compat_pins.py -q",
+    "python3 -m pytest tests/ -q",
+    "bash tests/smoke_test.sh"
+   ],
+   "codex": null,
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L95-L101",
+    "docs/masterplan/pi-harness/spec.md#L82-L91"
+   ]
+  },
+  {
+   "id": 2,
+   "description": "Add new sibling module statedir.py exposing state_root(harness) that namespaces autocompactor state roots: harness 'claude' (the default) resolves to ~/.claude/autocompactor UNCHANGED, harness 'pi' resolves to ~/.autocompactor/pi. Honor an AUTOCOMPACTOR_STATE_DIR env override when set. Self-contained, no other module imports it yet; downstream Pi subsystems consume this rather than re-touching shared files.",
+   "wave": 0,
+   "files": [
+    "statedir.py"
+   ],
+   "verify_commands": [
+    "python3 -c \"import statedir; assert statedir.state_root('claude').rstrip('/').endswith('.claude/autocompactor'), statedir.state_root('claude'); assert statedir.state_root('pi').rstrip('/').endswith('.autocompactor/pi'), statedir.state_root('pi'); print('ok')\"",
+    "python3 -c \"import os; os.environ['AUTOCOMPACTOR_STATE_DIR']='/tmp/acx'; import statedir; assert statedir.state_root('pi')=='/tmp/acx' or '/tmp/acx' in statedir.state_root('pi'); print('ok')\""
+   ],
+   "codex": "ok",
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L52-L53",
+    "docs/masterplan/pi-harness/spec.md#L104"
+   ]
+  },
+  {
+   "id": 3,
+   "description": "Thread the harness/state-dir seam through artifacts.py: keep module constant ART_DIR at its claude default (~/.claude/autocompactor/artifacts) so the wave-0 state-dir-default compat pin stays green, but resolve the artifacts directory via statedir.state_root + AUTOCOMPACTOR_STATE_DIR so save()/load() can target the Pi root when a harness/state-dir is selected. Byte-stable behavior for the existing claude install base. This edits pin-guarded entry-point source, so default resolution must remain exactly the claude path.",
+   "wave": 1,
+   "files": [
+    "artifacts.py"
+   ],
+   "verify_commands": [
+    "python3 -c \"import artifacts; assert artifacts.ART_DIR.rstrip('/').endswith('.claude/autocompactor/artifacts'), artifacts.ART_DIR; print('ok')\"",
+    "python3 -m pytest tests/ -q",
+    "bash tests/smoke_test.sh"
+   ],
+   "codex": "no",
+   "sensitive": true,
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L105-L107",
+    "docs/masterplan/pi-harness/spec.md#L40-L50"
+   ]
+  },
+  {
+   "id": 4,
+   "description": "Thread the seam through stats.py: keep module constant STATS_DIR at its claude default (~/.claude/autocompactor/stats) so the compat pin stays green, resolve the stats directory via statedir.state_root + AUTOCOMPACTOR_STATE_DIR, and add a new harness field on log_event defaulting to 'claude' so Pi events can route to the Pi state dir. Stays best-effort/never-raise and content-free. Edits pin-guarded entry-point source; the default path and existing event schema keys must remain unchanged for the claude base.",
+   "wave": 1,
+   "files": [
+    "stats.py"
+   ],
+   "verify_commands": [
+    "python3 -c \"import stats; assert stats.STATS_DIR.rstrip('/').endswith('.claude/autocompactor/stats'), stats.STATS_DIR; import inspect; assert 'harness' in inspect.getsource(stats); print('ok')\"",
+    "python3 -m pytest tests/ -q",
+    "bash tests/smoke_test.sh"
+   ],
+   "codex": "no",
+   "sensitive": true,
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L77-L80",
+    "docs/masterplan/pi-harness/spec.md#L108"
+   ]
+  },
+  {
+   "id": 5,
+   "description": "Add a --stats-dir flag to analyze_corpus.py that overrides the hardcoded ~/.claude/autocompactor/stats/events.jsonl path used by aggregate_events(), so the backtester's --events aggregation can read the Pi state dir. Default (flag absent) must resolve to the existing claude events path so the compat pin and current invocations stay byte-stable. Edits pin-guarded entry-point source.",
+   "wave": 1,
+   "files": [
+    "analyze_corpus.py"
+   ],
+   "verify_commands": [
+    "python3 analyze_corpus.py --help 2>&1 | grep -- --stats-dir",
+    "python3 -m pytest tests/ -q",
+    "bash tests/smoke_test.sh"
+   ],
+   "codex": "no",
+   "sensitive": true,
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L79-L80",
+    "docs/masterplan/pi-harness/spec.md#L109"
+   ]
+  },
+  {
+   "id": 6,
+   "description": "Add tests/test_statedir.py covering each seam: statedir.state_root claude/pi roots and AUTOCOMPACTOR_STATE_DIR override; artifacts and stats default constants unchanged at the claude paths; stats.log_event harness field defaults to 'claude' and routes to the resolved dir when harness/state-dir is set; analyze_corpus --stats-dir overrides the events path while the default stays the claude path. Run the full suite to confirm the compat gate stays green.",
+   "wave": 2,
+   "files": [
+    "tests/test_statedir.py"
+   ],
+   "verify_commands": [
+    "python3 -m pytest tests/test_statedir.py -q",
+    "python3 -m pytest tests/ -q",
+    "bash tests/smoke_test.sh"
+   ],
+   "codex": "no",
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L110",
+    "docs/masterplan/pi-harness/spec.md#L90-L91"
+   ]
+  },
+  {
+   "id": 7,
+   "description": "Create Pi v3 tree JSONL fixtures under tests/fixtures/pi/: a linear synthetic session, a branched session (multiple children of one parentId so the leaf->root walk is exercised), a session containing a type:\"compaction\" entry (so the active-segment cut after the last compaction is testable), and a small set of sanitized real-shape lines mirroring ~/.pi/agent/sessions/ entry shapes. Before authoring tool-call lines, verify the actual tool arg names (edit/write/read file_path-equivalent, bash command-equivalent, find/grep) against the installed package's dist/core/tools/*.d.ts so extraction patterns match real Pi output rather than guessed names.",
+   "wave": 0,
+   "files": [
+    "tests/fixtures/pi/linear.jsonl",
+    "tests/fixtures/pi/branched.jsonl",
+    "tests/fixtures/pi/with_compaction.jsonl",
+    "tests/fixtures/pi/real_shapes.jsonl"
+   ],
+   "verify_commands": [
+    "test -d tests/fixtures/pi",
+    "python3 -c \"import json,glob,sys; [json.loads(l) for f in glob.glob('tests/fixtures/pi/*.jsonl') for l in open(f) if l.strip()]; print('pi fixtures parse')\"",
+    "grep -rl '\"type\": *\"compaction\"' tests/fixtures/pi/",
+    "python3 -c \"import json,glob; assert any(any(json.loads(l).get('parentId') for l in open(f) if l.strip()) for f in glob.glob('tests/fixtures/pi/*.jsonl')), 'no parentId tree present'; print('tree shape ok')\""
+   ],
+   "codex": "no",
+   "spec_refs": [
+    "spec.md#L112-L124",
+    "spec.md#L51-L58"
+   ]
+  },
+  {
+   "id": 8,
+   "description": "Implement pi_session_lib.py: parse Pi v3 tree JSONL, perform a leaf->root walk to recover the active conversation path (sessions branch; the walk is mandatory), cut the active segment to entries after the last type:\"compaction\" on the leaf path, and normalize that segment into a transcript_lib.TranscriptStats consumed unchanged by active_signals/detect_phase/build_preservation_instructions/artifacts.extract. Reuse the harness-agnostic brain; only this producer is Pi-specific. No edits to existing source files. Extraction patterns (edited/read files, bash commands, errors) must use the Pi tool arg names confirmed from dist/core/tools/*.d.ts.",
+   "wave": 1,
+   "files": [
+    "pi_session_lib.py"
+   ],
+   "verify_commands": [
+    "python3 -c \"import pi_session_lib\"",
+    "python3 -c \"import pi_session_lib,transcript_lib; st=pi_session_lib.analyze('tests/fixtures/pi/branched.jsonl') if hasattr(pi_session_lib,'analyze') else pi_session_lib.load_pi('tests/fixtures/pi/branched.jsonl'); assert isinstance(st,transcript_lib.TranscriptStats); print('returns TranscriptStats')\"",
+    "python3 -m pytest tests/ -q",
+    "git status --porcelain transcript_lib.py context_monitor.py precompact_analyzer.py install.py nightly_eval.py artifacts.py stats.py | grep -q . && (echo 'existing source modified' && exit 1) || echo 'no existing source edits'"
+   ],
+   "codex": "no",
+   "spec_refs": [
+    "spec.md#L51-L58",
+    "spec.md#L112-L124"
+   ]
+  },
+  {
+   "id": 9,
+   "description": "Add tests/test_pi_session_lib.py: assert the leaf->root walk selects the active branch and ignores dead branches; assert the active segment begins after the last type:\"compaction\" entry; and run the parity check that a Pi fixture carrying the same logical content as a Claude fixture produces the same set of fired signals via active_signals() (the one-brain guarantee). Cover the no-compaction and single-line edge cases.",
+   "wave": 2,
+   "files": [
+    "tests/test_pi_session_lib.py"
+   ],
+   "verify_commands": [
+    "python3 -m pytest tests/test_pi_session_lib.py -q",
+    "python3 -m pytest tests/ -q"
+   ],
+   "codex": "no",
+   "spec_refs": [
+    "spec.md#L112-L124"
+   ]
+  },
+  {
+   "id": 10,
+   "description": "Implement pi_bridge.py: a never-raise JSON CLI with subcommands evaluate (occupancy via contextWindow-reserveTokens window + active_signals + cooldown state -> recommend JSON), prepare (backup + artifacts.extract + staged customInstructions), and reinject (digest JSON shaped for pi.sendMessage). It must always exit 0 and emit at most a single JSON object on stdout (or nothing), swallowing every exception and degrading silently. State roots come from statedir.py (Pi root ~/.autocompactor/pi) from the seams slice; cooldown state round-trips through that dir. No edits to existing source. The evaluate subcommand MUST also log a telemetry row via stats.log_event({'type':'monitor_eval', ..., 'harness':'pi'}) routed to the Pi state dir (the harness field threaded in seams.stats-statedir-harness) -- the spec's live-install verification greps ~/.autocompactor/pi/stats/events.jsonl for monitor_eval rows carrying harness:\"pi\", so the producer is this command.",
+   "wave": 2,
+   "files": [
+    "pi_bridge.py"
+   ],
+   "verify_commands": [
+    "python3 -c \"import pi_bridge\"",
+    "echo 'not json at all' | python3 pi_bridge.py evaluate; test $? -eq 0",
+    "python3 pi_bridge.py evaluate --session /nonexistent/path.jsonl; test $? -eq 0",
+    "python3 pi_bridge.py evaluate --session tests/fixtures/pi/linear.jsonl | python3 -c \"import sys,json; d=sys.stdin.read().strip(); json.loads(d) if d else None; print('single-json-or-empty ok')\"",
+    "python3 -m pytest tests/ -q"
+   ],
+   "codex": "no",
+   "sensitive": true,
+   "spec_refs": [
+    "spec.md#L56-L58",
+    "spec.md#L112-L124"
+   ]
+  },
+  {
+   "id": 11,
+   "description": "Add tests/test_pi_bridge.py: prove the never-raise contract end to end. Garbage stdin, a missing/unparseable session file, and an unknown subcommand all exit 0 with at most one JSON object (or empty) on stdout. Cooldown state writes then reads back across two evaluate calls (round-trip). evaluate on a near-ceiling fixture recommends; prepare emits backup+artifacts staging; reinject emits a digest object shaped for sendMessage.",
+   "wave": 3,
+   "files": [
+    "tests/test_pi_bridge.py"
+   ],
+   "verify_commands": [
+    "python3 -m pytest tests/test_pi_bridge.py -q",
+    "python3 -m pytest tests/ -q",
+    "bash tests/smoke_test.sh"
+   ],
+   "codex": "no",
+   "spec_refs": [
+    "spec.md#L112-L124"
+   ]
+  },
+  {
+   "id": 12,
+   "description": "Design and implement the logic-minimal Pi extension shim pi/autocompactor.ts (<~200 lines). This is taste/judgment work: decide the agent_end zero-spawn pre-gate (compare ctx.getContextUsage() occupancy against SOFT_PCT/MIN_SAVINGS plus an in-memory cooldown BEFORE any pi.exec, guarding the ctx.getContextUsage().tokens===null post-compaction case); only past the gate spawn pi.exec(\"python3\",[pi_bridge.py,\"evaluate\",...],{timeout:5000}). Wire session_before_compact to fire prepare fire-and-forget AND the env-gated AUTOCOMPACTOR_PI_INTERCEPT (default OFF) cancel-and-retrigger intercept. Wire session_compact to call bridge reinject then pi.sendMessage({customType:\"autocompactor.digest\"},{deliverAs:\"nextTurn\"}). Honor AUTOCOMPACTOR_PI_MODE=advise|actuate (ship advise/notify-only; actuate calls ctx.compact({customInstructions}) once under a reentrancy flag). try/catch every event handler so Pi never breaks if autocompactor or the bridge fails. The shim treats pi_bridge.py purely as a process boundary (CLI contract) and shares no files with piadapter.",
+   "wave": 3,
+   "files": [
+    "pi/autocompactor.ts"
+   ],
+   "verify_commands": [
+    "test -f pi/autocompactor.ts",
+    "npx --yes esbuild pi/autocompactor.ts > /dev/null",
+    "grep -q 'AUTOCOMPACTOR_PI_MODE' pi/autocompactor.ts",
+    "grep -q 'AUTOCOMPACTOR_PI_INTERCEPT' pi/autocompactor.ts",
+    "grep -q 'deliverAs' pi/autocompactor.ts",
+    "grep -Eq 'tokens === null|tokens===null|tokens == null' pi/autocompactor.ts"
+   ],
+   "codex": "no",
+   "spec_refs": [
+    "spec.md#L125-L135",
+    "spec.md#L59-L72"
+   ]
+  },
+  {
+   "id": 13,
+   "description": "Write pi/test/extension.test.mjs (node --test) exercising the shim against stubbed pi/ctx objects: assert the pre-gate skips spawning the bridge when occupancy is below SOFT_PCT/MIN_SAVINGS (spawn-skip), that the actuate path triggers ctx.compact exactly once and the reentrancy flag blocks a second concurrent compact, that all event handlers swallow errors when the bridge is absent or returns garbage (Pi never breaks), and that session_compact delivers the reinject digest via sendMessage with deliverAs:nextTurn. Must pass with `node --test`.",
+   "wave": 4,
+   "files": [
+    "pi/test/extension.test.mjs"
+   ],
+   "verify_commands": [
+    "node --test pi/test/extension.test.mjs"
+   ],
+   "codex": null,
+   "spec_refs": [
+    "spec.md#L130-L132"
+   ]
+  },
+  {
+   "id": 14,
+   "description": "Implement install_pi.py: idempotent copy/symlink of the shim into ~/.pi/agent/extensions/, pinning the validated Pi package version of @earendil-works/pi-coding-agent, with a --remove uninstall path. Mirror the existing install.py idempotency conventions (re-runnable, leaves unrelated files untouched, never raises into the host). Disjoint files from the shim; the validate run pins the version observed at install time.",
+   "wave": 4,
+   "files": [
+    "install_pi.py"
+   ],
+   "verify_commands": [
+    "python3 -m py_compile install_pi.py",
+    "python3 install_pi.py --help 2>/dev/null | grep -q -- '--remove' || grep -q -- '--remove' install_pi.py",
+    "grep -q 'extensions' install_pi.py"
+   ],
+   "codex": null,
+   "spec_refs": [
+    "spec.md#L133-L134",
+    "spec.md#L64"
+   ]
+  },
+  {
+   "id": 15,
+   "description": "Author tests/smoke_test_pi.sh, gated by PI_SMOKE=1 (no-op exit 0 when unset, mirroring how smoke_test.sh isolates HOME). In an isolated HOME with an AUTOCOMPACTOR_STATE_DIR pointed at a temp Pi root, drive end-to-end pi_bridge.py calls (evaluate -> prepare -> reinject) against the synthetic Pi v3 tree fixtures: assert evaluate recommends at a boundary fixture and stays quiet under cooldown, prepare writes backup + artifacts under the Pi state dir, and reinject emits a digest JSON object. Include the bridge-removed never-break case: invoke the bridge with garbage stdin and a missing session path and assert exit 0 with no stack trace, proving Pi can never be broken by an autocompactor failure.",
+   "wave": 3,
+   "files": [
+    "tests/smoke_test_pi.sh"
+   ],
+   "verify_commands": [
+    "PI_SMOKE=1 bash tests/smoke_test_pi.sh",
+    "bash -n tests/smoke_test_pi.sh",
+    "bash tests/smoke_test_pi.sh"
+   ],
+   "codex": "no",
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L137-L143"
+   ]
+  },
+  {
+   "id": 16,
+   "description": "Wire the full-matrix run so a single documented command runs the whole compat + Pi gate: pytest tests/ -q, bash tests/smoke_test.sh, node --test on pi/test, and PI_SMOKE=1 bash tests/smoke_test_pi.sh. Add it as a Smoke-test section addendum in README documenting the matrix command and the per-harness expectation, and ensure the Claude compat baseline (pytest + smoke) still passes unchanged. Decide whether the runner is a thin shell wrapper invoked from README or an inline documented sequence, keeping it byte-compatible with the existing single-harness instructions.",
+   "wave": 5,
+   "files": [
+    "README.md"
+   ],
+   "verify_commands": [
+    "python3 -m pytest tests/ -q",
+    "bash tests/smoke_test.sh",
+    "PI_SMOKE=1 bash tests/smoke_test_pi.sh",
+    "node --test pi/test"
+   ],
+   "codex": null,
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L140",
+    "docs/masterplan/pi-harness/spec.md#L90-L91"
+   ]
+  },
+  {
+   "id": 17,
+   "description": "Write the HANDOFF.md Pi sections: the architecture summary (additive adapters, statedir namespacing, advise-default actuator policy), the flip-to-actuate decision memo (advise ships now; actuate is a later deploy decision gated on Pi telemetry, with the AUTOCOMPACTOR_PI_MODE/INTERCEPT switches and reentrancy reasoning recorded), and the deferred/out-of-scope list (Claude plugin packaging, native-auto interception default-on, Pi backtester --harness pi, pi-custom-compactor compactionSpec integration, nightly Pi-version canary). Capture the verified ground-truth pins (validated Pi package version, reserveTokens override) so a future reader does not re-derive them.",
+   "wave": 5,
+   "files": [
+    "HANDOFF.md"
+   ],
+   "verify_commands": [
+    "grep -q 'flip-to-actuate' HANDOFF.md",
+    "grep -qi 'deferred' HANDOFF.md",
+    "grep -q '@earendil-works/pi-coding-agent' HANDOFF.md",
+    "grep -Eq 'reserveTokens.*40,?000|40,?000.*reserveTokens' HANDOFF.md"
+   ],
+   "codex": "no",
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L144-L145",
+    "docs/masterplan/pi-harness/spec.md#L156-L163"
+   ]
+  },
+  {
+   "id": 18,
+   "description": "Add the README Pi sections: install via install_pi.py, the AUTOCOMPACTOR_PI_MODE (advise|actuate) and AUTOCOMPACTOR_PI_INTERCEPT env vars and the Pi state-dir location (~/.autocompactor/pi) added to the tunables table, plus a Pi boundary-signals note covering the dormant-todo / commit / subagent_done / burn_rate carry. Keep the existing Claude-only tunables table and install instructions byte-stable except for the appended Pi rows.",
+   "wave": 6,
+   "files": [
+    "README.md"
+   ],
+   "verify_commands": [
+    "grep -q 'AUTOCOMPACTOR_PI_MODE' README.md",
+    "grep -q 'install_pi.py' README.md",
+    "grep -q 'AUTOCOMPACTOR_PI_INTERCEPT' README.md",
+    "grep -q '.autocompactor/pi' README.md"
+   ],
+   "codex": "no",
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L65-L80",
+    "docs/masterplan/pi-harness/spec.md#L86-L87"
+   ]
+  },
+  {
+   "id": 19,
+   "description": "FINAL owner-machine task (may be flagged for orchestrator-side execution). Run install_pi.py against the real ~/.pi in advise mode (AUTOCOMPACTOR_PI_MODE=advise), exercise a Pi session, and verify ~/.autocompactor/pi/stats/events.jsonl receives monitor_eval rows carrying harness:\"pi\". Confirm the Claude install base is untouched (hook command strings in ~/.claude/settings.json and ~/.claude/autocompactor state dir unchanged). This touches the live owner machine and the real Pi extensions dir, so it is owner-approval gated.",
+   "wave": 7,
+   "files": [],
+   "verify_commands": [
+    "test -f ~/.autocompactor/pi/stats/events.jsonl && grep -q '\"harness\": *\"pi\"' ~/.autocompactor/pi/stats/events.jsonl"
+   ],
+   "codex": "no",
+   "sensitive": true,
+   "spec_refs": [
+    "docs/masterplan/pi-harness/spec.md#L141-L143"
+   ]
+  }
+ ],
+ "plan_hash": "sha256:46cea64aee8064f3dabb90d0f4f963ef2523768d8e28f26dae04db678f7f65ac",
+ "generated_at": "2026-06-10T06:56:15.546Z"
 }

@@ -140,7 +140,10 @@
     "key": "piadapter.fixtures",
     "description": "Create Pi v3 tree JSONL fixtures under tests/fixtures/pi/: a linear synthetic session, a branched session (multiple children of one parentId so the leaf->root walk is exercised), a session containing a type:\"compaction\" entry (so the active-segment cut after the last compaction is testable), and a small set of sanitized real-shape lines mirroring ~/.pi/agent/sessions/ entry shapes. Before authoring tool-call lines, verify the actual tool arg names (edit/write/read file_path-equivalent, bash command-equivalent, find/grep) against the installed package's dist/core/tools/*.d.ts so extraction patterns match real Pi output rather than guessed names.",
     "files": [
-     "tests/fixtures/pi/"
+     "tests/fixtures/pi/linear.jsonl",
+     "tests/fixtures/pi/branched.jsonl",
+     "tests/fixtures/pi/with_compaction.jsonl",
+     "tests/fixtures/pi/real_shapes.jsonl"
     ],
     "verify_commands": [
      "test -d tests/fixtures/pi",
