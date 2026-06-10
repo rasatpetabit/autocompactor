@@ -100,11 +100,22 @@ export default function autocompactor(pi: ExtensionAPI) {
       if (!verdict?.recommend) return
       lastRecTokens = usage.tokens
 
+      // Build a criteria-aware message from the verdict reason (which already
+      // includes occupancy + any gating signals from the bridge) or fall back
+      // to the raw token count.
+      const reason = verdict.reason ?? `${usage.tokens?.toLocaleString() ?? "?"} tokens`
+
       if (mode() === "actuate" && !selfTriggered) {
         // Set selfTriggered BEFORE the prepare call to block overlapping
         // agent_end handlers from both triggering compaction.
         selfTriggered = true
         compactionPreTokens = usage.tokens
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `autocompactor: criteria met — ${reason}; running compaction now.`,
+            "info",
+          )
+        }
         const prep = await bridge(pi, ctx, "prepare", ["--trigger", "actuate"])
         ctx.compact({
           customInstructions: prep?.customInstructions,
@@ -112,13 +123,16 @@ export default function autocompactor(pi: ExtensionAPI) {
           onError: () => { selfTriggered = false },
         })
       } else {
-        // advise mode: visible UI notification only. Do not queue visible
+        // advise mode OR actuate mode with reentrancy guard (compaction in
+        // flight): visible UI notification only. Do not queue visible
         // custom messages with nextTurn: they persist into the session and
         // can surface stale/duplicated advice on the next user prompt.
-        const reason = verdict.reason ?? `${usage.tokens?.toLocaleString() ?? "?"} tokens`
         if (ctx.hasUI) {
+          const modeTag = mode() === "actuate"
+            ? "compaction in progress"
+            : "advise mode"
           ctx.ui.notify(
-            `autocompactor: compaction recommended — ${reason}. Run /compact.`,
+            `autocompactor: criteria met — ${reason} (${modeTag}).`,
             "warning",
           )
         }

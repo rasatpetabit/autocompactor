@@ -137,10 +137,11 @@ test("advise mode: recommend -> UI notification, no queued visible message", asy
   assert.equal(pi.sent.length, 0, "visible advice must not be persisted via sendMessage")
   assert.equal(ctx.notifications.length, 1)
   assert.equal(ctx.notifications[0].type, "warning")
+  assert.match(ctx.notifications[0].message, /criteria met/)
   assert.match(ctx.notifications[0].message, /test boundary/)
-  assert.doesNotMatch(ctx.notifications[0].message, /Context:/)
-  assert.doesNotMatch(ctx.notifications[0].message, /Compaction count/)
-  assert.doesNotMatch(ctx.notifications[0].message, /Active signals/)
+  assert.match(ctx.notifications[0].message, /advise mode/)
+  assert.doesNotMatch(ctx.notifications[0].message, /running compaction/)
+  assert.doesNotMatch(ctx.notifications[0].message, /Run \/compact/)
 })
 
 test("actuate mode: compact exactly once; reentrancy blocks a concurrent second", async () => {
@@ -154,15 +155,25 @@ test("actuate mode: compact exactly once; reentrancy blocks a concurrent second"
     assert.equal(ctx1.compactCalls.length, 1, "first boundary actuates")
     assert.equal(ctx1.compactCalls[0].customInstructions, "PRESERVE THESE THINGS")
     assert.equal(typeof ctx1.compactCalls[0].onComplete, "function")
+    // Actuate mode notifies before compacting — "running compaction now"
+    assert.equal(ctx1.notifications.length, 1)
+    assert.equal(ctx1.notifications[0].type, "info")
+    assert.match(ctx1.notifications[0].message, /criteria met/)
+    assert.match(ctx1.notifications[0].message, /running compaction now/)
+    assert.doesNotMatch(ctx1.notifications[0].message, /advise mode/)
+    assert.doesNotMatch(ctx1.notifications[0].message, /Run \/compact/)
 
     // Compaction still in flight (onComplete NOT called): a second boundary
-    // past the cooldown must NOT compact again — it degrades to advice.
+    // past the cooldown must NOT compact again — it shows "compaction in progress".
     const ctx2 = makeCtx({ tokens: 176_000 }) // 150k + COOLDOWN(25k) + margin
     await pi.handlers.agent_end({}, ctx2)
     assert.equal(ctx2.compactCalls.length, 0, "reentrancy flag blocks concurrent compact")
     assert.equal(pi.sent.length, 0)
     assert.equal(ctx2.notifications.length, 1)
+    assert.match(ctx2.notifications[0].message, /criteria met/)
     assert.match(ctx2.notifications[0].message, /test boundary/)
+    assert.match(ctx2.notifications[0].message, /compaction in progress/)
+    assert.doesNotMatch(ctx2.notifications[0].message, /running compaction/)
 
     // onComplete resets the flag: a later boundary may actuate again.
     ctx1.compactCalls[0].onComplete()
