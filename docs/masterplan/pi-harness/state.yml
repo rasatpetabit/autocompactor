@@ -17,3 +17,5 @@ tasks: [{"id":1,"status":"done","wave":0,"files":["tests/test_compat_pins.py"]},
 active_run: null
 pending_gate: null
 worktree: /srv/dev/ras/autocompactor/.worktrees/pi-harness
+verified_sha: 9b6399a61c25bce728dc89c1f7a271fb5a518b91
+worktree_disposition: removed_after_merge
