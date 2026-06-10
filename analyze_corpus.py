@@ -219,9 +219,11 @@ def _dist(vals):
             "median": round(statistics.median(vals), 3), "max": max(vals)}
 
 
-def aggregate_events():
+def aggregate_events(stats_dir=None):
     """Aggregate live telemetry written by stats.log_event."""
-    path = os.path.expanduser("~/.claude/autocompactor/stats/events.jsonl")
+    if stats_dir is None:
+        stats_dir = "~/.claude/autocompactor/stats"
+    path = os.path.join(os.path.expanduser(stats_dir), "events.jsonl")
     evs = load_transcript(path)
     mon = [e for e in evs if e.get("type") == "monitor_eval"]
     pre = [e for e in evs if e.get("type") == "precompact"]
@@ -264,11 +266,13 @@ def main():
                          "follows within this much context growth")
     ap.add_argument("--events", action="store_true",
                     help="aggregate live telemetry from stats.py instead of backtesting")
+    ap.add_argument("--stats-dir", default="~/.claude/autocompactor/stats",
+                    help="directory containing stats.py events.jsonl for --events")
     ap.add_argument("--json", default="")
     args = ap.parse_args()
 
     if args.events:
-        print(json.dumps(aggregate_events(), indent=2))
+        print(json.dumps(aggregate_events(args.stats_dir), indent=2))
         return
 
     cutoff = time.time() - args.days * 86400
