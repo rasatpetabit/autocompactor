@@ -112,15 +112,16 @@ export default function autocompactor(pi: ExtensionAPI) {
           onError: () => { selfTriggered = false },
         })
       } else {
-        // advise mode: concise recommendation
-        pi.sendMessage(
-          {
-            customType: "autocompactor.advice",
-            content: `autocompactor: compaction recommended (${usage.tokens?.toLocaleString() ?? "?"} tokens). Run /compact.`,
-            display: true,
-          },
-          { deliverAs: "nextTurn" },
-        )
+        // advise mode: visible UI notification only. Do not queue visible
+        // custom messages with nextTurn: they persist into the session and
+        // can surface stale/duplicated advice on the next user prompt.
+        const reason = verdict.reason ?? `${usage.tokens?.toLocaleString() ?? "?"} tokens`
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `autocompactor: compaction recommended — ${reason}. Run /compact.`,
+            "warning",
+          )
+        }
       }
     } catch {
       /* never break Pi */
@@ -159,37 +160,42 @@ export default function autocompactor(pi: ExtensionAPI) {
 
   // session_compact: re-inject the artifact digest as a persisted one-shot,
   // and show a clear post-compaction summary to the user.
-  pi.on("session_compact", async (_event, ctx) => {
+  pi.on("session_compact", async (event, ctx) => {
     try {
       const inj = await bridge(pi, ctx, "reinject")
-      if (!inj?.text) return
+      if (inj?.text) {
+        // Artifact digest (persisted in context for the model — display: false
+        // keeps it out of the user-facing chat history)
+        pi.sendMessage(
+          {
+            customType: inj.customType ?? "autocompactor.digest",
+            content: inj.text,
+            display: false,
+          },
+          { deliverAs: "nextTurn" },
+        )
+      }
 
-      // Artifact digest (persisted in context for the model — display: false
-      // keeps it out of the user-facing chat history)
-      pi.sendMessage(
-        {
-          customType: inj.customType ?? "autocompactor.digest",
-          content: inj.text,
-          display: false,
-        },
-        { deliverAs: "nextTurn" },
-      )
-
-      // Post-compaction summary: explicit, hard to miss, shows savings.
+      // Visible post-compaction status belongs in the UI, not as a queued
+      // session message. tokensBefore from the compaction entry survives
+      // runtime reloads better than closure state.
       const usage = ctx.getContextUsage()
-      const postTokens = usage?.tokens ?? 0
-      const reclaimed = compactionPreTokens - postTokens
-      const window = (usage?.contextWindow ?? 0) - RESERVE_FALLBACK
-      const postOcc = window > 0 ? (postTokens / window) : 0
-
-      pi.sendMessage(
-        {
-          customType: "autocompactor.after",
-          content: `>>> AUTOCOMPACTOR COMPACTED <<<\nContext: ${compactionPreTokens?.toLocaleString() ?? "?"} → ${postTokens?.toLocaleString()} tokens (${postOcc.toFixed(0)}%). Reclaimed ~${reclaimed.toLocaleString()} tokens.`,
-          display: true,
-        },
-        { deliverAs: "nextTurn" },
-      )
+      const preTokens = event?.compactionEntry?.tokensBefore ?? compactionPreTokens
+      const postTokens = usage?.tokens
+      if (ctx.hasUI) {
+        let msg = "autocompactor: compaction completed."
+        if (preTokens > 0 && postTokens != null && postTokens > 0) {
+          const reclaimed = Math.max(preTokens - postTokens, 0)
+          const window = (usage?.contextWindow ?? 0) - RESERVE_FALLBACK
+          const postOcc = window > 0 ? ` (${((postTokens / window) * 100).toFixed(0)}%)` : ""
+          msg = `autocompactor: compaction completed — context ${preTokens.toLocaleString()} → ${postTokens.toLocaleString()} tokens${postOcc}; reclaimed ~${reclaimed.toLocaleString()} tokens.`
+        } else if (preTokens > 0) {
+          msg = `autocompactor: compaction completed — before context was ${preTokens.toLocaleString()} tokens; current usage will refresh on the next turn.`
+        } else if (postTokens != null && postTokens > 0) {
+          msg = `autocompactor: compaction completed — current context is ${postTokens.toLocaleString()} tokens.`
+        }
+        ctx.ui.notify(msg, "info")
+      }
       compactionPreTokens = 0 // reset for next compaction
     } catch {
       /* never break Pi */

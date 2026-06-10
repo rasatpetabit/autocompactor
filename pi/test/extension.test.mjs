@@ -59,8 +59,14 @@ function makePi({ exec } = {}) {
 
 function makeCtx({ tokens, contextWindow = 200_000 } = {}) {
   const compactCalls = []
+  const notifications = []
   return {
     compactCalls,
+    notifications,
+    hasUI: true,
+    ui: {
+      notify(message, type) { notifications.push({ message, type }) },
+    },
     cwd: "/tmp",
     sessionManager: { getSessionFile: () => "/tmp/fake-session.jsonl" },
     getContextUsage: () =>
@@ -119,7 +125,7 @@ test("pre-gate: reclaim below MIN_SAVINGS never spawns", async () => {
   assert.equal(pi.execCalls.length, 0)
 })
 
-test("advise mode: recommend -> sendMessage advice, nextTurn, no compact", async () => {
+test("advise mode: recommend -> UI notification, no queued visible message", async () => {
   delete process.env.AUTOCOMPACTOR_PI_MODE
   const pi = makePi({ exec: bridgeResponder(RECOMMEND) })
   autocompactor(pi)
@@ -128,11 +134,13 @@ test("advise mode: recommend -> sendMessage advice, nextTurn, no compact", async
   assert.equal(pi.execCalls.length, 1, "exactly one bridge call (evaluate)")
   assert.equal(pi.execCalls[0].args[1], "evaluate")
   assert.equal(ctx.compactCalls.length, 0, "advise mode never compacts")
-  assert.equal(pi.sent.length, 1)
-  assert.equal(pi.sent[0].message.customType, "autocompactor.advice")
-  assert.equal(pi.sent[0].message.display, true)
-  assert.deepEqual(pi.sent[0].opts, { deliverAs: "nextTurn" })
-  assert.match(pi.sent[0].message.content, /test boundary/)
+  assert.equal(pi.sent.length, 0, "visible advice must not be persisted via sendMessage")
+  assert.equal(ctx.notifications.length, 1)
+  assert.equal(ctx.notifications[0].type, "warning")
+  assert.match(ctx.notifications[0].message, /test boundary/)
+  assert.doesNotMatch(ctx.notifications[0].message, /Context:/)
+  assert.doesNotMatch(ctx.notifications[0].message, /Compaction count/)
+  assert.doesNotMatch(ctx.notifications[0].message, /Active signals/)
 })
 
 test("actuate mode: compact exactly once; reentrancy blocks a concurrent second", async () => {
@@ -152,8 +160,9 @@ test("actuate mode: compact exactly once; reentrancy blocks a concurrent second"
     const ctx2 = makeCtx({ tokens: 176_000 }) // 150k + COOLDOWN(25k) + margin
     await pi.handlers.agent_end({}, ctx2)
     assert.equal(ctx2.compactCalls.length, 0, "reentrancy flag blocks concurrent compact")
-    assert.equal(pi.sent.length, 1)
-    assert.equal(pi.sent[0].message.customType, "autocompactor.advice")
+    assert.equal(pi.sent.length, 0)
+    assert.equal(ctx2.notifications.length, 1)
+    assert.match(ctx2.notifications[0].message, /test boundary/)
 
     // onComplete resets the flag: a later boundary may actuate again.
     ctx1.compactCalls[0].onComplete()
@@ -189,11 +198,11 @@ test("error-swallow: garbage bridge stdout is treated as silence", async () => {
   assert.equal(pi.sent.length, 0, "garbage verdict -> no advice, no digest")
 })
 
-test("session_compact: reinject digest delivered via sendMessage nextTurn", async () => {
+test("session_compact: hidden digest is queued; visible summary is notify", async () => {
   const pi = makePi({ exec: bridgeResponder(RECOMMEND) })
   autocompactor(pi)
   const ctx = makeCtx({ tokens: 10_000 })
-  await pi.handlers.session_compact({}, ctx)
+  await pi.handlers.session_compact({ compactionEntry: { tokensBefore: 150_000 } }, ctx)
   assert.equal(pi.execCalls.length, 1)
   assert.equal(pi.execCalls[0].args[1], "reinject")
   assert.equal(pi.sent.length, 1)
@@ -201,6 +210,19 @@ test("session_compact: reinject digest delivered via sendMessage nextTurn", asyn
   assert.equal(pi.sent[0].message.content, "digest body")
   assert.equal(pi.sent[0].message.display, false)
   assert.deepEqual(pi.sent[0].opts, { deliverAs: "nextTurn" })
+  assert.equal(ctx.notifications.length, 1)
+  assert.equal(ctx.notifications[0].type, "info")
+  assert.match(ctx.notifications[0].message, /150,000 → 10,000 tokens/)
+})
+
+test("session_compact: visible summary still fires when there is no digest", async () => {
+  const pi = makePi({ exec: bridgeResponder({ reinject: {} }) })
+  autocompactor(pi)
+  const ctx = makeCtx({ tokens: 0 })
+  await pi.handlers.session_compact({ compactionEntry: { tokensBefore: 150_000 } }, ctx)
+  assert.equal(pi.sent.length, 0)
+  assert.equal(ctx.notifications.length, 1)
+  assert.match(ctx.notifications[0].message, /before context was 150,000 tokens/)
 })
 
 test("session_before_compact: prepare runs fire-and-forget, no cancel by default", async () => {
