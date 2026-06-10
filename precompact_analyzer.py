@@ -15,6 +15,9 @@ Does three things:
   3. Returns hookSpecificOutput.customInstructions so the summarizer is
      told exactly what to keep. If you typed `/compact <your own notes>`,
      your notes are kept and ours are appended.
+  4. Shows a quick analysis summary (trigger, context, phase, signals,
+     artifact sizes, instruction source) as a systemMessage before the
+     compaction runs, and reuses it as the post-compaction digest header.
 
 Optional deeper analysis: set AUTOCOMPACTOR_LLM=1 to shell out to
 `claude -p` with a cheap model for a smarter digest of what to preserve.
@@ -30,7 +33,8 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from transcript_lib import analyze, build_preservation_instructions, detect_phase  # noqa: E402
+from transcript_lib import (analyze, active_signals,  # noqa: E402
+                            build_preservation_instructions, detect_phase)
 import artifacts  # noqa: E402
 from stats import log_event  # noqa: E402
 
@@ -134,10 +138,42 @@ def main() -> int:
     except Exception:
         state2 = {}
     state2["pending_reinject"] = True
-    state2["last_compaction_stats"] = (
-        f"compaction #{state2.get('compaction_count', 0) + 1}, trigger="
-        f"{trigger}, context_before~{st.context_tokens:,}t" if st else "")
     state2["compaction_count"] = state2.get("compaction_count", 0) + 1
+
+    # Quick analysis summary: shown to the user before the compaction runs
+    # (systemMessage) and reused as the post-compaction digest header.
+    # Content-free by convention — counts/ratios/phases, no transcript text.
+    summary = ""
+    phase = detect_phase(st) if st else None
+    if st is not None:
+        try:
+            window = float(os.environ.get("AUTOCOMPACTOR_WINDOW", 200_000))
+        except ValueError:
+            window = 200_000.0
+        # Same effective-window clamp as the monitor: sessions that never
+        # exceeded what a 200k model can hold are judged against 200k.
+        peak = max(st.usage_series) if st.usage_series else st.context_tokens
+        peak = max(peak, int(state2.get("peak_ctx", 0) or 0))
+        if peak < 190_000:
+            window = min(window, 200_000)
+        sigs = [desc for _, desc in active_signals(st, window=window)]
+        parts = [
+            f"compaction #{state2['compaction_count']} ({trigger})",
+            (f"context ~{st.context_tokens:,}t "
+             f"({st.context_tokens / window:.0%} of {window / 1000:.0f}k)"),
+            f"phase: {phase}",
+        ]
+        if sigs:
+            parts.append("signals: " + "; ".join(sigs))
+        if art_sizes:
+            parts.append(f"artifacts to disk: {len(art_sizes)} classes, "
+                         f"{sum(art_sizes.values()):,}B")
+        parts.append("instructions: "
+                     + ("staged by monitor" if staged else "fresh analysis")
+                     + f" ({len(instructions):,} chars)"
+                     + (", user notes kept" if user_instructions else ""))
+        summary = " | ".join(parts)
+    state2["last_compaction_stats"] = summary
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         with open(state_file, "w") as fh:
@@ -148,21 +184,23 @@ def main() -> int:
     log_event({
         "type": "precompact", "session_id": session_id, "trigger": trigger,
         "context_tokens": st.context_tokens if st else None,
-        "phase": detect_phase(st) if st else None,
+        "phase": phase,
         "had_staged": bool(staged),
         "had_user_instructions": bool(user_instructions),
         "instr_chars": len(instructions),
         "artifact_chars": art_sizes,
     })
-    if not instructions.strip():
-        return 0
-
-    print(json.dumps({
-        "hookSpecificOutput": {
+    out = {}
+    if instructions.strip():
+        out["hookSpecificOutput"] = {
             "hookEventName": "PreCompact",
             "customInstructions": instructions,
         }
-    }))
+    if summary:
+        out["systemMessage"] = "autocompactor: " + summary
+    if not out:
+        return 0
+    print(json.dumps(out))
     return 0
 
 

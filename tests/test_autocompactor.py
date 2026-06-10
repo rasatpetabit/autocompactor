@@ -540,3 +540,65 @@ def test_analyzer_emits_instructions_and_artifacts(tmp_path):
     assert "user note" in r.stdout
     assert (tmp_path / ".claude" / "autocompactor" / "artifacts"
             / "py2.json").exists()
+
+
+def test_analyzer_systemmessage_summary(tmp_path):
+    """Every compaction (manual or auto) must surface a quick analysis
+    summary to the user via systemMessage — trigger, context, phase,
+    artifact accounting, instruction source. Content-free: no transcript
+    text beyond signal descriptions."""
+    payload = json.dumps({
+        "session_id": "sum1", "cwd": "/tmp",
+        "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+        "hook_event_name": "PreCompact", "trigger": "auto",
+        "custom_instructions": "user note"})
+    r = _run_hook(ANALYZER, payload, tmp_path)
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert "hookSpecificOutput" in out          # instructions still emitted
+    msg = out["systemMessage"]
+    assert msg.startswith("autocompactor: compaction #1 (auto)")
+    assert "context ~" in msg
+    assert "phase: " in msg
+    assert "artifacts to disk: " in msg
+    assert "instructions: fresh analysis" in msg
+    assert "user notes kept" in msg
+
+
+def test_analyzer_summary_reports_staged_instructions(tmp_path):
+    """When the monitor staged instructions moments earlier, the summary
+    must say so (and the count must increment across compactions)."""
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    state_dir.mkdir(parents=True)
+    (state_dir / "sum2.state.json").write_text(json.dumps(
+        {"staged_instructions": "STAGED", "compaction_count": 2}))
+    payload = json.dumps({
+        "session_id": "sum2", "cwd": "/tmp",
+        "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+        "hook_event_name": "PreCompact", "trigger": "manual"})
+    r = _run_hook(ANALYZER, payload, tmp_path)
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert "compaction #3 (manual)" in out["systemMessage"]
+    assert "instructions: staged by monitor" in out["systemMessage"]
+
+
+def test_analyzer_summary_feeds_digest_header(tmp_path):
+    """The same summary must arrive on the second surface: the header of
+    the one-shot artifact digest re-injected on the first post-compaction
+    prompt."""
+    payload = json.dumps({
+        "session_id": "sum3", "cwd": "/tmp",
+        "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+        "hook_event_name": "PreCompact", "trigger": "auto"})
+    assert _run_hook(ANALYZER, payload, tmp_path).returncode == 0
+    payload2 = json.dumps({
+        "session_id": "sum3", "cwd": "/tmp",
+        "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+        "hook_event_name": "UserPromptSubmit", "prompt": "continue"})
+    r = _run_hook(MONITOR, payload2, tmp_path)
+    assert r.returncode == 0
+    digest = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "Durable artifacts recovered" in digest
+    assert "compaction #1 (auto)" in digest
+    assert "phase: " in digest
