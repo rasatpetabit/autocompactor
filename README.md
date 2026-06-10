@@ -114,3 +114,24 @@ echo '{"session_id":"s1","transcript_path":"/path/to/real/session.jsonl","cwd":"
 
 Point it at a real transcript under `~/.claude/projects/` and confirm it
 emits JSON (or exits silently below threshold).
+
+### Full test matrix (Claude + Pi)
+
+One sequence runs every gate in the repo — the Claude compat baseline
+(unchanged from above) plus the Pi harness suites:
+
+```bash
+python3 -m pytest tests/ -q          # all harnesses' pytest cases
+bash tests/smoke_test.sh             # Claude hook contract, isolated HOME
+PI_SMOKE=1 bash tests/smoke_test_pi.sh  # Pi bridge contract, isolated HOME
+node --test 'pi/test/*.test.mjs'     # Pi TS shim against stubbed pi/ctx
+```
+
+Per-harness expectations: the first two commands are the 100%
+Claude-compatibility gate and must pass byte-identically with or without
+the Pi files present; `smoke_test_pi.sh` is a no-op (exit 0) unless
+`PI_SMOKE=1`, so plain CI runs are unaffected; the `node --test` suite
+transpiles `pi/autocompactor.ts` with esbuild on the fly and needs no
+Pi installation (note: pass the glob, not the bare directory — node 22
+resolves a positional directory as a module and fails). Run the full matrix before any commit that touches
+`pi_bridge.py`, `pi_session_lib.py`, `statedir.py`, or `pi/`.

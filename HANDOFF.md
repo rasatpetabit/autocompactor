@@ -355,6 +355,93 @@ Open: confirm ~135k auto trigger under the 200k ceiling (tomorrow's
 nightly); topic_shift precision via prompt replay; --events
 reduction-by-phase after a few live days.
 
+## Pi harness (2026-06-10) — architecture, actuate memo, deferrals
+
+### Architecture summary
+
+Additive adapters, zero moves of existing files — the Claude install base
+(settings.json hook entry points) stays byte-stable. `TranscriptStats` is
+the normalized model; everything downstream of it (`active_signals`,
+`detect_phase`, `build_preservation_instructions`, `artifacts.extract`)
+was already harness-agnostic, so Pi support is a new producer plus
+plumbing:
+
+* `statedir.py` — harness-namespaced state roots: `claude` →
+  `~/.claude/autocompactor` (unchanged), `pi` → `~/.autocompactor/pi`;
+  `AUTOCOMPACTOR_STATE_DIR` overrides all (tests pin it).
+* `pi_session_lib.py` — Pi v3 tree-format JSONL → `TranscriptStats`
+  (leaf-path walk, active segment = entries after the last
+  `type:"compaction"` on the path).
+* `pi_bridge.py` — never-raise JSON CLI (`evaluate`/`prepare`/`reinject`),
+  the ONE brain shared with the Claude hooks: same signal registry, same
+  decision model, judged against the Pi effective window
+  (`contextWindow − reserveTokens`). No stdin channel exists in
+  `pi.exec`, so all inputs are CLI flags.
+* `pi/autocompactor.ts` — logic-minimal shim: `agent_end` zero-spawn
+  pre-gate → bridge `evaluate` → advise or actuate;
+  `session_before_compact` → `prepare` fire-and-forget (backup +
+  artifacts + founding-goal restatement); `session_compact` → `reinject`
+  digest via `pi.sendMessage(..., {deliverAs:"nextTurn"})`. Every handler
+  try/caught — a broken bridge can never break a Pi compaction.
+* `install_pi.py` — copy-with-rewrite (NOT symlink: the
+  `__AUTOCOMPACTOR_BRIDGE_PATH__` placeholder is baked to this checkout's
+  `pi_bridge.py`) into `~/.pi/agent/extensions/`, plus a version pin and
+  a `--status` doctor.
+
+Telemetry: `stats.log_event(..., harness="pi")` routes to the pi state
+dir; rows stay content-free. Pi thresholds read `AUTOCOMPACTOR_PI_<NAME>`
+first, then `AUTOCOMPACTOR_<NAME>`, then the Claude defaults — do NOT
+tune Pi-specific values until live Pi telemetry exists.
+
+### Verified ground-truth pins (do not re-derive)
+
+* Validated against `@earendil-works/pi-coding-agent` **0.79.1**
+  (installed at `~/.npm-global/lib/node_modules/`); every API name in the
+  shim was checked against its `dist/core/extensions/types.d.ts` before
+  writing. `install_pi.py` re-pins the version observed at install time.
+* This host pins Pi reserveTokens to **40,000** in `~/.pi/agent/settings.json`
+  (Pi default is 16,384). The bridge's `RESERVE_FALLBACK = 40_000`
+  mirrors the host pin; the shim passes the live `contextWindow` through
+  and the effective window is `contextWindow − reserve`.
+* `pi.exec` has NO stdin channel — bridge inputs are flags only.
+
+### Flip-to-actuate decision memo
+
+**Advise ships now; the flip-to-actuate is a later deploy decision gated
+on Pi telemetry.** `AUTOCOMPACTOR_PI_MODE=advise` (default) only posts an
+`autocompactor.advice` message; `actuate` lets the shim call
+`ctx.compact({customInstructions})` itself — Pi is the first harness
+where we hold an actuator, so it earns a burn-in: flip only after ≥1 day
+of `monitor_eval` rows (harness `"pi"`) shows sane occupancy/recommend
+behavior at the 40k reserve. Reentrancy: a `selfTriggered` flag blocks a
+concurrent second compact while one is in flight (verified by
+`pi/test/extension.test.mjs` — the second boundary degrades to advice;
+`onComplete`/`onError` reset the flag). Native-auto interception
+(cancel-and-retrigger in `session_before_compact`) is separately gated
+`AUTOCOMPACTOR_PI_INTERCEPT=1`, default OFF, and auto-disables when
+`@davidorex/pi-custom-compactor` appears in Pi settings `packages[]`
+(coexist passively). Even with both gates off, `prepare` still runs
+fire-and-forget on every native compaction, so backups + artifacts +
+founding-goal restatement are never lost.
+
+### Deferred / out of scope (recorded, not scheduled)
+
+* Claude Code plugin packaging (Workstream B stage 2) — revisit now that
+  the Pi file layout is settled.
+* Native-auto interception default-on — needs actuate burn-in first.
+* Pi backtester (`analyze_corpus.py --harness pi`) — the Pi trigger is
+  exact (`contextWindow − reserve`), so the backtester adds value only
+  after live telemetry accumulates.
+* pi-custom-compactor `compactionSpec` integration — package not
+  installed here; passive coexistence (skip interception) is implemented.
+* Nightly Pi-version canary — extend `nightly_eval.py` to diff the
+  `install_pi.py` version pin against the live package and flag drift,
+  as it already does for the Claude CLI version.
+* Pi founding-capture parity test — `tests/test_pi_session_lib.py` is
+  wave-2 scoped; MAIN gained `initial_user_prompts` capture (94ee3a8)
+  after the worktree forked. `pi_bridge.py` uses getattr-safe access, so
+  the merge is safe either way; add the test post-merge.
+
 ## Known limitations
 
 * Transcript JSONL schema is not a public API; re-run smoke tests after
