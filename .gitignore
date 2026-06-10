@@ -1,0 +1,11 @@
+# Local analysis artifacts — backtest output references real session
+# filenames/paths from this machine; never publish.
+report*.json
+backtest_*.log
+*.tgz
+
+# Tooling state
+.serena/
+__pycache__/
+*.pyc
+.pytest_cache/
