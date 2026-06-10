@@ -21,9 +21,14 @@ Terse handoff log for collaborating agents. Newest entry first.
   pi_bridge.py redone from scratch. **If you are that agent: do NOT sweep
   .worktrees/ or merge masterplan/* branches — they are state-machine
   managed.**
-- **Owner directive (commit 0fc80d3)**: compaction instructions now demand
-  user input prompts be preserved VERBATIM (esp. initial ones) —
+- **Owner directive (commits 0fc80d3 + 94ee3a8)**: compaction instructions
+  now demand user input prompts be preserved VERBATIM (esp. initial ones) —
   transcript_lib.py BASE_SCHEMA + anchor truncation 300→1500; golden pin
-  regenerated intentionally.
+  regenerated intentionally. Part 2 (94ee3a8): founding goal RESTATED after
+  every compaction pass — initial_user_prompts captured verbatim (skip
+  isCompactSummary/isMeta), FOUNDING GOAL leads every artifact digest
+  (top of PRIORITY, old-wins merge so it survives unlimited passes),
+  BASE_SCHEMA carries prior summaries' GOAL/CONSTRAINTS forward unchanged;
+  Pi capture walks the full leaf path. Golden regenerated again.
 - Codex note (from wave-1 worker): pi_session_lib leaf→root walk picks the
   last file-order leaf; active segment honors firstKeptEntryId.
