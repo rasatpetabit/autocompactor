@@ -32,3 +32,18 @@ Terse handoff log for collaborating agents. Newest entry first.
   Pi capture walks the full leaf path. Golden regenerated again.
 - Codex note (from wave-1 worker): pi_session_lib leaf→root walk picks the
   last file-order leaf; active segment honors firstKeptEntryId.
+
+## 2026-06-10 — pi-harness merged; Pi hooked up with Claude-tuned params
+- masterplan pi-harness (Workstream C) finished via finish-step: verify
+  44/45 (the 1 red = known node-22 `node --test <dir>` pitfall; file
+  form passes), retro written, branch merged (e3301c4), bundle archived,
+  worktree removed. Full matrix green on merged main (81 pytest).
+- Live shim re-installed from MAIN (bridge path repoint after worktree
+  deletion) — install_pi.py --status OK, pin 0.79.1.
+- Owner: Pi uses same parameters as Claude → AUTOCOMPACTOR_PI_* exports
+  in ~/.bashrc managed block (Pi has no settings env; shell inheritance
+  is the only delivery). WINDOW intentionally omitted (Pi window is
+  exact from ctx). Live probe confirmed env reaches the bridge.
+- Why bashrc not settings: Pi settings.json has no env map (checked
+  docs/settings.md); the PI_-prefixed names keep Claude sessions
+  untouched. Sync manually if Claude tuning changes.

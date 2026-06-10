@@ -442,6 +442,33 @@ founding-goal restatement are never lost.
   after the worktree forked. `pi_bridge.py` uses getattr-safe access, so
   the merge is safe either way; add the test post-merge.
 
+## Session 2026-06-10 (later still) — pi-harness merged + live Pi tuning
+
+* masterplan `pi-harness` finished: merge commit e3301c4 on main, bundle
+  archived, worktree removed. Finish verify: 45 commands, 44 pass; the
+  single red was the known-broken literal `node --test pi/test` (node 22
+  resolves a positional directory as CJS → MODULE_NOT_FOUND); its
+  file-explicit equivalent passed 9/9 in the same list. Full matrix on
+  merged main: 81 pytest + both smokes + 9/9 node tests green.
+* Live shim repointed: `python3 install_pi.py` re-run from MAIN —
+  baked bridge path now `/srv/dev/ras/autocompactor/pi_bridge.py`,
+  `--status` all-OK, pin 0.79.1.
+* Owner directive: Pi runs the SAME parameters as Claude. Pi has no
+  settings-level env, so a managed `# >>> autocompactor-pi >>>` block in
+  `~/.bashrc` exports the Claude-tuned set as `AUTOCOMPACTOR_PI_*`
+  (SOFT_PCT 0.5, HARD_PCT 0.62, STALE_FRAC 0.90, COOLDOWN 20000, plus
+  the default-equal keys pinned explicitly: POST_FLOOR 70000,
+  MIN_SAVINGS 30000, MAX_FULL_PARSE_MB 8, OBSERVE_ONLY defaults,
+  ARTIFACT_BUDGET 1500). WINDOW deliberately NOT exported — Pi derives
+  the exact effective window from `ctx` (contextWindow − reserveTokens
+  = 160k here), better than the static 200000. If the Claude tuning in
+  `~/.claude/settings.json` changes, update the bashrc block to match
+  (two sources, manual sync — candidate for install_pi.py --env later).
+* Verified live: probe `pi -p` through an interactive shell with inline
+  PI overrides → fresh `monitor_eval` row via the MAIN bridge with
+  `est_reclaim = context − POST_FLOOR(0)`, proving shell→Pi→bridge env
+  inheritance end-to-end.
+
 ## Known limitations
 
 * Transcript JSONL schema is not a public API; re-run smoke tests after
