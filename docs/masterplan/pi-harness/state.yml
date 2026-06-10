@@ -1,0 +1,18 @@
+---
+schema_version: 8
+slug: pi-harness
+status: in-progress
+phase: plan
+topic: "Pi coding harness support with 100% Claude Code compatibility"
+complexity: null
+complexity_source: null
+autonomy: loose
+planning_mode: auto
+created_at: 2026-06-10T06:44:31.581Z
+predecessor_transcript: null
+spec_path: /srv/dev/ras/autocompactor/docs/masterplan/pi-harness/spec.md
+plan_path: /srv/dev/ras/autocompactor/docs/masterplan/pi-harness/plan.md
+plan_index_path: /srv/dev/ras/autocompactor/docs/masterplan/pi-harness/plan.index.json
+tasks: []
+active_run: null
+pending_gate: null
