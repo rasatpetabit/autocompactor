@@ -1,6 +1,7 @@
 {
-  "_comment": "autocompactor unified config. Synced to bashrc + Claude settings by sync_config.py.",
+  "_comment": "autocompactor unified config. Read at runtime by config_lib (both harnesses); AUTOCOMPACTOR_* / AUTOCOMPACTOR_PI_* env vars are overrides only.",
 
+  "MODE": "advise",
   "WINDOW": 200000,
   "SOFT_PCT": 0.40,
   "HARD_PCT": 0.65,
@@ -14,6 +15,7 @@
   "ARTIFACT_BUDGET": 1500,
 
   "pi": {
+    "MODE": "actuate",
     "RESERVE": 40000
   }
 }

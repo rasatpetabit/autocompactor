@@ -4,8 +4,11 @@
 // Claude Code hooks). This file only wires Pi events to the bridge and never
 // lets a failure reach Pi — every handler is fully try/caught.
 //
-// Modes (AUTOCOMPACTOR_PI_MODE): "advise" (default — notify only) | "actuate"
-// (self-trigger ctx.compact with bridge-built customInstructions).
+// Modes: "advise" (notify only) | "actuate" (self-trigger ctx.compact with
+// bridge-built customInstructions). The mode comes from the bridge's
+// evaluate verdict (config.json MODE, pi section overrides top-level) so it
+// reaches Pi regardless of launch environment; the AUTOCOMPACTOR_PI_MODE
+// env var, when set, overrides the verdict.
 // Native-auto interception (cancel-and-retrigger in session_before_compact)
 // is gated by AUTOCOMPACTOR_PI_INTERCEPT=1, default OFF, and is skipped when
 // @davidorex/pi-custom-compactor is configured (coexist passively).
@@ -19,6 +22,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 const BRIDGE =
   process.env.AUTOCOMPACTOR_BRIDGE ?? "__AUTOCOMPACTOR_BRIDGE_PATH__"
 const EXEC_TIMEOUT_MS = 5_000
+// prepare runs backup + artifact extraction + (optionally) an LLM digest
+// with a 45s budget — it gets a long leash; 5s would kill the digest.
+const PREPARE_TIMEOUT_MS = 60_000
 
 // Zero-spawn pre-gate thresholds (mirror pi_bridge defaults; the bridge
 // re-checks with full signal analysis — this gate only avoids spawns).
@@ -33,8 +39,10 @@ function num(name: string, dflt: number): number {
   return Number.isFinite(v) ? v : dflt
 }
 
-function mode(): "advise" | "actuate" {
-  return process.env.AUTOCOMPACTOR_PI_MODE === "actuate" ? "actuate" : "advise"
+function mode(verdictMode?: unknown): "advise" | "actuate" {
+  const env = process.env.AUTOCOMPACTOR_PI_MODE
+  if (env === "actuate" || env === "advise") return env
+  return verdictMode === "actuate" ? "actuate" : "advise"
 }
 
 function interceptEnabled(): boolean {
@@ -58,13 +66,14 @@ async function bridge(
   ctx: ExtensionContext,
   sub: string,
   extraArgs: string[] = [],
+  timeoutMs: number = EXEC_TIMEOUT_MS,
 ): Promise<any | null> {
   try {
     const session = ctx.sessionManager.getSessionFile()
     const args = [BRIDGE, sub, ...extraArgs, "--cwd", ctx.cwd]
     if (session) args.push("--session", session)
     const res = await pi.exec("python3", args, {
-      timeout: EXEC_TIMEOUT_MS,
+      timeout: timeoutMs,
       cwd: ctx.cwd,
     })
     const out = (res.stdout ?? "").trim()
@@ -99,13 +108,14 @@ export default function autocompactor(pi: ExtensionAPI) {
       ])
       if (!verdict?.recommend) return
       lastRecTokens = usage.tokens
+      const effMode = mode(verdict.mode)
 
       // Build a criteria-aware message from the verdict reason (which already
       // includes occupancy + any gating signals from the bridge) or fall back
       // to the raw token count.
       const reason = verdict.reason ?? `${usage.tokens?.toLocaleString() ?? "?"} tokens`
 
-      if (mode() === "actuate" && !selfTriggered) {
+      if (effMode === "actuate" && !selfTriggered) {
         // Set selfTriggered BEFORE the prepare call to block overlapping
         // agent_end handlers from both triggering compaction.
         selfTriggered = true
@@ -116,7 +126,8 @@ export default function autocompactor(pi: ExtensionAPI) {
             "info",
           )
         }
-        const prep = await bridge(pi, ctx, "prepare", ["--trigger", "actuate"])
+        const prep = await bridge(
+          pi, ctx, "prepare", ["--trigger", "actuate"], PREPARE_TIMEOUT_MS)
         ctx.compact({
           customInstructions: prep?.customInstructions,
           onComplete: () => { selfTriggered = false },
@@ -128,7 +139,7 @@ export default function autocompactor(pi: ExtensionAPI) {
         // custom messages with nextTurn: they persist into the session and
         // can surface stale/duplicated advice on the next user prompt.
         if (ctx.hasUI) {
-          const modeTag = mode() === "actuate"
+          const modeTag = effMode === "actuate"
             ? "compaction in progress"
             : "advise mode"
           ctx.ui.notify(
@@ -154,12 +165,13 @@ export default function autocompactor(pi: ExtensionAPI) {
       // Fire-and-forget prepare for backup + artifacts + founding-goal.
       // Non-intercept: do NOT await — native compaction proceeds immediately.
       if (!interceptEnabled() || selfTriggered) {
-        void bridge(pi, ctx, "prepare", ["--trigger", "native"])
+        void bridge(pi, ctx, "prepare", ["--trigger", "native"], PREPARE_TIMEOUT_MS)
         return
       }
       // Intercept mode: cancel native compaction and re-trigger with
       // our customInstructions. SelfTriggered is already true here.
-      const prep = await bridge(pi, ctx, "prepare", ["--trigger", "native"])
+      const prep = await bridge(
+        pi, ctx, "prepare", ["--trigger", "native"], PREPARE_TIMEOUT_MS)
       if (!prep?.customInstructions) return
       ctx.compact({
         customInstructions: prep.customInstructions,

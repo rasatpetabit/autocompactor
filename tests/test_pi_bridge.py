@@ -88,6 +88,36 @@ def test_evaluate_recommends_near_ceiling(tmp_path):
     assert isinstance(data["reason"], str) and len(data["reason"]) > 0
 
 
+def test_evaluate_mode_comes_from_config_without_env(tmp_path):
+    # run_bridge strips all AUTOCOMPACTOR_* env: the verdict mode must come
+    # from config.json (pi section), so actuation works in env-less Pi
+    # processes (non-interactive launches never see the bashrc exports).
+    state_dir = tmp_path / "state"
+    fixture_path = REPO_ROOT / "tests" / "fixtures" / "pi" / "with_compaction.jsonl"
+    result = run_bridge(
+        ["evaluate", "--session", str(fixture_path), "--tokens", "150000", "--context-window", "200000"],
+        state_dir,
+    )
+    assert result.returncode == 0
+    data = parse_single_json(result.stdout)
+    assert data is not None
+    assert data["mode"] == "actuate"
+
+
+def test_evaluate_mode_env_overrides_config(tmp_path):
+    state_dir = tmp_path / "state"
+    fixture_path = REPO_ROOT / "tests" / "fixtures" / "pi" / "with_compaction.jsonl"
+    result = run_bridge(
+        ["evaluate", "--session", str(fixture_path), "--tokens", "150000", "--context-window", "200000"],
+        state_dir,
+        extra_env={"AUTOCOMPACTOR_PI_MODE": "advise"},
+    )
+    assert result.returncode == 0
+    data = parse_single_json(result.stdout)
+    assert data is not None
+    assert data["mode"] == "advise"
+
+
 def test_cooldown_round_trip(tmp_path):
     state_dir = tmp_path / "state"
     fixture_path = REPO_ROOT / "tests" / "fixtures" / "pi" / "with_compaction.jsonl"

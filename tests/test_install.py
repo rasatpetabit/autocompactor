@@ -150,7 +150,8 @@ def test_remove_round_trip(tmp_path):
     assert s["model"] == "fable"
     assert not any(k.startswith("AUTOCOMPACTOR_") for k in s["env"])
     # native key intentionally left, with a printed note
-    assert s["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "200000"
+    assert s["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"
+    assert s["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "90"
     assert "left CLAUDE_CODE_AUTO_COMPACT_WINDOW" in res.stdout
     # cron line gone
     cron = (tmp_path / "fake_crontab").read_text()

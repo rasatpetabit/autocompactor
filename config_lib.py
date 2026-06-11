@@ -80,17 +80,24 @@ def _try_float(name: str, harness: str, ctx_window: int = 0) -> float | None:
                 return float(raw)
             except ValueError:
                 pass
-    # 2. Config file: top-level, then harness-specific overrides
-    if name in cfg:
-        try:
-            return float(cfg[name])
-        except (TypeError, ValueError):
-            pass
-    if harness and harness in cfg:
+    # 2. Config file: harness-specific overrides win over top-level.
+    #    With a wide window (>=300k) the _WIDE variant of the key wins
+    #    over the bare name at each level, mirroring the env chain.
+    names = [name]
+    if ctx_window >= 300_000:
+        names.insert(0, f"{name}_WIDE")
+    if harness and harness in cfg and isinstance(cfg[harness], dict):
         hvals = cfg[harness]
-        if isinstance(hvals, dict) and name in hvals:
+        for n in names:
+            if n in hvals:
+                try:
+                    return float(hvals[n])
+                except (TypeError, ValueError):
+                    pass
+    for n in names:
+        if n in cfg:
             try:
-                return float(hvals[name])
+                return float(cfg[n])
             except (TypeError, ValueError):
                 pass
     return None
@@ -116,19 +123,19 @@ class Config:
         return self.float(name, harness, default, ctx_window)
 
     def str(self, name: str, harness: str = "claude", default: str = "") -> str:
-        cfg = _load_config()
-        # Config file
-        if name in cfg and isinstance(cfg[name], str):
-            return cfg[name]
-        if harness and harness in cfg:
-            hvals = cfg[harness]
-            if isinstance(hvals, dict) and name in hvals and isinstance(hvals[name], str):
-                return hvals[name]
-        # Env vars
+        # Env vars first (runtime override), matching the float path.
         for key in _env_chain(name, harness):
             raw = os.environ.get(key)
             if raw:
                 return raw
+        cfg = _load_config()
+        # Harness-specific overrides win over top-level.
+        if harness and harness in cfg:
+            hvals = cfg[harness]
+            if isinstance(hvals, dict) and name in hvals and isinstance(hvals[name], str):
+                return hvals[name]
+        if name in cfg and isinstance(cfg[name], str):
+            return cfg[name]
         return default
 
     @property

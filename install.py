@@ -42,9 +42,12 @@ ENV_DEFAULTS = {
     "AUTOCOMPACTOR_MAX_FULL_PARSE_MB": "8",
     "AUTOCOMPACTOR_OBSERVE_ONLY": "error_resolved,tests_pass,idle_gap",
     "AUTOCOMPACTOR_ARTIFACT_BUDGET": "1500",
-    # Native setting: caps Claude Code's own auto-compact ceiling so the
-    # advisor and the native trigger agree on the window.
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "200000",
+    # Native settings: cap Claude Code's own auto-compact ceiling so the
+    # advisor and the native trigger agree on the window. 500k on a 1M
+    # model compacts around ~360k (90% of cap minus reserve); on smaller
+    # windows the model's own limit binds first.
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
 }
 
 
@@ -365,9 +368,11 @@ def main() -> int:
         print(f"removed autocompactor hooks from {settings_path()}")
         if removed:
             print(f"removed env keys: {', '.join(sorted(removed))}")
-        if "CLAUDE_CODE_AUTO_COMPACT_WINDOW" in settings.get("env", {}):
-            print("left CLAUDE_CODE_AUTO_COMPACT_WINDOW in place "
-                  "(native Claude Code setting; remove by hand if unwanted)")
+        for native_key in ("CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+                           "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"):
+            if native_key in settings.get("env", {}):
+                print(f"left {native_key} in place "
+                      "(native Claude Code setting; remove by hand if unwanted)")
         print(apply_cron(remove=True))
         return 0
 

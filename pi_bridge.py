@@ -194,6 +194,7 @@ def cmd_evaluate(opts: dict) -> dict:
 
     return {"recommend": bool(recommend and not suppressed),
             "reason": reason,
+            "mode": cfg.str("MODE", harness=HARNESS, default="advise"),
             "context_tokens": context_tokens,
             "contextState": ctx_state}
 
