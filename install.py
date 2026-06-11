@@ -13,10 +13,12 @@ all other hooks, env keys, and cron lines untouched.
     python3 install.py --verify     # pytest + smoke + live transcript probe
     python3 install.py --status     # doctor: report install health
 
-Env policy: install sets only MISSING keys (your tuned values are never
-clobbered); --force-env resets everything to the code defaults below.
---remove deletes AUTOCOMPACTOR_* keys but leaves
-CLAUDE_CODE_AUTO_COMPACT_WINDOW (a native Claude Code setting) with a note.
+Env policy: tuning lives in config.json (+ config.local.json), read at
+runtime by config_lib — install no longer seeds AUTOCOMPACTOR_* env keys
+(env vars remain available as manual runtime overrides). Install sets only
+MISSING native Claude Code keys; --force-env resets them to the defaults
+below. --remove deletes AUTOCOMPACTOR_* keys but leaves the native
+CLAUDE_* settings with a note.
 """
 
 import glob
@@ -29,23 +31,14 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 CRON_MARKER = "# autocompactor-nightly"
 
-# Code defaults — must match the README tunables table and the hooks'
-# in-code fallbacks. Install only fills keys that are missing.
+# Only native Claude Code settings are seeded into settings.json env —
+# autocompactor's own tuning lives in config.json and is read at runtime,
+# so installs never plant stale AUTOCOMPACTOR_* overrides.
+# Native settings: cap Claude Code's own auto-compact ceiling so the
+# advisor and the native trigger agree on the window. 500k on a 1M model
+# compacts around ~360k (90% of cap minus reserve); on smaller windows
+# the model's own limit binds first.
 ENV_DEFAULTS = {
-    "AUTOCOMPACTOR_WINDOW": "200000",
-    "AUTOCOMPACTOR_SOFT_PCT": "0.40",
-    "AUTOCOMPACTOR_HARD_PCT": "0.65",
-    "AUTOCOMPACTOR_COOLDOWN": "25000",
-    "AUTOCOMPACTOR_STALE_FRAC": "0.50",
-    "AUTOCOMPACTOR_POST_FLOOR": "70000",
-    "AUTOCOMPACTOR_MIN_SAVINGS": "30000",
-    "AUTOCOMPACTOR_MAX_FULL_PARSE_MB": "8",
-    "AUTOCOMPACTOR_OBSERVE_ONLY": "error_resolved,tests_pass,idle_gap",
-    "AUTOCOMPACTOR_ARTIFACT_BUDGET": "1500",
-    # Native settings: cap Claude Code's own auto-compact ceiling so the
-    # advisor and the native trigger agree on the window. 500k on a 1M
-    # model compacts around ~360k (90% of cap minus reserve); on smaller
-    # windows the model's own limit binds first.
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
 }

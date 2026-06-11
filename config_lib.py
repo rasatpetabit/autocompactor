@@ -2,9 +2,11 @@
 """
 config_lib.py — unified autocompactor configuration.
 
-Source of truth: config.json in this repo. Env vars (AUTOCOMPACTOR_*,
-AUTOCOMPACTOR_PI_*) still override for runtime tuning. Defaults are the
-last fallback.
+Source of truth: config.json in this repo, with site-local values
+(LLM endpoints, model names — anything that should not be versioned)
+merged over it from config.local.json (gitignored). Env vars
+(AUTOCOMPACTOR_*, AUTOCOMPACTOR_PI_*) still override for runtime
+tuning. Defaults are the last fallback.
 
 Usage in any module:
     from config_lib import cfg
@@ -20,23 +22,46 @@ import os
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CONFIG = os.path.join(_HERE, "config.json")
+_CONFIG_LOCAL = os.path.join(_HERE, "config.local.json")
 
 # Cached config (loaded once at first use)
 _config_cache = None
+
+
+def _read_json(path: str) -> dict:
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        return {k: v for k, v in data.items() if not k.startswith("_")}
+    except Exception:
+        return {}
+
+
+def _config_paths() -> list[str]:
+    """AUTOCOMPACTOR_CONFIG overrides the file set: a path to use instead
+    of config.json(+local), or empty string for no config files at all
+    (pure env + code defaults — used by hermetic tests)."""
+    override = os.environ.get("AUTOCOMPACTOR_CONFIG")
+    if override is not None:
+        return [override] if override else []
+    return [_CONFIG, _CONFIG_LOCAL]
 
 
 def _load_config() -> dict:
     global _config_cache
     if _config_cache is not None:
         return _config_cache
-    try:
-        with open(_CONFIG) as fh:
-            _config_cache = json.load(fh)
-            # Strip comment keys
-            _config_cache = {k: v for k, v in _config_cache.items()
-                            if not k.startswith("_")}
-    except Exception:
-        _config_cache = {}
+    # Later files overlay earlier ones (config.local.json over
+    # config.json); harness sections merge key-by-key so a local file
+    # can override one value without clobbering the whole section.
+    merged: dict = {}
+    for path in _config_paths():
+        for key, val in _read_json(path).items():
+            if isinstance(val, dict) and isinstance(merged.get(key), dict):
+                merged[key] = {**merged[key], **val}
+            else:
+                merged[key] = val
+    _config_cache = merged
     return _config_cache
 
 
@@ -50,22 +75,23 @@ def _env_chain(name: str, harness: str) -> list[str]:
 
 
 def _env_chain_windowed(name: str, harness: str, ctx_window: int) -> list[str]:
-    """Env chain with _WIDE suffix for large windows."""
+    """Env chain with _WIDE suffix for large windows.
+
+    Same prefixes as _env_chain (only "pi" gets a harness prefix; claude
+    uses the bare AUTOCOMPACTOR_ namespace), with the _WIDE variant of
+    each key checked first when the window is wide.
+    """
     is_wide = ctx_window >= 300_000
+    prefixes = []
+    if harness == "pi":
+        prefixes.append("AUTOCOMPACTOR_PI_")
+    prefixes.append("AUTOCOMPACTOR_")
     keys = []
-    # Window-specific variants first
-    for prefix in (f"AUTOCOMPACTOR_{harness.upper()}_", "AUTOCOMPACTOR_"):
+    for prefix in prefixes:
         if is_wide:
             keys.append(f"{prefix}{name}_WIDE")
         keys.append(f"{prefix}{name}")
-    # De-duplicate while preserving order
-    seen = set()
-    out = []
-    for k in keys:
-        if k not in seen:
-            seen.add(k)
-            out.append(k)
-    return out
+    return keys
 
 
 def _try_float(name: str, harness: str, ctx_window: int = 0) -> float | None:
@@ -124,9 +150,11 @@ class Config:
 
     def str(self, name: str, harness: str = "claude", default: str = "") -> str:
         # Env vars first (runtime override), matching the float path.
+        # Presence wins, not truthiness: an empty string is a deliberate
+        # override (e.g. AUTOCOMPACTOR_OBSERVE_ONLY="" clears the list).
         for key in _env_chain(name, harness):
             raw = os.environ.get(key)
-            if raw:
+            if raw is not None:
                 return raw
         cfg = _load_config()
         # Harness-specific overrides win over top-level.

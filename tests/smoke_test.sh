@@ -13,6 +13,7 @@ while IFS='=' read -r v _; do unset "$v"; done < <(env | grep '^AUTOCOMPACTOR_')
 # The rich fixture sits at ~84k context; default guard values (POST_FLOOR
 # 70k + MIN_SAVINGS 30k) would suppress every recommendation below ~100k.
 # Pin guard values that keep the fixture eligible.
+export AUTOCOMPACTOR_CONFIG=""  # hermetic: no repo config files
 export AUTOCOMPACTOR_POST_FLOOR=50000 AUTOCOMPACTOR_MIN_SAVINGS=20000
 FIX=tests/fixtures
 fail() { echo "FAIL: $1"; exit 1; }

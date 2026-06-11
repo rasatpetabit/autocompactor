@@ -147,7 +147,7 @@ def cmd_evaluate(opts: dict) -> dict:
     sig_pairs = transcript_lib.active_signals(
         st, window=window, stale_frac_thr=stale_frac_thr)
     signals = [desc for _, desc in sig_pairs]
-    observe = transcript_lib.observe_only()
+    observe = transcript_lib.observe_only(harness=HARNESS)
     gating = [desc for name, desc in sig_pairs if name not in observe]
 
     recommend = (occupancy >= hard or (occupancy >= soft and bool(gating)))
@@ -224,7 +224,7 @@ def cmd_prepare(opts: dict) -> dict:
     arts = artifacts.merge(artifacts.load(session_id, harness=HARNESS),
                            artifacts.extract(st))
     art_sizes = artifacts.save(session_id, arts, harness=HARNESS)
-    if os.environ.get("AUTOCOMPACTOR_LLM") == "1" and session:
+    if cfg.str("LLM", harness=HARNESS) == "1" and session:
         extra = llm_digest(session)
         if extra:
             instructions += "\n\nAdditional must-preserve facts:\n" + extra

@@ -26,13 +26,37 @@ const EXEC_TIMEOUT_MS = 5_000
 // with a 45s budget — it gets a long leash; 5s would kill the digest.
 const PREPARE_TIMEOUT_MS = 60_000
 
+// Repo config (config.json + config.local.json overlay) read once at load.
+// Lets the pre-gate share the bridge's tuning even in env-less processes;
+// env vars still override. BRIDGE points into the checkout, so the config
+// lives next to it.
+const CFG: any = (() => {
+  let merged: any = {}
+  for (const name of ["config.json", "config.local.json"]) {
+    try {
+      const data = JSON.parse(
+        fs.readFileSync(path.join(path.dirname(BRIDGE), name), "utf8"),
+      )
+      merged = { ...merged, ...data }
+    } catch {
+      /* missing/unreadable config -> env + code defaults */
+    }
+  }
+  return merged
+})()
+
+function cfgNum(key: string, dflt: number): number {
+  const v = parseFloat(String(CFG?.pi?.[key] ?? CFG?.[key] ?? ""))
+  return Number.isFinite(v) ? v : dflt
+}
+
 // Zero-spawn pre-gate thresholds (mirror pi_bridge defaults; the bridge
 // re-checks with full signal analysis — this gate only avoids spawns).
-const SOFT_PCT = num("AUTOCOMPACTOR_PI_SOFT_PCT", num("AUTOCOMPACTOR_SOFT_PCT", 0.40))
-const MIN_SAVINGS = num("AUTOCOMPACTOR_PI_MIN_SAVINGS", num("AUTOCOMPACTOR_MIN_SAVINGS", 30_000))
-const POST_FLOOR = num("AUTOCOMPACTOR_PI_POST_FLOOR", num("AUTOCOMPACTOR_POST_FLOOR", 70_000))
-const COOLDOWN = num("AUTOCOMPACTOR_PI_COOLDOWN", num("AUTOCOMPACTOR_COOLDOWN", 25_000))
-const RESERVE_FALLBACK = num("AUTOCOMPACTOR_PI_RESERVE", 40_000)
+const SOFT_PCT = num("AUTOCOMPACTOR_PI_SOFT_PCT", num("AUTOCOMPACTOR_SOFT_PCT", cfgNum("SOFT_PCT", 0.40)))
+const MIN_SAVINGS = num("AUTOCOMPACTOR_PI_MIN_SAVINGS", num("AUTOCOMPACTOR_MIN_SAVINGS", cfgNum("MIN_SAVINGS", 30_000)))
+const POST_FLOOR = num("AUTOCOMPACTOR_PI_POST_FLOOR", num("AUTOCOMPACTOR_POST_FLOOR", cfgNum("POST_FLOOR", 70_000)))
+const COOLDOWN = num("AUTOCOMPACTOR_PI_COOLDOWN", num("AUTOCOMPACTOR_COOLDOWN", cfgNum("COOLDOWN", 25_000)))
+const RESERVE_FALLBACK = num("AUTOCOMPACTOR_PI_RESERVE", cfgNum("RESERVE", 40_000))
 
 function num(name: string, dflt: number): number {
   const v = parseFloat(process.env[name] ?? "")

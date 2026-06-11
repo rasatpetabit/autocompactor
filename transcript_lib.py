@@ -410,8 +410,10 @@ def active_signals(st: TranscriptStats, prompt: str = "",
 OBSERVE_ONLY_DEFAULT = "error_resolved,tests_pass,idle_gap"
 
 
-def observe_only() -> frozenset:
-    raw = os.environ.get("AUTOCOMPACTOR_OBSERVE_ONLY", OBSERVE_ONLY_DEFAULT)
+def observe_only(harness: str = "claude") -> frozenset:
+    import config_lib
+    raw = config_lib.cfg.str("OBSERVE_ONLY", harness=harness,
+                             default=OBSERVE_ONLY_DEFAULT)
     return frozenset(s.strip() for s in raw.split(",") if s.strip())
 
 

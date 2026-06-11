@@ -67,3 +67,26 @@ Terse handoff log for collaborating agents. Newest entry first.
   honored. prepare calls get 60s (LLM digest budget is 45s; 5s killed it).
 - Why config-over-sync: sync_config.py was promised but never written;
   runtime reads of config.json need no sync and work in env-less processes.
+
+## 2026-06-10 — single source of truth: config.json owns all tuning
+- Follow-up to the advise-only fix (owner: "fix it all"): removed the
+  remaining two-source divergences. All tuning ported into config.json
+  (claude: WINDOW 300000/HARD 0.62; pi: MODE actuate/HARD 0.90/WIDE 0.60/
+  RESERVE 40000; top: SOFT 0.5, STALE 0.90, COOLDOWN 20000). Site-local
+  LLM digest settings moved to config.local.json (gitignored, merged over
+  config.json) — preserves the no-endpoints-in-public-config rule while
+  reaching env-less Pi processes.
+- Stripped the now-redundant AUTOCOMPACTOR_* env from ~/.claude/settings.json
+  and the ~/.bashrc autocompactor-pi block (both replaced by runtime config
+  reads; env vars remain manual overrides). install.py no longer seeds
+  AUTOCOMPACTOR_* env — only the two native CLAUDE_* knobs.
+- TS shim pre-gate now reads config.json(+local) next to the baked bridge
+  path, so the zero-spawn gate shares bridge tuning without env.
+- precompact_analyzer LLM knobs and transcript_lib observe_only resolve
+  through config_lib (env-first; empty-string env is a deliberate override).
+  _env_chain_windowed no longer invents AUTOCOMPACTOR_CLAUDE_* names.
+- AUTOCOMPACTOR_CONFIG env var: alternate config path, or empty for none —
+  tests/smokes use it for hermeticity (one LLM test was silently calling
+  the live qwen endpoint through config.local.json before this).
+- Caveat: harness sections wholly outrank top-level keys, so a harness
+  needing a _WIDE value must carry it in its own section (pi.HARD_PCT_WIDE).

@@ -37,6 +37,7 @@ def _hook_env(tmp_path):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOCOMPACTOR_")}
     env["HOME"] = str(tmp_path)
+    env["AUTOCOMPACTOR_CONFIG"] = ""  # hermetic: no repo config files
     env["AUTOCOMPACTOR_POST_FLOOR"] = "50000"
     env["AUTOCOMPACTOR_MIN_SAVINGS"] = "20000"
     return env

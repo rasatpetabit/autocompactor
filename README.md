@@ -74,9 +74,20 @@ anything else under `~/.pi`. Restart Pi to load the extension. Pi-side
 state and telemetry live under `~/.autocompactor/pi/` (the Claude state
 dir is untouched).
 
-## Tunables (environment variables)
+## Tunables
 
-| Variable                  | Default | Meaning                                  |
+Tuning lives in `config.json` at the repo root (bare key names, e.g.
+`HARD_PCT`), read at runtime by both harnesses via `config_lib` — no env
+plumbing or sync step needed. Per-harness sections (`"claude"`, `"pi"`)
+override top-level keys; `<NAME>_WIDE` variants win on context windows
+≥300k. Site-local values that must not be versioned (LLM endpoints,
+model names) go in `config.local.json` (gitignored), merged over
+`config.json`. The environment variables below remain available as
+manual runtime overrides and always win over the config files;
+`AUTOCOMPACTOR_CONFIG` points at an alternate config file (empty string
+= no config files at all — used by the hermetic tests).
+
+| Variable (env override)   | Default | Meaning                                  |
 |---------------------------|---------|------------------------------------------|
 | `AUTOCOMPACTOR_WINDOW`    | 200000  | Model context window in tokens. Set to 1000000 for 1M-context models. |
 | `AUTOCOMPACTOR_SOFT_PCT`  | 0.40    | Recommend at this occupancy *if* a boundary signal is present. |
@@ -93,7 +104,7 @@ dir is untouched).
 | `AUTOCOMPACTOR_LLM_MODEL` | `haiku` | Model name for the optional digest. Site-local deployments can override this without changing public repo defaults. |
 | `AUTOCOMPACTOR_LLM_BASE_URL` | unset | Base URL for `openai`/`vllm` provider, e.g. an OpenAI-compatible `/v1` endpoint. |
 | `AUTOCOMPACTOR_LLM_CMD`   | unset   | Command template override for the optional digest. Supports `{model}` and `{prompt}` placeholders. |
-| `AUTOCOMPACTOR_PI_MODE`   | `advise` | Pi only. `advise` = post a recommendation message; `actuate` = the extension calls `ctx.compact()` itself with the bridge-built instructions. Flip only after a day of clean Pi telemetry (see HANDOFF). |
+| `AUTOCOMPACTOR_PI_MODE`   | `advise` | Pi only. `advise` = post a recommendation message; `actuate` = the extension calls `ctx.compact()` itself with the bridge-built instructions. The mode is delivered via the bridge's evaluate verdict from config.json (`pi.MODE`, shipped as `actuate`); this env var is a manual override. |
 | `AUTOCOMPACTOR_PI_INTERCEPT` | unset | Pi only. `1` = cancel a native auto-compaction and re-trigger it enriched with our instructions. Default off; auto-disabled when `pi-custom-compactor` is configured. |
 | `AUTOCOMPACTOR_PI_<NAME>` | —       | Pi-specific override for any tunable above (e.g. `AUTOCOMPACTOR_PI_SOFT_PCT`); falls back to the generic `AUTOCOMPACTOR_<NAME>`, then the default. |
 | `AUTOCOMPACTOR_STATE_DIR` | unset   | Override the state root for BOTH harnesses (used by tests). Defaults: Claude `~/.claude/autocompactor`, Pi `~/.autocompactor/pi`. |

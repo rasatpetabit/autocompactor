@@ -1,9 +1,9 @@
 {
-  "_comment": "autocompactor unified config. Read at runtime by config_lib (both harnesses); AUTOCOMPACTOR_* / AUTOCOMPACTOR_PI_* env vars are overrides only.",
+  "_comment": "autocompactor unified config. Read at runtime by config_lib (both harnesses); AUTOCOMPACTOR_* / AUTOCOMPACTOR_PI_* env vars are overrides only. Site-local values (LLM endpoints/models) go in config.local.json (gitignored), merged over this file.",
 
   "MODE": "advise",
   "WINDOW": 200000,
-  "SOFT_PCT": 0.40,
+  "SOFT_PCT": 0.5,
   "HARD_PCT": 0.65,
   "HARD_PCT_WIDE": 0.60,
   "STALE_FRAC": 0.90,
@@ -14,8 +14,15 @@
   "OBSERVE_ONLY": "error_resolved,tests_pass,idle_gap",
   "ARTIFACT_BUDGET": 1500,
 
+  "claude": {
+    "WINDOW": 300000,
+    "HARD_PCT": 0.62
+  },
+
   "pi": {
     "MODE": "actuate",
-    "RESERVE": 40000
+    "RESERVE": 40000,
+    "HARD_PCT": 0.90,
+    "HARD_PCT_WIDE": 0.60
   }
 }

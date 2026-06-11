@@ -64,12 +64,12 @@ def test_fresh_install(tmp_path):
     assert len(our_groups(s, "PreCompact")) == 2
     matchers = {g["matcher"] for g in our_groups(s, "PreCompact")}
     assert matchers == {"manual", "auto"}
-    # all defaults land in env on a fresh HOME
-    for key in ("AUTOCOMPACTOR_WINDOW", "AUTOCOMPACTOR_SOFT_PCT",
-                "AUTOCOMPACTOR_HARD_PCT", "AUTOCOMPACTOR_POST_FLOOR",
-                "AUTOCOMPACTOR_OBSERVE_ONLY",
+    # only native Claude knobs land in env on a fresh HOME — autocompactor
+    # tuning lives in config.json, never seeded as env
+    for key in ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
                 "CLAUDE_CODE_AUTO_COMPACT_WINDOW"):
         assert key in s["env"], key
+    assert not any(k.startswith("AUTOCOMPACTOR_") for k in s["env"])
     assert (tmp_path / ".claude" / "autocompactor").is_dir()
 
 
@@ -95,26 +95,30 @@ def test_tuned_env_preserved(tmp_path):
     res = run_install(tmp_path)
     assert res.returncode == 0
     env = read_settings(tmp_path)["env"]
-    # tuned values survive a plain install
+    # manual AUTOCOMPACTOR_* overrides survive a plain install untouched
     assert env["AUTOCOMPACTOR_SOFT_PCT"] == "0.5"
     assert env["AUTOCOMPACTOR_HARD_PCT"] == "0.62"
     assert env["AUTOCOMPACTOR_COOLDOWN"] == "20000"
     assert env["UNRELATED_KEY"] == "keepme"
-    # missing keys were filled in
-    assert env["AUTOCOMPACTOR_POST_FLOOR"] == "70000"
-    assert "kept (tuned" in res.stdout
+    # but install never seeds new AUTOCOMPACTOR_* keys (config.json rules)
+    assert "AUTOCOMPACTOR_POST_FLOOR" not in env
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"
 
 
 def test_force_env_resets_to_defaults(tmp_path):
     cdir = tmp_path / ".claude"
     cdir.mkdir()
     (cdir / "settings.json").write_text(json.dumps({
-        "env": {"AUTOCOMPACTOR_SOFT_PCT": "0.5", "UNRELATED_KEY": "keepme"},
+        "env": {"AUTOCOMPACTOR_SOFT_PCT": "0.5", "UNRELATED_KEY": "keepme",
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "200000"},
     }))
     res = run_install(tmp_path, "--force-env")
     assert res.returncode == 0
     env = read_settings(tmp_path)["env"]
-    assert env["AUTOCOMPACTOR_SOFT_PCT"] == "0.40"
+    # --force-env resets only the native keys; manual AUTOCOMPACTOR_*
+    # overrides are user-owned and untouched
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"
+    assert env["AUTOCOMPACTOR_SOFT_PCT"] == "0.5"
     assert env["UNRELATED_KEY"] == "keepme"
 
 

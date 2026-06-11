@@ -78,6 +78,7 @@ def _hook_env(tmp_path):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOCOMPACTOR_")}
     env["HOME"] = str(tmp_path)
+    env["AUTOCOMPACTOR_CONFIG"] = ""  # hermetic: no repo config files
     env["AUTOCOMPACTOR_POST_FLOOR"] = "50000"
     env["AUTOCOMPACTOR_MIN_SAVINGS"] = "20000"
     return env
@@ -588,6 +589,13 @@ def test_hooks_never_raise(script, payload, tmp_path):
     assert "Traceback" not in r.stderr
 
 
+def _isolate_config(monkeypatch):
+    """Hermetic in-process config: ignore repo config.json/config.local.json."""
+    import config_lib
+    monkeypatch.setenv("AUTOCOMPACTOR_CONFIG", "")
+    monkeypatch.setattr(config_lib, "_config_cache", None)
+
+
 def test_llm_digest_default_uses_claude_haiku(tmp_path, monkeypatch):
     t = tmp_path / "t.jsonl"
     t.write_text(json.dumps(_human("keep this task")) + "\n")
@@ -601,6 +609,7 @@ def test_llm_digest_default_uses_claude_haiku(tmp_path, monkeypatch):
     monkeypatch.delenv("AUTOCOMPACTOR_LLM_CMD", raising=False)
     monkeypatch.delenv("AUTOCOMPACTOR_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("AUTOCOMPACTOR_LLM_MODEL", raising=False)
+    _isolate_config(monkeypatch)
     monkeypatch.setattr(pa.subprocess, "run", fake_run)
     assert pa.llm_digest(str(t)) == "- keep task"
     assert seen["cmd"][:4] == ["claude", "-p", "--model", "haiku"]
@@ -628,6 +637,7 @@ def test_llm_digest_openai_override_is_env_only(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTOCOMPACTOR_LLM_PROVIDER", "openai")
     monkeypatch.setenv("AUTOCOMPACTOR_LLM_BASE_URL", "http://local.test:8000/v1")
     monkeypatch.setenv("AUTOCOMPACTOR_LLM_MODEL", "local-test-model")
+    _isolate_config(monkeypatch)
     monkeypatch.setattr(pa.urllib.request, "urlopen", fake_urlopen)
     assert pa.llm_digest(str(t)) == "- local model fact"
     assert seen["url"] == "http://local.test:8000/v1/chat/completions"

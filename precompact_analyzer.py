@@ -48,13 +48,17 @@ BACKUP_DIR = os.path.join(STATE_DIR, "backups")
 
 
 def _env(name: str, default: str = "") -> str:
-    """Runtime LLM knobs are deliberately env-only by default.
+    """LLM knobs resolve env-first, then config.local.json (gitignored).
 
-    Public config.json should not need to carry site-local model names,
-    endpoints, or command paths. AUTOCOMPACTOR_* values still let a user
-    opt in locally through Claude settings.json or the Pi shell env.
+    Public config.json should not carry site-local model names,
+    endpoints, or command paths — those live in config.local.json so
+    they also reach env-less processes (non-interactive Pi launches).
+    Non-AUTOCOMPACTOR names (e.g. OPENAI_API_KEY) stay pure env.
     """
-    return os.environ.get(name, default)
+    if not name.startswith("AUTOCOMPACTOR_"):
+        return os.environ.get(name, default)
+    return config_lib.cfg.str(
+        name[len("AUTOCOMPACTOR_"):], default=default)
 
 
 def _llm_timeout() -> float:
@@ -202,7 +206,7 @@ def main() -> int:
     else:
         instructions = ""
 
-    if os.environ.get("AUTOCOMPACTOR_LLM") == "1" and transcript:
+    if _env("AUTOCOMPACTOR_LLM") == "1" and transcript:
         extra = llm_digest(transcript)
         if extra:
             instructions += "\n\nAdditional must-preserve facts:\n" + extra

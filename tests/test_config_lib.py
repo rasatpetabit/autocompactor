@@ -22,9 +22,13 @@ def temp_config(tmp_path, monkeypatch):
     """Point config_lib at a throwaway config.json and clear ambient env."""
     cfg_path = tmp_path / "config.json"
 
-    def write(data):
+    def write(data, local=None):
         cfg_path.write_text(json.dumps(data))
+        local_path = tmp_path / "config.local.json"
+        if local is not None:
+            local_path.write_text(json.dumps(local))
         monkeypatch.setattr(config_lib, "_CONFIG", str(cfg_path))
+        monkeypatch.setattr(config_lib, "_CONFIG_LOCAL", str(local_path))
         monkeypatch.setattr(config_lib, "_config_cache", None)
 
     for key in list(__import__("os").environ):
@@ -72,6 +76,18 @@ def test_str_harness_section_beats_top_level(temp_config):
 def test_str_default_when_absent(temp_config):
     temp_config({})
     assert config_lib.cfg.str("MODE", harness="pi", default="advise") == "advise"
+
+
+def test_local_overlay_merges_over_config(temp_config):
+    temp_config(
+        {"HARD_PCT": 0.65, "pi": {"MODE": "actuate", "RESERVE": 40000}},
+        local={"LLM_MODEL": "site-model", "pi": {"RESERVE": 50000}},
+    )
+    assert config_lib.cfg.str("LLM_MODEL") == "site-model"
+    # harness sections merge key-by-key: local RESERVE wins, MODE survives
+    assert config_lib.cfg.float("RESERVE", harness="pi") == 50000
+    assert config_lib.cfg.str("MODE", harness="pi") == "actuate"
+    assert config_lib.cfg.float("HARD_PCT") == 0.65
 
 
 def test_repo_config_ships_pi_actuate(monkeypatch):
