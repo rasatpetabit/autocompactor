@@ -102,7 +102,7 @@ def test_tuned_env_preserved(tmp_path):
     assert env["UNRELATED_KEY"] == "keepme"
     # but install never seeds new AUTOCOMPACTOR_* keys (config.json rules)
     assert "AUTOCOMPACTOR_POST_FLOOR" not in env
-    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "300000"
 
 
 def test_force_env_resets_to_defaults(tmp_path):
@@ -117,7 +117,7 @@ def test_force_env_resets_to_defaults(tmp_path):
     env = read_settings(tmp_path)["env"]
     # --force-env resets only the native keys; manual AUTOCOMPACTOR_*
     # overrides are user-owned and untouched
-    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "300000"
     assert env["AUTOCOMPACTOR_SOFT_PCT"] == "0.5"
     assert env["UNRELATED_KEY"] == "keepme"
 
@@ -154,7 +154,7 @@ def test_remove_round_trip(tmp_path):
     assert s["model"] == "fable"
     assert not any(k.startswith("AUTOCOMPACTOR_") for k in s["env"])
     # native key intentionally left, with a printed note
-    assert s["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "500000"
+    assert s["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "300000"
     assert s["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "90"
     assert "left CLAUDE_CODE_AUTO_COMPACT_WINDOW" in res.stdout
     # cron line gone

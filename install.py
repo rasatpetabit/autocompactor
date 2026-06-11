@@ -35,12 +35,13 @@ CRON_MARKER = "# autocompactor-nightly"
 # autocompactor's own tuning lives in config.json and is read at runtime,
 # so installs never plant stale AUTOCOMPACTOR_* overrides.
 # Native settings: cap Claude Code's own auto-compact ceiling so the
-# advisor and the native trigger agree on the window. 500k on a 1M model
-# compacts around ~360k (90% of cap minus reserve); on smaller windows
-# the model's own limit binds first.
+# advisor and the native trigger agree on the window. Observed trigger is
+# ~0.716 x cap (500k fired ~358k, 200k fired ~135k): 300k on a 1M model
+# compacts ~215k, just past the advisor's 0.62x300k flag point; on
+# smaller windows the model's own limit binds first.
 ENV_DEFAULTS = {
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000",
 }
 
 
