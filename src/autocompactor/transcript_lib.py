@@ -135,9 +135,14 @@ def load_transcript(path: str, start_offset: int = 0) -> list:
                 if not line:
                     continue
                 try:
-                    entries.append(json.loads(line.decode("utf-8", "replace")))
+                    obj = json.loads(line.decode("utf-8", "replace"))
                 except json.JSONDecodeError:
                     continue
+                # Only dict entries are usable; a valid-JSON-but-non-object
+                # line (bare string/number) would crash the .get() calls in
+                # analyze(). Skip it rather than poison the whole parse.
+                if isinstance(obj, dict):
+                    entries.append(obj)
     except OSError:
         pass
     return entries
@@ -243,7 +248,7 @@ def analyze(path: str = "", recent_window: int = 30,
 
         if etype == "assistant":
             usage = (entry.get("message") or {}).get("usage") or {}
-            if usage:
+            if isinstance(usage, dict) and usage:
                 st.last_usage = usage
                 st.usage_series.append(
                     int(usage.get("input_tokens", 0))
@@ -599,3 +604,29 @@ def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:
     if cwd:
         lines.append(f"- Working directory: {cwd}")
     return "\n".join(lines)
+
+
+def append_artifact_restatement(instructions: str, arts: dict) -> str:
+    """Append the founding-goal restatement + the on-disk-artifacts NOTE.
+
+    Shared by both PreCompact paths (Claude precompact_analyzer + Pi bridge
+    prepare): every compaction pass must restate the session's original
+    prompts verbatim — staged instructions built from a tail-only parse may
+    predate their capture, but the old-wins artifact merge always carries
+    them — and must tell the summarizer not to spend space duplicating the
+    mechanically-extracted artifacts that are re-injected post-compaction.
+    """
+    founding = [p.replace("\n", " ") for p in arts.get("initial_prompts") or []]
+    if founding and founding[0][:200] not in instructions:
+        instructions += (
+            "\n\nThe ORIGINAL user request(s) that framed this session "
+            "(quote these VERBATIM in GOAL; never paraphrase):\n"
+            + "\n".join("    * " + p for p in founding))
+    instructions += (
+        "\n\nNOTE: the following are preserved on disk and will be "
+        "re-injected after compaction -- do NOT spend summary space "
+        "duplicating them: user corrections, error texts, working "
+        "commands, discovered constants, file lists. Focus the summary "
+        "on what regexes cannot extract: decisions and rationale, plan "
+        "position, failed approaches, open questions.")
+    return instructions

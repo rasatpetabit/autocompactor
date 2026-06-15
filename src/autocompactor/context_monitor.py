@@ -51,13 +51,13 @@ from autocompactor.transcript_lib import (analyze, active_signals,  # noqa: E402
                                           detect_phase,
                                           find_last_boundary_offset,
                                           observe_only)
-from autocompactor.stats import log_event  # noqa: E402
+from autocompactor.stats import log_event, run_hook  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 
 
 
-def main() -> int:
+def _run() -> int:
     try:
         data = json.load(sys.stdin)
     except Exception:
@@ -119,6 +119,11 @@ def main() -> int:
     peak = max(peak, int(state.get("peak_ctx", 0)))
     if peak != state.get("peak_ctx"):
         state["peak_ctx"] = peak
+        # Persist the peak IMMEDIATELY, not via the batched flush: it is the
+        # durability anchor for tail-only parses (a later mid-prompt exception
+        # would otherwise lose it, since run_hook swallows the raise). The
+        # other state writes (cooldown reset, staged instructions) are not
+        # durability-critical mid-prompt and stay batched in _save_state().
         try:
             with open(state_file, "w") as fh:
                 json.dump(state, fh)
@@ -239,6 +244,11 @@ def main() -> int:
     }
     print(json.dumps(out))
     return 0
+
+
+def main() -> int:
+    """Never-raise wrapper (hook contract): any failure degrades to exit 0."""
+    return run_hook("context_monitor", _run)
 
 
 if __name__ == "__main__":

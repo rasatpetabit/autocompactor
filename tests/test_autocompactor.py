@@ -781,6 +781,105 @@ def test_hooks_never_raise(script, payload, tmp_path):
     assert "Traceback" not in r.stderr
 
 
+# --------------------------- never-raise hardening (malformed transcript body)
+
+def test_analyze_survives_non_dict_usage():
+    """A non-dict message.usage (corruption / producer-version skew) reaches
+    usage.get(...) and used to crash analyze(); the turn is now skipped and a
+    later well-formed turn is still counted."""
+    entries = [
+        _human("hi"),
+        {"type": "assistant", "message": {"usage": "not-a-dict", "content": []}},
+        _assistant(usage=_usage(50_000)),
+    ]
+    st = tl.analyze(entries=entries)
+    assert st.context_tokens == 50_000
+
+
+def test_load_transcript_skips_non_object_json_lines(tmp_path):
+    """Valid JSON that isn't an object (bare string/number) would crash the
+    .get() calls in analyze(); load_transcript drops it so the parse holds."""
+    p = tmp_path / "t.jsonl"
+    p.write_text('"a bare string"\n42\n[1,2,3]\n{"type":"assistant"}\n')
+    entries = tl.load_transcript(str(p))
+    assert [e.get("type") for e in entries] == ["assistant"]
+
+
+def test_hooks_survive_malformed_transcript_content(tmp_path):
+    """End-to-end: a transcript with a bare-string line and a non-dict usage
+    block must not crash either hook — they parse what they can and exit 0."""
+    t = tmp_path / "t.jsonl"
+    t.write_text(
+        '"a bare string line"\n'
+        + json.dumps({"type": "assistant",
+                      "message": {"usage": "not-a-dict", "content": []}}) + "\n"
+        + json.dumps(_assistant(usage=_usage(120_000))) + "\n")
+    for script in (MONITOR, ANALYZER):
+        payload = json.dumps({
+            "session_id": "malformed", "cwd": "/tmp", "transcript_path": str(t),
+            "hook_event_name": "UserPromptSubmit", "prompt": "hi",
+            "trigger": "manual"})
+        r = _run_hook(script, payload, tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "Traceback" not in r.stderr
+
+
+def test_run_hook_backstops_exceptions(tmp_path, monkeypatch):
+    """run_hook is the belt-and-suspenders backstop: an exception escaping the
+    inner function becomes exit 0 plus a content-free hook_skip breadcrumb
+    (error class name only — never the exception message / transcript text)."""
+    from autocompactor import stats
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("AUTOCOMPACTOR_STATE_DIR", raising=False)
+
+    def boom():
+        raise RuntimeError("secret transcript text")
+
+    assert stats.run_hook("unit_probe", boom) == 0
+    ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
+                     / "events.jsonl").read_text().splitlines()[-1])
+    assert ev["type"] == "hook_skip" and ev["hook"] == "unit_probe"
+    assert ev["error"] == "RuntimeError"
+    assert "secret transcript text" not in json.dumps(ev)
+
+
+def test_run_hook_passes_through_return_code(tmp_path, monkeypatch):
+    """A clean inner run returns its own exit code unchanged."""
+    from autocompactor import stats
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert stats.run_hook("ok_probe", lambda: 0) == 0
+
+
+# ------------------------------------------------ every-prompt I/O cheapness
+
+def test_monitor_skips_redundant_writes_on_unchanged_prompt(tmp_path):
+    """C1+C2: a second identical prompt with no new transcript activity must
+    rewrite neither the artifact file nor the state file (an identical-content
+    rewrite still bumps mtime, so mtime is the right witness)."""
+    t = tmp_path / "t.jsonl"
+    # Low context (no recommendation) but with extractable activity, so the
+    # artifact file exists after the first run.
+    t.write_text(
+        json.dumps(_human("build the thing")) + "\n"
+        + json.dumps(_assistant("Edit", {"file_path": "/a.py"},
+                                usage=_usage(40_000))) + "\n")
+    payload = json.dumps({
+        "session_id": "cheap", "cwd": "/tmp", "transcript_path": str(t),
+        "hook_event_name": "UserPromptSubmit", "prompt": "build the thing"})
+
+    assert _run_hook(MONITOR, payload, tmp_path).returncode == 0
+    base = tmp_path / ".claude" / "autocompactor"
+    art = base / "artifacts" / "cheap.json"
+    state = base / "cheap.state.json"
+    assert art.exists() and state.exists()
+    m_art, m_state = art.stat().st_mtime_ns, state.stat().st_mtime_ns
+
+    # Second identical run: nothing changed -> neither file is rewritten.
+    assert _run_hook(MONITOR, payload, tmp_path).returncode == 0
+    assert art.stat().st_mtime_ns == m_art, "artifact rewritten with no change"
+    assert state.stat().st_mtime_ns == m_state, "state rewritten with no change"
+
+
 def _isolate_config(monkeypatch):
     """Hermetic in-process config: ignore repo config.json/config.local.json."""
     from autocompactor import config_lib

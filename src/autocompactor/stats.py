@@ -46,3 +46,22 @@ def log_event(event: dict, harness: str = "claude") -> None:
             fh.write(json.dumps(event, default=str) + "\n")
     except Exception:
         pass
+
+
+def run_hook(name: str, fn, *args, harness: str = "claude", **kwargs) -> int:
+    """Run a hook entrypoint so it can never raise into the hook path.
+
+    The contract: "hooks must never raise; every failure degrades to exit 0
+    with no traceback." Individual modules guard their own risky operations,
+    but this is the belt-and-suspenders backstop — any exception that escapes
+    `fn` becomes exit 0 plus a content-free `hook_skip` breadcrumb (error
+    class name only, never transcript text), so a hook that silently stops
+    working is still observable in telemetry.
+    """
+    try:
+        rc = fn(*args, **kwargs)
+        return int(rc) if isinstance(rc, int) else 0
+    except Exception as exc:
+        log_event({"type": "hook_skip", "hook": name,
+                   "error": type(exc).__name__}, harness=harness)
+        return 0

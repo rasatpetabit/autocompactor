@@ -38,9 +38,10 @@ import urllib.request
 
 from autocompactor import config_lib, artifacts, window_resolver  # noqa: E402
 from autocompactor.transcript_lib import (analyze, active_signals,  # noqa: E402
+                                          append_artifact_restatement,
                                           build_preservation_instructions,
                                           detect_phase)
-from autocompactor.stats import log_event  # noqa: E402
+from autocompactor.stats import log_event, run_hook  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 BACKUP_DIR = os.path.join(STATE_DIR, "backups")
@@ -167,7 +168,7 @@ def llm_digest(transcript_path: str) -> str:
         return ""
 
 
-def main() -> int:
+def _run() -> int:
     try:
         data = json.load(sys.stdin)
     except Exception:
@@ -322,6 +323,11 @@ def main() -> int:
         return 0
     print(json.dumps(out))
     return 0
+
+
+def main() -> int:
+    """Never-raise wrapper (hook contract): any failure degrades to exit 0."""
+    return run_hook("precompact_analyzer", _run)
 
 
 if __name__ == "__main__":
