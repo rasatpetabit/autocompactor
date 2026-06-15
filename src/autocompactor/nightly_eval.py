@@ -5,7 +5,7 @@ nightly_eval.py — scheduled self-evaluation for autocompactor.
 Run nightly from cron (no Claude Code environment needed — thresholds are
 read from ~/.claude/settings.json directly):
 
-    30 3 * * * cd /srv/dev/ras/autocompactor && python3 nightly_eval.py
+    30 3 * * * cd /srv/dev/ras/autocompactor && python3 src/nightly_eval.py
 
 Each run:
   1. Runs the test suites (pytest + smoke) — the canary for transcript
@@ -36,9 +36,8 @@ import subprocess
 import sys
 import time
 
-REPO = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, REPO)
-import config_lib  # noqa: E402
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # checkout root
+import autocompactor.config_lib as config_lib  # noqa: E402
 
 BASE = os.path.expanduser("~/.claude/autocompactor")
 REPORTS = os.path.join(BASE, "reports")
@@ -149,7 +148,7 @@ def main() -> int:
 
     # 2. one-day backtest
     report_path = os.path.join(REPORTS, f"backtest-{today}.json")
-    bt_rc, bt_out = run([sys.executable, "analyze_corpus.py",
+    bt_rc, bt_out = run([sys.executable, "src/analyze_corpus.py",
                          "--root", "~/.claude/projects", "--days", "1",
                          "--window", str(window),
                          "--soft", str(soft_pct),

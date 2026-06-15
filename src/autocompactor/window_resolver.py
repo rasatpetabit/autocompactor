@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import json
 import os
 
-import config_lib
+from autocompactor import config_lib
 
 
 DEFAULT_TIERS = [200_000, 300_000, 512_000, 1_000_000]

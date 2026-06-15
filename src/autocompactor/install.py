@@ -6,12 +6,12 @@ Idempotent throughout: safe to re-run; replaces any previous autocompactor
 hook entries (matched by 'autocompactor' in the command string) and leaves
 all other hooks, env keys, and cron lines untouched.
 
-    python3 install.py              # install/update hooks + missing env keys
-    python3 install.py --cron       # ... and register the nightly cron job
-    python3 install.py --force-env  # overwrite env keys with code defaults
-    python3 install.py --remove     # uninstall hooks + our env keys + cron
-    python3 install.py --verify     # pytest + smoke + live transcript probe
-    python3 install.py --status     # doctor: report install health
+    python3 src/install.py              # install/update hooks + missing env keys
+    python3 src/install.py --cron       # ... and register the nightly cron job
+    python3 src/install.py --force-env  # overwrite env keys with code defaults
+    python3 src/install.py --remove     # uninstall hooks + our env keys + cron
+    python3 src/install.py --verify     # pytest + smoke + live transcript probe
+    python3 src/install.py --status     # doctor: report install health
 
 Env policy: tuning lives in config.json (+ config.local.json), read at
 runtime by config_lib — install no longer seeds AUTOCOMPACTOR_* env keys
@@ -28,7 +28,10 @@ import shutil
 import subprocess
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+from autocompactor import __version__  # noqa: E402
+
+SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # .../src
+REPO_ROOT = os.path.dirname(SRC_ROOT)                                    # checkout root
 CRON_MARKER = "# autocompactor-nightly"
 
 # Only native Claude Code settings are seeded into settings.json env —
@@ -57,15 +60,15 @@ def hook_config() -> dict:
     return {
         "UserPromptSubmit": [{
             "hooks": [{"type": "command",
-                       "command": f"python3 {HERE}/context_monitor.py"}]
+                       "command": f"python3 {SRC_ROOT}/context_monitor.py"}]
         }],
         "PreCompact": [
             {"matcher": "manual",
              "hooks": [{"type": "command",
-                        "command": f"python3 {HERE}/precompact_analyzer.py"}]},
+                        "command": f"python3 {SRC_ROOT}/precompact_analyzer.py"}]},
             {"matcher": "auto",
              "hooks": [{"type": "command",
-                        "command": f"python3 {HERE}/precompact_analyzer.py"}]},
+                        "command": f"python3 {SRC_ROOT}/precompact_analyzer.py"}]},
         ],
     }
 
@@ -150,7 +153,7 @@ def remove_env(settings: dict) -> list:
 # ----------------------------------------------------------------- cron
 
 def cron_line() -> str:
-    return (f"30 3 * * * /usr/bin/python3 {HERE}/nightly_eval.py "
+    return (f"30 3 * * * /usr/bin/python3 {SRC_ROOT}/nightly_eval.py "
             f">> {state_dir()}/nightly.log 2>&1 {CRON_MARKER}")
 
 
@@ -202,11 +205,11 @@ def run_verify() -> int:
 
     print("== pytest ==")
     rc = subprocess.call([sys.executable, "-m", "pytest", "tests/", "-q"],
-                         cwd=HERE)
+                         cwd=REPO_ROOT)
     failures += rc != 0
 
     print("\n== smoke test ==")
-    rc = subprocess.call(["bash", f"{HERE}/tests/smoke_test.sh"], cwd=HERE)
+    rc = subprocess.call(["bash", f"{REPO_ROOT}/tests/smoke_test.sh"], cwd=REPO_ROOT)
     failures += rc != 0
 
     print("\n== live transcript probe ==")
@@ -217,13 +220,13 @@ def run_verify() -> int:
         payload = json.dumps({
             "session_id": "install-verify",
             "transcript_path": transcript,
-            "cwd": HERE,
+            "cwd": REPO_ROOT,
             "hook_event_name": "UserPromptSubmit",
             "prompt": "install.py --verify probe",
         })
         try:
             res = subprocess.run(
-                [sys.executable, f"{HERE}/context_monitor.py"],
+                [sys.executable, f"{SRC_ROOT}/context_monitor.py"],
                 input=payload, text=True, capture_output=True, timeout=60)
             ok = res.returncode == 0
             if ok and res.stdout.strip():
@@ -290,7 +293,7 @@ def run_status() -> int:
     if settings is None:
         return 1
 
-    print(f"autocompactor status  ({HERE})\n")
+    print(f"autocompactor status  ({SRC_ROOT})  v{__version__}\n")
 
     counts = hooks_registered(settings)
     expected = {"UserPromptSubmit": 1, "PreCompact": 2}
@@ -298,7 +301,7 @@ def run_status() -> int:
         ok = n == expected[event]
         problems += not ok
         print(f"  hooks {event}: {n}/{expected[event]} registered"
-              + ("" if ok else "  <-- run: python3 install.py"))
+              + ("" if ok else "  <-- run: python3 src/install.py"))
 
     env = settings.get("env", {})
     missing = [k for k in ENV_DEFAULTS if k not in env]
@@ -399,7 +402,7 @@ def main() -> int:
     if "--cron" in args:
         print(apply_cron(remove=False))
     print("\nRun /hooks inside Claude Code to verify registration; "
-          "python3 install.py --status for a health check.")
+          "python3 src/install.py --status for a health check.")
     return 0
 
 

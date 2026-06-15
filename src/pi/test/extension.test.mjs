@@ -1,4 +1,4 @@
-// pi/test/extension.test.mjs — node --test for the Pi shim (pi/autocompactor.ts).
+// src/pi/test/extension.test.mjs — node --test for the Pi shim (src/pi/autocompactor.ts).
 //
 // The shim is TypeScript; node 22 cannot import it directly, so a before()
 // hook transpiles it with esbuild (type-only imports erased — output depends

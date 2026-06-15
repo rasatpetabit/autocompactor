@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import os
 
-import statedir
+from autocompactor import statedir
 
 ART_DIR = os.path.expanduser("~/.claude/autocompactor/artifacts")
 

@@ -2,9 +2,9 @@
 """Idempotent installer for the autocompactor Pi-harness extension.
 
 Usage:
-    python3 install_pi.py            # install/update the Pi extension
-    python3 install_pi.py --remove   # uninstall the extension + version pin
-    python3 install_pi.py --status   # report install health
+    python3 src/install_pi.py            # install/update the Pi extension
+    python3 src/install_pi.py --remove   # uninstall the extension + version pin
+    python3 src/install_pi.py --status   # report install health
 
 Idempotent throughout: re-runs overwrite only our own installed file and leave
 everything else in ~/.pi untouched.
@@ -15,10 +15,9 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import statedir  # noqa: E402
+from autocompactor import statedir  # noqa: E402
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # src/
 SHIM_SRC = os.path.join(HERE, "pi", "autocompactor.ts")
 BRIDGE = os.path.join(HERE, "pi_bridge.py")
 PLACEHOLDER = "__AUTOCOMPACTOR_BRIDGE_PATH__"
@@ -139,7 +138,7 @@ def do_install() -> int:
 
     print(f"installed Pi extension -> {installed_path()}")
     print(f"bridge path baked in: {BRIDGE}")
-    print("Run python3 install_pi.py --status for a health check; restart Pi to load the extension.")
+    print("Run python3 src/install_pi.py --status for a health check; restart Pi to load the extension.")
     return 0
 
 
@@ -182,7 +181,7 @@ def do_status() -> int:
         with open(ip, "r") as f:
             text = f.read()
         if PLACEHOLDER in text:
-            print("  <-- placeholder unrewritten; re-run python3 install_pi.py")
+            print("  <-- placeholder unrewritten; re-run python3 src/install_pi.py")
             problems += 1
         if BRIDGE not in text:
             print("  <-- bridge path points elsewhere (other checkout?); re-run install to repoint")

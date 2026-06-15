@@ -34,12 +34,12 @@ policy here.
   native microcompaction markers.
 - Runtime state lives under `~/.claude/autocompactor/`: `stats/`,
   `artifacts/`, `backups/`, and per-session `*.state.json`.
-- `context_monitor.py` is the Claude `UserPromptSubmit` hook: signals +
+- `src/context_monitor.py` is the Claude `UserPromptSubmit` hook: signals +
   burn-rate -> recommend `/compact`; one-shot artifact re-injection
   post-compaction.
-- `precompact_analyzer.py` is the Claude `PreCompact` hook: backup,
+- `src/precompact_analyzer.py` is the Claude `PreCompact` hook: backup,
   phase-aware `customInstructions`, artifact extraction.
-- `install.py` performs idempotent `settings.json` hook registration.
+- `src/install.py` performs idempotent `settings.json` hook registration.
 - Claude floor cuts are owner-approval gated and audited in `HANDOFF.md`;
   recovered examples included global `CLAUDE.md` diet and plugin pruning.
   Each `10k` off the `~53k` interactive floor was estimated at about `~10%`

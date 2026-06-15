@@ -2,9 +2,9 @@ import pathlib
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
-import window_resolver  # noqa: E402
+from autocompactor import window_resolver  # noqa: E402
 
 
 def test_observed_peak_classifies_candidate_windows():

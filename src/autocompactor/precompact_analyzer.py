@@ -36,13 +36,11 @@ import subprocess
 import sys
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import config_lib  # noqa: E402
-from transcript_lib import (analyze, active_signals,  # noqa: E402
-                            build_preservation_instructions, detect_phase)
-import artifacts  # noqa: E402
-from stats import log_event  # noqa: E402
-import window_resolver  # noqa: E402
+from autocompactor import config_lib, artifacts, window_resolver  # noqa: E402
+from autocompactor.transcript_lib import (analyze, active_signals,  # noqa: E402
+                                          build_preservation_instructions,
+                                          detect_phase)
+from autocompactor.stats import log_event  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 BACKUP_DIR = os.path.join(STATE_DIR, "backups")

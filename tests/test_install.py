@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INSTALL = os.path.join(HERE, "install.py")
+INSTALL = os.path.join(HERE, "src", "install.py")
 
 FAKE_CRONTAB = """#!/bin/sh
 if [ "$1" = "-l" ]; then

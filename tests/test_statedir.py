@@ -5,10 +5,7 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
-import analyze_corpus  # noqa: E402
-import artifacts  # noqa: E402
-import statedir  # noqa: E402
-import stats  # noqa: E402
+from autocompactor import analyze_corpus, artifacts, statedir, stats  # noqa: E402
 
 DEFAULT_ART_DIR = os.path.expanduser("~/.claude/autocompactor/artifacts")
 DEFAULT_STATS_DIR = os.path.expanduser("~/.claude/autocompactor/stats")

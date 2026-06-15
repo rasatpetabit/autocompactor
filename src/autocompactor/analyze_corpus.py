@@ -4,7 +4,7 @@ analyze_corpus.py — backtest autocompactor heuristics against real Claude
 Code transcripts and report tuning recommendations.
 
 Usage:
-    python3 analyze_corpus.py [--days 4] [--root ~/.claude/projects] \
+    python3 src/analyze_corpus.py [--days 4] [--root ~/.claude/projects] \
                               [--window 200000] [--json report.json]
 
 Runs entirely locally; reads transcripts read-only; emits aggregate
@@ -45,12 +45,10 @@ import statistics
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import config_lib  # noqa: E402
-from transcript_lib import (analyze, detect_phase,  # noqa: E402
-                            load_transcript, observe_only)
-from transcript_lib import active_signals as _registry_signals  # noqa: E402
-import window_resolver  # noqa: E402
+from autocompactor import config_lib, window_resolver  # noqa: E402
+from autocompactor.transcript_lib import (analyze, detect_phase,  # noqa: E402
+                                          load_transcript, observe_only)
+from autocompactor.transcript_lib import active_signals as _registry_signals  # noqa: E402
 
 DROP_FRAC = 0.30   # context drop that we treat as a compaction event
 _OBSERVE = observe_only()   # anti-predictive signals: measured, never gating

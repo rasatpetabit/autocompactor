@@ -36,9 +36,9 @@ place (no files are copied):
 
 ```bash
 git clone <repo-url> autocompactor && cd autocompactor
-python3 install.py            # hooks + missing env defaults
-python3 install.py --cron     # ... and the 03:30 nightly self-evaluation
-python3 install.py --verify   # pytest + smoke + live transcript probe
+python3 src/install.py            # hooks + missing env defaults
+python3 src/install.py --cron     # ... and the 03:30 nightly self-evaluation
+python3 src/install.py --verify   # pytest + smoke + live transcript probe
 ```
 
 Then run `/hooks` inside Claude Code to confirm registration.
@@ -62,13 +62,13 @@ shells out to the same Python core. Separate installer, same idempotency
 rules:
 
 ```bash
-python3 install_pi.py            # extension -> ~/.pi/agent/extensions/ (bridge path baked in)
-python3 install_pi.py --status   # doctor: placeholder rewritten? bridge reachable? version drift?
-python3 install_pi.py --remove   # delete only our shim + version pin
+python3 src/install_pi.py            # extension -> ~/.pi/agent/extensions/ (bridge path baked in)
+python3 src/install_pi.py --status   # doctor: placeholder rewritten? bridge reachable? version drift?
+python3 src/install_pi.py --remove   # delete only our shim + version pin
 ```
 
-The installer copies `pi/autocompactor.ts` with this checkout's
-`pi_bridge.py` path rewritten in (a symlink can't carry the path), pins
+The installer copies `src/pi/autocompactor.ts` with this checkout's
+`src/pi_bridge.py` path rewritten in (a symlink can't carry the path), pins
 the Pi package version observed at install time, and never touches
 anything else under `~/.pi`. Restart Pi to load the extension. Pi-side
 state and telemetry live under `~/.autocompactor/pi/` (the Claude state

@@ -437,7 +437,7 @@ OBSERVE_ONLY_DEFAULT = "error_resolved,tests_pass,idle_gap"
 
 
 def observe_only(harness: str = "claude") -> frozenset:
-    import config_lib
+    from autocompactor import config_lib
     raw = config_lib.cfg.str("OBSERVE_ONLY", harness=harness,
                              default=OBSERVE_ONLY_DEFAULT)
     return frozenset(s.strip() for s in raw.split(",") if s.strip())
@@ -527,7 +527,7 @@ def build_context_state(st: TranscriptStats, window: float = 0.0,
     signal_window = window or 200_000.0
     stale_frac_thr = 0.5
     try:
-        import config_lib
+        from autocompactor import config_lib
         if window <= 0:
             signal_window = config_lib.cfg.float(
                 "WINDOW", harness=harness, default=200_000)

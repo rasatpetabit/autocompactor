@@ -6,7 +6,7 @@ import datetime
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
-import nightly_eval  # noqa: E402
+from autocompactor import nightly_eval  # noqa: E402
 
 
 def test_nightly_passes_live_config_to_backtester(tmp_path, monkeypatch):
@@ -31,7 +31,7 @@ def test_nightly_passes_live_config_to_backtester(tmp_path, monkeypatch):
             return 0, "smoke ok"
         if cmd[-1:] == ["--version"]:
             return 0, "Claude Code test\n"
-        if len(cmd) >= 2 and cmd[1] == "analyze_corpus.py":
+        if len(cmd) >= 2 and cmd[1] == "src/analyze_corpus.py":
             seen["backtest_cmd"] = cmd
             report = cmd[cmd.index("--json") + 1]
             with open(report, "w", encoding="utf-8") as fh:
@@ -71,7 +71,7 @@ def test_nightly_reports_learned_tiers_and_native_cap_blocks(tmp_path, monkeypat
             return 0, "smoke ok"
         if cmd[-1:] == ["--version"]:
             return 0, "Claude Code test\n"
-        if len(cmd) >= 2 and cmd[1] == "analyze_corpus.py":
+        if len(cmd) >= 2 and cmd[1] == "src/analyze_corpus.py":
             report = cmd[cmd.index("--json") + 1]
             with open(report, "w", encoding="utf-8") as fh:
                 json.dump({"sessions": [{

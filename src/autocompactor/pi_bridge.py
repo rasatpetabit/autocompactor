@@ -43,15 +43,11 @@ import os
 import shutil
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import artifacts                                   # noqa: E402
-import pi_session_lib                              # noqa: E402
-import statedir                                    # noqa: E402
-import transcript_lib                              # noqa: E402
-from config_lib import cfg                        # noqa: E402
-from precompact_analyzer import llm_digest        # noqa: E402
-from stats import log_event                       # noqa: E402
-import window_resolver                            # noqa: E402
+from autocompactor import (artifacts, pi_session_lib, statedir,  # noqa: E402
+                           transcript_lib, window_resolver)
+from autocompactor.config_lib import cfg                          # noqa: E402
+from autocompactor.precompact_analyzer import llm_digest          # noqa: E402
+from autocompactor.stats import log_event                         # noqa: E402
 
 HARNESS = "pi"
 DIGEST_CUSTOM_TYPE = "autocompactor.digest"

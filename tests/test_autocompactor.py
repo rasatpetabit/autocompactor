@@ -20,10 +20,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(REPO, "tests", "fixtures")
 sys.path.insert(0, REPO)
 
-import analyze_corpus  # noqa: E402
-import artifacts  # noqa: E402
-import precompact_analyzer as pa  # noqa: E402
-import transcript_lib as tl  # noqa: E402
+from autocompactor import analyze_corpus, artifacts  # noqa: E402
+from autocompactor import precompact_analyzer as pa, transcript_lib as tl  # noqa: E402
 
 
 # ---------------------------------------------------------------- helpers
@@ -564,8 +562,8 @@ def test_build_context_state_uses_window_harness_and_default_count(monkeypatch):
 
 # ------------------------------------------------------------ hook contract
 
-MONITOR = "context_monitor.py"
-ANALYZER = "precompact_analyzer.py"
+MONITOR = "src/context_monitor.py"
+ANALYZER = "src/precompact_analyzer.py"
 
 
 def test_monitor_clamps_window_for_small_sessions(tmp_path):
@@ -785,7 +783,7 @@ def test_hooks_never_raise(script, payload, tmp_path):
 
 def _isolate_config(monkeypatch):
     """Hermetic in-process config: ignore repo config.json/config.local.json."""
-    import config_lib
+    from autocompactor import config_lib
     monkeypatch.setenv("AUTOCOMPACTOR_CONFIG", "")
     monkeypatch.setattr(config_lib, "_config_cache", None)
 

@@ -13,7 +13,7 @@ import sys
 import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-BRIDGE = REPO_ROOT / "pi_bridge.py"
+BRIDGE = REPO_ROOT / "src" / "pi_bridge.py"
 
 
 def run_bridge(args, state_dir, stdin_text=None, extra_env=None):

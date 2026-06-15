@@ -15,7 +15,7 @@ import json
 import os
 import re
 
-import transcript_lib
+from autocompactor import transcript_lib
 
 
 PI_TEST_PASS_RE = re.compile(r"(^|\n)\s*PASS\b")

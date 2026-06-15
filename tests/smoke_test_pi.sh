@@ -22,7 +22,7 @@ while IFS='=' read -r v _; do unset "$v"; done < <(env | grep '^AUTOCOMPACTOR_')
 export AUTOCOMPACTOR_STATE_DIR="$HOME/pi-state"
 
 FIX=tests/fixtures/pi
-BRIDGE=pi_bridge.py
+BRIDGE=src/pi_bridge.py
 
 echo "1) evaluate recommends at boundary fixture"
 OUT=$(python3 "$BRIDGE" evaluate --session "$FIX/with_compaction.jsonl" --tokens 150000 --context-window 200000)

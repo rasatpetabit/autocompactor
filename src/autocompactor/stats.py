@@ -20,7 +20,7 @@ import json
 import os
 import socket
 
-import statedir
+from autocompactor import statedir
 
 STATS_DIR = os.path.expanduser("~/.claude/autocompactor/stats")
 

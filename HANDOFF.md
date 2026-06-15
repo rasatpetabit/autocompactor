@@ -359,6 +359,15 @@ reduction-by-phase after a few live days.
 
 ### Architecture summary
 
+> **SUPERSEDED 2026-06-15 (v1.0.0 — `src/` package reorg):** the flat layout
+> described below was intentionally converted to a real `src/autocompactor/`
+> package with thin `src/*.py` entrypoint shims. Installed Claude hooks,
+> the nightly cron, and the Pi extension now point at `src/<entry>.py` and
+> must be re-registered on every host (`python3 src/install.py --cron`,
+> `python3 src/install_pi.py`). The original "zero moves / byte-stable"
+> invariant text is preserved below as the historical rationale for the
+> seam design that made this reorg mechanical.
+
 Additive adapters, zero moves of existing files — the Claude install base
 (settings.json hook entry points) stays byte-stable. `TranscriptStats` is
 the normalized model; everything downstream of it (`active_signals`,

@@ -23,7 +23,7 @@ import {
 // Cache-bust so each test gets a FRESH module instance with its own closure
 // state (the shim's selfTriggered / lastRecTokens live at module scope).
 const freshShim = () =>
-  import(`../pi/autocompactor.ts?t=${Math.random().toString(36).slice(2)}`)
+  import(`../src/pi/autocompactor.ts?t=${Math.random().toString(36).slice(2)}`)
 
 // A mock ExtensionContext + ExtensionAPI that record every bridge (pi.exec)
 // call and let us drive the event lifecycle ourselves.

@@ -37,8 +37,7 @@ including the pi-custom-compactor evaluation and prioritized open items.
 ## Operating notes
 
 - Before changing behavior, run `python3 -m pytest tests/ -q` and
-  `bash tests/smoke_test.sh` when safe. The recovered baseline expected
-  37 pytest cases.
+  `bash tests/smoke_test.sh` when safe. Current baseline is 115 pytest cases.
 - Owner directive: `>80%` of spend is cached reads. Compact often and keep
   context low.
 - Every-turn cheapness relies on the min-savings guard: no recommendation when
@@ -46,7 +45,7 @@ including the pi-custom-compactor evaluation and prioritized open items.
 - For transcripts larger than `MAX_FULL_PARSE_MB(8)`, use tail-only parsing
   from the last verified `compact_boundary`; `peak_ctx` is carried in session
   state for the window clamp.
-- After a few live days, run `python3 analyze_corpus.py --events` to inspect
+- After a few live days, run `python3 src/analyze_corpus.py --events` to inspect
   reduction-ratio-by-phase and tune phase addenda.
 - Open refinements from the recovered handoff: improve `topic_shift` precision
   with prompt replay at backtest sample points; keep watching `stale_output`,
@@ -68,17 +67,39 @@ including the pi-custom-compactor evaluation and prioritized open items.
 
 ## File map
 
+All implementation modules live in the `src/autocompactor/` package. The thin
+shims in `src/*.py` are the hook/cron/CLI entrypoints — they put `src/` on
+`sys.path` and call the matching `autocompactor.<module>.main()`. `config.json`
+and `config.local.json` stay at the checkout root as user-facing config.
+
 | file | role |
 |---|---|
-| `context_monitor.py` | prompt-time signal monitor: signals + burn-rate -> compaction recommendation; one-shot artifact re-injection post-compaction |
-| `precompact_analyzer.py` | pre-compaction analyzer: backup, phase-aware instructions, artifact extraction |
-| `transcript_lib.py` | JSONL parsing, signal registry, phase detection, instruction builder |
-| `artifacts.py` | mechanical extraction -> disk -> budgeted digest |
-| `stats.py` | telemetry appender |
-| `analyze_corpus.py` | offline backtester + `--events` aggregator |
-| `install.py` | idempotent local settings registration |
-| `nightly_eval.py` | cron self-evaluation: tests, 1-day backtest, telemetry health checks, ceiling + trigger-drift + refill-breaker + microcompaction watches, dated reports, retention pruning; crontab: `03:30`, marker `# autocompactor-nightly` |
-| `tests/` | fixtures + `smoke_test.sh` + `test_autocompactor.py` |
+| `src/autocompactor/context_monitor.py` | prompt-time signal monitor: signals + burn-rate -> compaction recommendation; one-shot artifact re-injection post-compaction |
+| `src/autocompactor/precompact_analyzer.py` | pre-compaction analyzer: backup, phase-aware instructions, artifact extraction |
+| `src/autocompactor/transcript_lib.py` | JSONL parsing, signal registry, phase detection, instruction builder (shared brain, both harnesses) |
+| `src/autocompactor/config_lib.py` | unified config reader: `config.json`(+local) + `AUTOCOMPACTOR_*` env overrides, per-harness `claude`/`pi` sections |
+| `src/autocompactor/artifacts.py` | mechanical extraction -> disk -> budgeted digest |
+| `src/autocompactor/stats.py` | telemetry appender (`harness` field) |
+| `src/autocompactor/statedir.py` | harness-namespaced state roots (`claude`/`pi`) |
+| `src/autocompactor/window_resolver.py` | effective-window resolution (native ceiling vs learned tier) |
+| `src/autocompactor/analyze_corpus.py` | offline backtester + `--events` aggregator |
+| `src/autocompactor/nightly_eval.py` | cron self-evaluation: tests, 1-day backtest, telemetry health checks, ceiling + trigger-drift + refill-breaker + microcompaction watches, dated reports, retention pruning; crontab: `03:30`, marker `# autocompactor-nightly` |
+| `src/autocompactor/pi_session_lib.py` | Pi v3 tree-format JSONL -> `TranscriptStats` |
+| `src/autocompactor/pi_bridge.py` | never-raise JSON CLI bridging the Pi extension to the Python core (evaluate/prepare/reinject) |
+| `src/autocompactor/install.py` | Claude installer: idempotent `~/.claude/settings.json` hook + env + cron registration |
+| `src/autocompactor/install_pi.py` | Pi installer: copy-with-rewrite the TS shim, version-pin, `--status/--remove` doctor |
+| `src/*.py` | thin entrypoint shims (the hook/cron/CLI targets): `context_monitor`, `precompact_analyzer`, `pi_bridge`, `analyze_corpus`, `nightly_eval`, `install`, `install_pi` |
+| `src/pi/autocompactor.ts` | Pi TypeScript extension (zero-spawn pre-gate, advise/actuate modes, reentrancy guard, error-swallow everywhere) |
+| `config.json` | versioned tuning (top-level + per-harness sections); `config.local.json` is the gitignored site-local overlay |
+| `tests/` | fixtures + `smoke_test.sh` + `smoke_test_pi.sh` + `test_*.py` |
+
+## Pi harness
+
+The same advisor runs inside the [Pi coding agent]
+(`@earendil-works/pi-coding-agent`) via `src/pi/autocompactor.ts`, which shells
+out to `src/pi_bridge.py` (the shared Python core). Install with
+`python3 src/install_pi.py`; see `HANDOFF.md` ("Pi harness" section) for the
+full architecture, actuate-vs-advise decision, and verified ground-truth pins.
 <!-- agent-dispatch:begin routing hash=6d8307801e22f016588774ae010198516e8402aa6a7cd0724a433885e67b981b -->
 ## §routing — managed by agent-dispatch (do not hand-edit)
 

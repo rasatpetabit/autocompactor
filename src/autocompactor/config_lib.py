@@ -9,7 +9,7 @@ merged over it from config.local.json (gitignored). Env vars
 tuning. Defaults are the last fallback.
 
 Usage in any module:
-    from config_lib import cfg
+    from autocompactor.config_lib import cfg
     window = cfg.float("WINDOW")                # auto-detects harness
     hard  = cfg.float("HARD_PCT", harness="pi") # or explicit
     hard  = cfg.float_windowed("HARD_PCT", ctx_window, harness="pi")
@@ -20,9 +20,10 @@ from __future__ import annotations
 import json
 import os
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_CONFIG = os.path.join(_HERE, "config.json")
-_CONFIG_LOCAL = os.path.join(_HERE, "config.local.json")
+_HERE = os.path.dirname(os.path.abspath(__file__))       # .../src/autocompactor
+_REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))        # the checkout root
+_CONFIG = os.path.join(_REPO_ROOT, "config.json")
+_CONFIG_LOCAL = os.path.join(_REPO_ROOT, "config.local.json")
 
 # Cached config (loaded once at first use)
 _config_cache = None
@@ -133,7 +134,7 @@ class Config:
     """Unified config reader.
 
     Usage:
-        from config_lib import cfg
+        from autocompactor.config_lib import cfg
         window = cfg.float("WINDOW")
         hard   = cfg.float("HARD_PCT", harness="pi", default=0.65)
     """

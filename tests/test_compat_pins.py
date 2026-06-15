@@ -23,9 +23,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(REPO, "tests", "fixtures")
 sys.path.insert(0, REPO)
 
-import transcript_lib as tl  # noqa: E402
-import context_monitor  # noqa: E402
-import precompact_analyzer  # noqa: E402
+from autocompactor import transcript_lib as tl, context_monitor, precompact_analyzer  # noqa: E402
 
 
 # ----------------------------------------------------------------- helpers
@@ -226,8 +224,8 @@ def test_state_dir_defaults():
 # ============================================================ Pin 4
 # Hook stdout top-level key schema
 
-MONITOR = "context_monitor.py"
-ANALYZER = "precompact_analyzer.py"
+MONITOR = "src/context_monitor.py"
+ANALYZER = "src/precompact_analyzer.py"
 
 _RICH_PATH = os.path.join(FIX, "rich_transcript.jsonl")
 
