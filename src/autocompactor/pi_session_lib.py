@@ -114,21 +114,10 @@ def _content_blocks(message: dict) -> list:
     return content if isinstance(content, list) else []
 
 
-def _block_text(block) -> str:
-    if isinstance(block, str):
-        return block
-    if not isinstance(block, dict):
-        return ""
-    if block.get("type") == "text":
-        return block.get("text", "") or ""
-    if block.get("type") == "thinking":
-        return block.get("thinking", "") or ""
-    inner = block.get("content")
-    if isinstance(inner, str):
-        return inner
-    if isinstance(inner, list):
-        return "\n".join(_block_text(b) for b in inner)
-    return ""
+# Single-source the block flattener: transcript_lib._block_text already
+# handles text / thinking / nested-content blocks identically. Aliasing here
+# (rather than re-implementing) keeps the two harnesses from drifting.
+_block_text = transcript_lib._block_text
 
 
 def _message_text(message: dict, include_thinking: bool = False) -> str:

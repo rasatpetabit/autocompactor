@@ -247,24 +247,10 @@ def cmd_prepare(opts: dict) -> dict:
         if extra:
             instructions += "\n\nAdditional must-preserve facts:\n" + extra
 
-    # Founding-goal restatement (owner directive): every compaction pass
-    # must restate the session's original prompts verbatim — staged
-    # instructions may predate their capture, the old-wins artifact merge
-    # always carries them.
-    founding = [p.replace("\n", " ")
-                for p in arts.get("initial_prompts") or []]
-    if founding and founding[0][:200] not in instructions:
-        instructions += (
-            "\n\nThe ORIGINAL user request(s) that framed this session "
-            "(quote these VERBATIM in GOAL; never paraphrase):\n"
-            + "\n".join("    * " + p for p in founding))
-    instructions += (
-        "\n\nNOTE: the following are preserved on disk and will be "
-        "re-injected after compaction -- do NOT spend summary space "
-        "duplicating them: user corrections, error texts, working "
-        "commands, discovered constants, file lists. Focus the summary "
-        "on what regexes cannot extract: decisions and rationale, plan "
-        "position, failed approaches, open questions.")
+    # Founding-goal restatement + on-disk-artifacts NOTE (shared with the
+    # Claude precompact_analyzer so the two paths can't drift).
+    instructions = transcript_lib.append_artifact_restatement(
+        instructions, arts)
 
     state["pending_reinject"] = True
     state["compaction_count"] = state.get("compaction_count", 0) + 1

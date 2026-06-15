@@ -65,13 +65,20 @@ def _content_blocks(entry: dict) -> list:
 
 
 def _block_text(block: dict) -> str:
-    """Flatten a content block (or tool_result) to text."""
+    """Flatten a content block (or tool_result) to text.
+
+    Shared by both harnesses (pi_session_lib aliases this). The `thinking`
+    branch is unreachable on the Claude path — analyze() only calls this on
+    user/tool_result blocks, never assistant thinking — but Pi's _message_text
+    relies on it, so the registry stays single-source."""
     if isinstance(block, str):
         return block
     if not isinstance(block, dict):
         return ""
     if block.get("type") == "text":
         return block.get("text", "") or ""
+    if block.get("type") == "thinking":
+        return block.get("thinking", "") or ""
     inner = block.get("content")
     if isinstance(inner, str):
         return inner

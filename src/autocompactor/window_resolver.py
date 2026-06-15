@@ -133,6 +133,15 @@ def resolve_window(configured_window: float, observed_peak: int,
             learned, source = _learned_from_peak(
                 observed, tier_values, promote_frac(harness))
         if source == "small_session_clamp":
+            # Claude/Pi asymmetry here is BY DESIGN, not a bug. Claude cannot
+            # see the live model window, so it infers the tier from observed
+            # peak and clamps a 1M-tuned configured window down to the 200k
+            # tier for a small session. Pi's effective window is the *exact*
+            # contextWindow - reserve (HANDOFF: "Pi effective window"); the
+            # live window is authoritative on the evaluate path, so the tier
+            # clamp is neither needed nor wanted. This branch is only reached
+            # on Pi's fire-and-forget prepare overview (no runtime window
+            # passed), where configured - reserve is the right fallback.
             configured_effective = configured
             if harness == "pi":
                 configured_effective = max(configured_effective - reserve, 1)

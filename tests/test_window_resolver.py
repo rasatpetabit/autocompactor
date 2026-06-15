@@ -40,6 +40,26 @@ def test_pi_runtime_context_window_is_authoritative():
     assert res.reserve == 40_000
 
 
+def test_pi_small_session_uses_exact_window_not_tier_clamp():
+    """D4 characterization: the small_session_clamp tier clamp is Claude-ONLY
+    by design. Claude infers an unknown model window from observed peak and
+    clamps a 1M-tuned configured window down to the 200k tier; Pi's effective
+    window is the exact contextWindow - reserve (the live window is
+    authoritative on the evaluate path), so Pi must NOT tier-clamp. Pinned so
+    the asymmetry can't be 'fixed' into a regression."""
+    claude = window_resolver.resolve_window(
+        configured_window=400_000, observed_peak=180_000)
+    assert claude.window_source == "small_session_clamp"
+    assert claude.effective_window == 200_000  # clamped to tier0, not 400k
+
+    pi = window_resolver.resolve_window(
+        harness="pi", configured_window=400_000, observed_peak=180_000,
+        reserve=40_000)
+    assert pi.window_source == "small_session_clamp"
+    assert pi.effective_window == 360_000  # 400k - 40k reserve, NO tier clamp
+    assert pi.learned_window == 200_000    # tier still recorded as 200k
+
+
 def test_native_ceiling_warning_for_learned_large_window():
     res = window_resolver.resolve_window(
         configured_window=300_000,
