@@ -192,6 +192,56 @@ def test_stale_output_threshold_respected():
         tl.active_signals(st, stale_frac_thr=0.9))
 
 
+def test_failed_tap_output_does_not_count_as_tests_passed():
+    entries = [
+        _assistant("Bash", {"command": "node --test"}, tool_id="t1"),
+        _tool_result("not ok 1 test\n# failed", tool_id="t1", is_error=True),
+    ]
+    st = tl.analyze(entries=entries)
+    assert not st.recent_tests_pass
+    assert "tests_pass" not in dict(tl.active_signals(st))
+
+
+def test_analyze_resets_active_signals_after_compact_boundary():
+    entries = [
+        _human("Original goal"),
+        _assistant("Bash", {"command": "git commit -m done"}, tool_id="c1",
+                   usage=_usage(120_000)),
+        _tool_result("[main abc123] done", tool_id="c1"),
+        {"type": "system", "subtype": "compact_boundary",
+         "compactMetadata": {"preTokens": 120_000, "postTokens": 70_000}},
+        {"type": "user", "isCompactSummary": True,
+         "message": {"content": [{"type": "text", "text": "summary"}]}},
+        _assistant(usage=_usage(110_000)),
+    ]
+    st = tl.analyze(entries=entries)
+    assert st.initial_user_prompts == ["Original goal"]
+    assert st.context_tokens == 110_000
+    assert not st.recent_commit
+    assert "commit" not in dict(tl.active_signals(st, window=300_000,
+                                                  stale_frac_thr=0.9))
+
+
+def test_analyze_counts_compaction_boundaries():
+    entries = [
+        _human("Original goal"),
+        _assistant(usage=_usage(100_000)),
+        {"type": "system", "subtype": "compact_boundary",
+         "compactMetadata": {"preTokens": 100_000, "postTokens": 60_000}},
+        _assistant(usage=_usage(150_000)),
+        {"type": "system", "subtype": "compact_boundary",
+         "compactMetadata": {"preTokens": 150_000, "postTokens": 70_000}},
+        _assistant(usage=_usage(80_000)),
+    ]
+    st = tl.analyze(entries=entries)
+    assert st.compaction_count == 2
+    # build_context_state surfaces the real count, not a stuck-at-0 default
+    assert "Compaction count: 2" in tl.build_context_state(st, window=300_000)
+    # a transcript with no compactions reports 0
+    st0 = tl.analyze(entries=[_human("hi"), _assistant(usage=_usage(50_000))])
+    assert st0.compaction_count == 0
+
+
 def test_detect_phase_variants():
     st = tl.TranscriptStats()
     st.recent_commit = True
@@ -225,6 +275,13 @@ def test_artifact_roundtrip_and_budget(tmp_path, monkeypatch):
     digest = artifacts.build_digest(loaded, budget_tokens=100)
     assert digest
     assert len(digest) <= 100 * 6  # budget is approximate, never wildly over
+
+
+def test_build_digest_does_not_return_header_only_for_large_single_section():
+    arts = {"files": {"edited": ["/" + "x" * 5000 + ".py"], "read": []}}
+    digest = artifacts.build_digest(arts, budget_tokens=20)
+    assert "FILES:" in digest
+    assert len(digest.split("\n\n", 1)[1].strip()) > 0
 
 
 def test_merge_unions_and_supersedes():
@@ -423,6 +480,86 @@ def test_backtest_session_on_fixture_corpus():
     assert "signal_observations" in r
     # feeds the nightly rapid-refill-breaker watch
     assert "post_last_compaction_peak" in r
+    assert "learned_window" in r
+    assert "peak_learned_occupancy" in r
+
+
+def test_analyze_prefix_includes_sampled_entry():
+    entries = [
+        _assistant(usage=_usage(90_000)),
+        _assistant("Bash", {"command": "git commit -m x"}, usage=_usage(160_000)),
+    ]
+    st = analyze_corpus.analyze_prefix(entries, 1)
+    assert st.context_tokens == 160_000
+    assert st.recent_commit
+
+
+def test_backtest_replay_uses_configured_signal_thresholds(tmp_path):
+    entries = [_assistant(usage=_usage(t)) for t in (
+        120_000, 130_000, 140_000, 150_000, 160_000, 200_000, 160_000)]
+    p = tmp_path / "wide.jsonl"
+    p.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    report = analyze_corpus.backtest_session(
+        str(p), window=400_000, soft=0.4, hard=0.65,
+        min_eval=90_000, lead_tokens=50_000)
+    observed = {ob["signal"] for ob in report["signal_observations"]}
+    assert "burn_rate" not in observed
+    assert not report["first_recommendation"]
+
+
+def test_backtest_reports_learned_window_occupancy_for_large_peak(tmp_path):
+    entries = [_assistant(usage=_usage(t)) for t in (
+        120_000, 200_000, 341_000, 320_000, 330_000)]
+    p = tmp_path / "large-peak.jsonl"
+    p.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    report = analyze_corpus.backtest_session(
+        str(p), window=300_000, soft=0.5, hard=0.62)
+    assert report["learned_window"] == 512_000
+    assert report["learned_tier"] == "512k"
+    assert report["peak_learned_occupancy"] == 341_000 / 512_000
+
+
+def test_backtest_late_by_tokens_resets_after_each_compaction(tmp_path):
+    def boundary(pre, post=80_000):
+        return {"type": "system", "subtype": "compact_boundary",
+                "compactMetadata": {
+                    "preTokens": pre, "postTokens": post, "trigger": "auto"}}
+
+    entries = [
+        _assistant(usage=_usage(100_000)),
+        _assistant(usage=_usage(130_000)),
+        _assistant("Bash", {"command": "git commit -m first"},
+                   usage=_usage(160_000)),
+        _assistant(usage=_usage(210_000)),
+        boundary(210_000),
+        _assistant(usage=_usage(80_000)),
+        _assistant(usage=_usage(120_000)),
+        _assistant(usage=_usage(170_000)),
+        _assistant(usage=_usage(210_000)),
+        _assistant(usage=_usage(250_000)),
+        boundary(250_000),
+        _assistant(usage=_usage(80_000)),
+    ]
+    p = tmp_path / "two-compactions.jsonl"
+    p.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    report = analyze_corpus.backtest_session(
+        str(p), window=300_000, soft=0.5, hard=0.65, min_eval=0)
+    assert report["compactions"][0]["late_by_tokens"] == 50_000
+    # Burn-rate is a live gating signal, so the second cycle's first viable
+    # recommendation is at 170k, not the later hard-threshold point at 210k.
+    assert report["compactions"][1]["late_by_tokens"] == 80_000
+
+
+def test_build_context_state_uses_window_harness_and_default_count(monkeypatch):
+    monkeypatch.setenv("AUTOCOMPACTOR_PI_OBSERVE_ONLY", "stale_output")
+    st = tl.TranscriptStats(context_tokens=160_000,
+                            usage_series=[120_000, 130_000, 140_000,
+                                          150_000, 160_000],
+                            stale_tool_chars=60, total_tool_chars=100)
+    out = tl.build_context_state(st, window=400_000, harness="pi")
+    assert "Occupancy: 40%" in out
+    assert "Active signals: none" in out
+    assert "Compaction count: 0" in out
 
 
 # ------------------------------------------------------------ hook contract
@@ -460,6 +597,15 @@ def test_monitor_recommends_on_rich_fixture(tmp_path):
     r = _run_hook(MONITOR, payload, tmp_path)
     assert r.returncode == 0
     assert "Good moment to compact" in r.stdout
+    ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
+                     / "events.jsonl").read_text().splitlines()[-1])
+    for key in (
+            "effective_window", "configured_window", "learned_window",
+            "learned_tier", "window_source",
+            "native_ceiling_blocks_learned_window"):
+        assert key in ev
+    assert ev["effective_window"] == 200_000
+    assert ev["configured_window"] == 200_000
 
 
 def test_monitor_min_savings_guard_suppresses(tmp_path):
@@ -663,6 +809,12 @@ def test_analyzer_emits_instructions_and_artifacts(tmp_path):
     assert "user note" in r.stdout
     assert (tmp_path / ".claude" / "autocompactor" / "artifacts"
             / "py2.json").exists()
+    ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
+                     / "events.jsonl").read_text().splitlines()[-1])
+    assert ev["type"] == "precompact"
+    for key in ("effective_window", "configured_window", "learned_window",
+                "learned_tier", "window_source"):
+        assert key in ev
 
 
 def test_analyzer_systemmessage_summary(tmp_path):

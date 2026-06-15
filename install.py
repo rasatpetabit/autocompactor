@@ -274,6 +274,16 @@ def last_validated_version() -> str:
         return ""
 
 
+def last_window_learning_record() -> dict:
+    history = os.path.join(state_dir(), "reports", "nightly_history.jsonl")
+    try:
+        with open(history) as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        return json.loads(lines[-1]) if lines else {}
+    except Exception:
+        return {}
+
+
 def run_status() -> int:
     problems = 0
     settings = load_settings()
@@ -318,6 +328,12 @@ def run_status() -> int:
               f"({age_h:.0f}h old){flag}")
     else:
         print("  newest nightly report: none yet")
+
+    learned = last_window_learning_record()
+    blocked = int(learned.get("native_ceiling_blocked_sessions") or 0)
+    if blocked:
+        print(f"  window learning: native ceiling blocks {blocked} "
+              "learned-window session(s); report-only")
 
     current, validated = claude_version(), last_validated_version()
     if current:

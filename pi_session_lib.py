@@ -234,8 +234,9 @@ def _record_result_text(st, text: str, is_error: bool, is_recent: bool) -> None:
             st.hex_constants.append(text[a:b].replace("\n", " ").strip())
         if is_error:
             st.recent_errors.append(text[:300])
-        if (transcript_lib.TEST_PASS_RE.search(text[:2000])
-                or PI_TEST_PASS_RE.search(text[:2000])):
+        if (not is_error
+                and (transcript_lib.TEST_PASS_RE.search(text[:2000])
+                     or PI_TEST_PASS_RE.search(text[:2000]))):
             st.recent_tests_pass = True
 
 

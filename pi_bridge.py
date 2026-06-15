@@ -51,6 +51,7 @@ import transcript_lib                              # noqa: E402
 from config_lib import cfg                        # noqa: E402
 from precompact_analyzer import llm_digest        # noqa: E402
 from stats import log_event                       # noqa: E402
+import window_resolver                            # noqa: E402
 
 HARNESS = "pi"
 DIGEST_CUSTOM_TYPE = "autocompactor.digest"
@@ -123,11 +124,20 @@ def cmd_evaluate(opts: dict) -> dict:
     context_tokens = _to_int(opts.get("tokens"))
     if context_tokens is None:
         context_tokens = st.context_tokens
-    context_window = _to_int(opts.get("context_window"),
-                             int(cfg.float("WINDOW", harness=HARNESS, default=200_000)))
+    configured_window = int(cfg.float("WINDOW", harness=HARNESS, default=200_000))
+    runtime_context_window = _to_int(opts.get("context_window"))
+    context_window = runtime_context_window or configured_window
     reserve = _to_int(opts.get("reserve"),
                       int(cfg.float("RESERVE", harness=HARNESS, default=RESERVE_FALLBACK)))
-    window = float(max(context_window - reserve, 1))
+    observed_peak = max(
+        [context_tokens] + [int(v) for v in getattr(st, "usage_series", []) or []])
+    resolution = window_resolver.resolve_window(
+        configured_window=configured_window,
+        observed_peak=observed_peak,
+        harness=HARNESS,
+        runtime_context_window=runtime_context_window,
+        reserve=reserve)
+    window = resolution.effective_window
     occupancy = context_tokens / window
 
     # Window-aware thresholds: WIDE suffix for large windows (>=300k)
@@ -165,6 +175,7 @@ def cmd_evaluate(opts: dict) -> dict:
         "tail_parse": False,
         "recommended": recommend and not suppressed,
         "suppressed_by_cooldown": recommend and suppressed,
+        **resolution.event_fields(),
     }, harness=HARNESS)
 
     # Pre-compaction context overview — for the TS shim to display and
@@ -264,9 +275,12 @@ def cmd_prepare(opts: dict) -> dict:
     # Pre-compaction context overview — produced at prepare time so it
     # reflects the exact state when compaction starts (not when evaluate
     # fired, which may be several turns earlier).
-    effective_window = float(max(
-        int(cfg.float("WINDOW", harness=HARNESS, default=200_000)) - int(cfg.float("RESERVE", harness=HARNESS, default=RESERVE_FALLBACK)),
-        1))
+    prepare_resolution = window_resolver.resolve_window(
+        configured_window=cfg.float("WINDOW", harness=HARNESS, default=200_000),
+        observed_peak=max(st.usage_series) if st.usage_series else st.context_tokens,
+        harness=HARNESS,
+        reserve=int(cfg.float("RESERVE", harness=HARNESS, default=RESERVE_FALLBACK)))
+    effective_window = prepare_resolution.effective_window
     ctx_state = transcript_lib.build_context_state(
         st, window=effective_window, harness=HARNESS)
 
@@ -275,6 +289,7 @@ def cmd_prepare(opts: dict) -> dict:
         "context_tokens": st.context_tokens, "phase": phase,
         "had_staged": bool(staged), "had_user_instructions": False,
         "instr_chars": len(instructions), "artifact_chars": art_sizes,
+        **prepare_resolution.event_fields(),
     }, harness=HARNESS)
 
     return {"customInstructions": instructions,

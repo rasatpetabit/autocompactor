@@ -46,9 +46,11 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config_lib  # noqa: E402
 from transcript_lib import (analyze, detect_phase,  # noqa: E402
                             load_transcript, observe_only)
 from transcript_lib import active_signals as _registry_signals  # noqa: E402
+import window_resolver  # noqa: E402
 
 DROP_FRAC = 0.30   # context drop that we treat as a compaction event
 _OBSERVE = observe_only()   # anti-predictive signals: measured, never gating
@@ -117,13 +119,20 @@ def find_compactions(traj: list, entries: list = None) -> list:
 
 
 def backtest_session(path: str, window: float, soft: float, hard: float,
-                     min_eval: float = 90_000, lead_tokens: float = 50_000):
+                     min_eval: float = 90_000, lead_tokens: float = 50_000,
+                     stale_frac_thr: float = 0.90,
+                     native_ceiling: float | None = None):
     entries = load_transcript(path)
     traj = trajectory(entries)
     if len(traj) < 5:
         return {"path": __import__("os").path.basename(path),
                 "turns": len(traj), "skipped": "too_short"}
     peak = max(t for _, t in traj)
+    resolution = window_resolver.resolve_window(
+        configured_window=window,
+        observed_peak=peak,
+        native_ceiling=native_ceiling)
+    window = resolution.effective_window
     compactions = find_compactions(traj, entries)
 
     # Replay autocompactor at sampled assistant steps. One pass computes
@@ -131,23 +140,30 @@ def backtest_session(path: str, window: float, soft: float, hard: float,
     # observations (does a compaction follow within lead_tokens of
     # context growth from each firing?).
     first_reco = None
+    recommendations = []
     reco_signals = []
     signal_obs = []
     sample_points = [traj[k] for k in range(0, len(traj), max(1, len(traj) // 40))]
     for entry_idx, tokens in sample_points:
         occ = tokens / window
-        want_reco = first_reco is None and occ >= soft
+        want_reco = occ >= soft
         want_prec = tokens >= min_eval
         if not (want_reco or want_prec):
             continue
         st = analyze_prefix(entries, entry_idx)
-        sigs = active_signals(st)
+        sigs = active_signals(st, window=window,
+                              stale_frac_thr=stale_frac_thr)
         # Mirror the monitor exactly: observe-only signals are measured
         # for precision below but never justify a replayed recommendation.
         gating = [s for s in sigs if s not in _OBSERVE]
         if want_reco and (occ >= hard or gating):
-            first_reco = {"tokens": tokens, "occupancy": occ, "signals": sigs}
-            reco_signals = sigs
+            reco = {"entry_idx": entry_idx, "tokens": tokens,
+                    "occupancy": occ, "signals": sigs}
+            recommendations.append(reco)
+            if first_reco is None:
+                first_reco = {"tokens": tokens, "occupancy": occ,
+                              "signals": sigs}
+                reco_signals = sigs
         if want_prec:
             nxt = next((c for c in compactions
                         if c["entry_idx"] > entry_idx), None)
@@ -161,9 +177,11 @@ def backtest_session(path: str, window: float, soft: float, hard: float,
                                    "next_trigger": trig})
 
     results = []
+    prev_compact_entry = -1
     for c in compactions:
         entry_idx = traj[c["traj_idx"]][0]
-        st = analyze_prefix(entries, entry_idx)
+        analyze_upto = c["entry_idx"] - 1 if c.get("explicit") else entry_idx
+        st = analyze_prefix(entries, analyze_upto)
         rec = {
             "occupancy_at_compact": c["before"] / window,
             "before": c["before"],
@@ -171,11 +189,19 @@ def backtest_session(path: str, window: float, soft: float, hard: float,
             "reduction": 1 - c["after"] / c["before"],
             "trigger": c.get("trigger", "unknown"),
             "phase": detect_phase(st),
-            "signals_at_compact": active_signals(st),
+            "signals_at_compact": active_signals(
+                st, window=window, stale_frac_thr=stale_frac_thr),
+            "learned_occupancy_at_compact":
+                c["before"] / resolution.learned_window,
         }
-        if first_reco and first_reco["tokens"] < c["before"]:
-            rec["late_by_tokens"] = c["before"] - first_reco["tokens"]
+        cycle_reco = next((
+            r for r in recommendations
+            if prev_compact_entry < r["entry_idx"] < c["entry_idx"]
+            and r["tokens"] < c["before"]), None)
+        if cycle_reco:
+            rec["late_by_tokens"] = c["before"] - cycle_reco["tokens"]
         results.append(rec)
+        prev_compact_entry = c["entry_idx"]
 
     # Peak context AFTER the last compaction — feeds the nightly
     # rapid-refill-breaker watch (did autocompact silently stop firing
@@ -191,6 +217,8 @@ def backtest_session(path: str, window: float, soft: float, hard: float,
         "turns": len(traj),
         "peak_tokens": peak,
         "peak_occupancy": peak / window,
+        "peak_learned_occupancy": peak / resolution.learned_window,
+        **resolution.event_fields(),
         "post_last_compaction_peak": post_peak,
         "compactions": results,
         "first_recommendation": first_reco,
@@ -202,12 +230,16 @@ def backtest_session(path: str, window: float, soft: float, hard: float,
 
 
 def analyze_prefix(entries: list, upto: int):
-    """Run transcript analysis over entries[:upto]."""
-    return analyze(entries=entries[:upto])
+    """Run transcript analysis over entries through index `upto`."""
+    if upto < 0:
+        return analyze(entries=[])
+    return analyze(entries=entries[:upto + 1])
 
 
-def active_signals(st) -> list:
-    return [name for name, _ in _registry_signals(st)]
+def active_signals(st, window: float = 200_000.0,
+                   stale_frac_thr: float = 0.5) -> list:
+    return [name for name, _ in _registry_signals(
+        st, window=window, stale_frac_thr=stale_frac_thr)]
 
 
 
@@ -256,9 +288,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=float, default=4)
     ap.add_argument("--root", default="~/.claude/projects")
-    ap.add_argument("--window", type=float, default=200_000)
-    ap.add_argument("--soft", type=float, default=0.40)
-    ap.add_argument("--hard", type=float, default=0.65)
+    ap.add_argument("--window", type=float,
+                    default=config_lib.cfg.float("WINDOW", default=200_000))
+    ap.add_argument("--soft", type=float,
+                    default=config_lib.cfg.float("SOFT_PCT", default=0.40))
+    ap.add_argument("--hard", type=float,
+                    default=config_lib.cfg.float("HARD_PCT", default=0.65))
+    ap.add_argument("--stale-frac", type=float, default=None)
+    ap.add_argument("--native-ceiling", type=float, default=None)
     ap.add_argument("--min-eval-tokens", type=float, default=90_000,
                     help="evaluate signal precision at sampled points above this")
     ap.add_argument("--lead-tokens", type=float, default=50_000,
@@ -274,6 +311,8 @@ def main():
     if args.events:
         print(json.dumps(aggregate_events(args.stats_dir), indent=2))
         return
+    if args.stale_frac is None:
+        args.stale_frac = config_lib.cfg.float("STALE_FRAC", default=0.90)
 
     cutoff = time.time() - args.days * 86400
     paths = [p for p in glob.glob(
@@ -287,7 +326,8 @@ def main():
     for p in sorted(paths):
         try:
             r = backtest_session(p, args.window, args.soft, args.hard,
-                                 args.min_eval_tokens, args.lead_tokens)
+                                 args.min_eval_tokens, args.lead_tokens,
+                                 args.stale_frac, args.native_ceiling)
         except Exception as exc:  # schema drift tolerance
             print(f"  ! skipped {os.path.basename(p)}: {exc}")
             continue

@@ -2,6 +2,36 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-14 — observe-first auto-window learning
+
+- Added shared `window_resolver` support for observe-only learned context tiers
+  (`200k/300k/512k/1m`) across Claude, Pi, backtest, nightly, and status
+  reporting. Live recommendation windows stay on the current configured/runtime
+  path; no config or Claude native cap is rewritten.
+- Telemetry/backtest/nightly now record effective/configured/learned windows,
+  learned tier/source, Pi runtime window/reserve, and native-cap bottlenecks.
+  Regression coverage added for resolver tiers, hook events, backtest learned
+  occupancy, Pi runtime telemetry, and nightly learned-tier reporting.
+
+## 2026-06-14 — fixed adversarial-review findings (H1–H3, M1–M2, C1–C4) + Pi double-prepare
+
+- Evaluation fidelity (H1/H2/H3/C2): backtester now replays with live config
+  window + STALE_FRAC via the shared window_resolver, uses inclusive prefixes
+  (`entries[:upto+1]`), and measures lateness per compaction cycle; nightly
+  reads thresholds from config_lib and passes live values into the backtest.
+- Parser/display (C1/C3/C4/M1/M2): analyze() truncates to the post-boundary
+  segment (founding prompts still captured from the full path) so recent
+  signals reset after a compaction; build_digest no longer returns header-only;
+  TEST_PASS_RE rejects TAP `not ok` (and is guarded by `not is_error`);
+  build_context_state threads window/harness/stale into its signals;
+  compaction_count is now a populated TranscriptStats field (was getattr-0).
+- Pi double-prepare: session_before_compact returns early when selfTriggered,
+  so actuate-mode compactions no longer fire a redundant native prepare (was
+  doubling the LLM digest + backup on every self-triggered compaction).
+- Coverage: 113 pytest pass (was 96), both smoke suites green. Deployment
+  verified OK for both harnesses; Pi pin refreshed to 0.79.3. TS shim needs a
+  Pi restart to load the double-prepare fix.
+
 ## 2026-06-10 — pi-harness waves 0-2, incident, verbatim-prompts directive
 
 - **Masterplan `pi-harness`** (docs/masterplan/pi-harness/, autonomy=loose)

@@ -43,6 +43,7 @@ class TranscriptStats:
     todo_step: bool = False          # >=1 completed AND >=1 pending in latest TodoWrite
     stale_tool_chars: int = 0        # chars of tool_result older than window
     total_tool_chars: int = 0
+    compaction_count: int = 0        # number of compact_boundary entries seen
     # timing-signal raw material
     usage_series: list = field(default_factory=list)   # context estimate per assistant turn
     recent_error_then_clean: bool = False  # debug loop concluded
@@ -80,7 +81,7 @@ def _block_text(block: dict) -> str:
 
 
 TEST_PASS_RE = re.compile(
-    r"(\b\d+ passed\b|\ball tests? pass|\bok\b.*\b\d+ tests?\b|test suite passed)",
+    r"(\b\d+ passed\b|\ball tests? pass|(?<!not )\bok\b.*\b\d+ tests?\b|test suite passed)",
     re.IGNORECASE,
 )
 
@@ -194,8 +195,33 @@ def find_last_boundary_offset(path: str, needle: bytes = b'"compact_boundary"',
 def analyze(path: str = "", recent_window: int = 30,
             entries: list = None, start_offset: int = 0) -> TranscriptStats:
     st = TranscriptStats()
-    st.entries = (entries if entries is not None
-                  else load_transcript(path, start_offset=start_offset))
+    raw_entries = (entries if entries is not None
+                   else load_transcript(path, start_offset=start_offset))
+    st.entries = raw_entries
+
+    last_boundary = -1
+    for idx, entry in enumerate(raw_entries):
+        if (entry.get("type") == "system"
+                and entry.get("subtype") == "compact_boundary"):
+            last_boundary = idx
+            st.compaction_count += 1
+    if last_boundary >= 0:
+        for entry in raw_entries:
+            if len(st.initial_user_prompts) >= INITIAL_PROMPTS_MAX:
+                break
+            if entry.get("isCompactSummary") or entry.get("isMeta"):
+                continue
+            if entry.get("type") != "user":
+                continue
+            blocks = _content_blocks(entry)
+            if any(isinstance(b, dict) and b.get("type") == "tool_result"
+                   for b in blocks):
+                continue
+            text = "\n".join(_block_text(b) for b in blocks).strip()
+            if text and not text.startswith("/") and "<command-name>" not in text:
+                st.initial_user_prompts.append(text[:INITIAL_PROMPT_CHARS])
+        st.entries = raw_entries[last_boundary + 1:]
+
     n = len(st.entries)
     edited, read = {}, {}
     pending_bash = {}            # tool_use_id -> command (for working/error pairing)
@@ -293,7 +319,7 @@ def analyze(path: str = "", recent_window: int = 30,
                                 text[a:b].replace("\n", " ").strip())
                         if is_err:
                             st.recent_errors.append(text[:300])
-                        if TEST_PASS_RE.search(text[:2000]):
+                        if not is_err and TEST_PASS_RE.search(text[:2000]):
                             st.recent_tests_pass = True
             else:
                 # A genuine human turn. Track the last substantive one.
@@ -498,7 +524,19 @@ def build_context_state(st: TranscriptStats, window: float = 0.0,
     a separate JSON field so the TS shim can post it as a visible message).
     """
     phase = detect_phase(st)
-    signals = active_signals(st)
+    signal_window = window or 200_000.0
+    stale_frac_thr = 0.5
+    try:
+        import config_lib
+        if window <= 0:
+            signal_window = config_lib.cfg.float(
+                "WINDOW", harness=harness, default=200_000)
+        stale_frac_thr = config_lib.cfg.float(
+            "STALE_FRAC", harness=harness, default=0.50)
+    except Exception:
+        pass
+    signals = active_signals(st, window=signal_window,
+                             stale_frac_thr=stale_frac_thr)
     lines = [
         f"Context: {st.context_tokens:,} tokens",
         f"Phase: {phase}",
@@ -512,11 +550,12 @@ def build_context_state(st: TranscriptStats, window: float = 0.0,
     lines.append(f"Edited files: {len(st.edited_files)}")
     lines.append(f"Read files: {len(st.read_files)}")
     if signals:
-        gating = [desc for name, desc in signals if name not in observe_only()]
+        gating = [desc for name, desc in signals
+                  if name not in observe_only(harness=harness)]
         lines.append(f"Active signals: {', '.join(gating) if gating else 'none'}")
     else:
         lines.append("Active signals: none")
-    lines.append(f"Compaction count: {st.compaction_count}")
+    lines.append(f"Compaction count: {getattr(st, 'compaction_count', 0)}")
     return " | ".join(lines)
 
 

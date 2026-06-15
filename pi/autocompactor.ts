@@ -181,6 +181,13 @@ export default function autocompactor(pi: ExtensionAPI) {
   // optional cancel-and-retrigger enrichment, default OFF.
   pi.on("session_before_compact", async (_event, ctx) => {
     try {
+      // Self-triggered (actuate mode): agent_end already ran prepare
+      // (trigger=actuate), captured pre-tokens, and passed its
+      // customInstructions into ctx.compact(). Let that compaction run
+      // untouched — a second prepare(trigger=native) here is redundant
+      // (its result is discarded) and, with the optional LLM digest on,
+      // would double the digest cost per self-triggered compaction.
+      if (selfTriggered) return
       const usage = ctx.getContextUsage()
       // Capture pre-compaction tokens for the post-compaction summary.
       if (usage && usage.tokens != null) {
@@ -188,12 +195,12 @@ export default function autocompactor(pi: ExtensionAPI) {
       }
       // Fire-and-forget prepare for backup + artifacts + founding-goal.
       // Non-intercept: do NOT await — native compaction proceeds immediately.
-      if (!interceptEnabled() || selfTriggered) {
+      if (!interceptEnabled()) {
         void bridge(pi, ctx, "prepare", ["--trigger", "native"], PREPARE_TIMEOUT_MS)
         return
       }
       // Intercept mode: cancel native compaction and re-trigger with
-      // our customInstructions. SelfTriggered is already true here.
+      // our customInstructions (selfTriggered is false here).
       const prep = await bridge(
         pi, ctx, "prepare", ["--trigger", "native"], PREPARE_TIMEOUT_MS)
       if (!prep?.customInstructions) return

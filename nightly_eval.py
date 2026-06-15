@@ -38,6 +38,7 @@ import time
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, REPO)
+import config_lib  # noqa: E402
 
 BASE = os.path.expanduser("~/.claude/autocompactor")
 REPORTS = os.path.join(BASE, "reports")
@@ -108,8 +109,10 @@ def main() -> int:
     os.makedirs(REPORTS, exist_ok=True)
     today = datetime.date.today().isoformat()
     env = settings_env()
-    window = float(env.get("AUTOCOMPACTOR_WINDOW", 200_000))
-    hard_pct = float(env.get("AUTOCOMPACTOR_HARD_PCT", 0.65))
+    window = config_lib.cfg.float("WINDOW", default=200_000)
+    soft_pct = config_lib.cfg.float("SOFT_PCT", default=0.40)
+    hard_pct = config_lib.cfg.float("HARD_PCT", default=0.65)
+    stale_frac = config_lib.cfg.float("STALE_FRAC", default=0.90)
     hard_tokens = window * hard_pct
     ceiling = float(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", 0)) or None
     issues, notes = [], []
@@ -148,12 +151,19 @@ def main() -> int:
     report_path = os.path.join(REPORTS, f"backtest-{today}.json")
     bt_rc, bt_out = run([sys.executable, "analyze_corpus.py",
                          "--root", "~/.claude/projects", "--days", "1",
+                         "--window", str(window),
+                         "--soft", str(soft_pct),
+                         "--hard", str(hard_pct),
+                         "--stale-frac", str(stale_frac),
+                         "--native-ceiling", str(ceiling or 0),
                          "--json", report_path])
     summary_txt = "\n".join(l for l in bt_out.splitlines()
                             if not l.strip().startswith("- ")
                             and "skipped" not in l).strip()
     auto_pre, manual_n, dead = [], 0, []
     sessions_n = compactions_n = breaker_suspects = 0
+    learned_tiers = {}
+    native_ceiling_blocked_sessions = 0
     expected_trigger = (EXPECTED_TRIGGER_FRAC * min(ceiling, 200_000)
                         if ceiling else None)
     try:
@@ -161,11 +171,22 @@ def main() -> int:
             sessions = json.load(fh)["sessions"]
         sessions_n = len(sessions)
         for s in sessions:
+            tier = s.get("learned_tier") or "unknown"
+            td = learned_tiers.setdefault(tier, {
+                "sessions": 0, "compactions": 0, "late_by_tokens": [],
+                "auto_pre": []})
+            td["sessions"] += 1
+            if s.get("native_ceiling_blocks_learned_window"):
+                native_ceiling_blocked_sessions += 1
             autos_n = 0
             for c in s.get("compactions", []):
                 compactions_n += 1
+                td["compactions"] += 1
+                if "late_by_tokens" in c:
+                    td["late_by_tokens"].append(c["late_by_tokens"])
                 if c.get("trigger") == "auto":
                     auto_pre.append(c["before"])
+                    td["auto_pre"].append(c["before"])
                     autos_n += 1
                 elif c.get("trigger") == "manual":
                     manual_n += 1
@@ -209,6 +230,11 @@ def main() -> int:
     for line in bt_out.splitlines():
         if "never fired" in line:
             dead.append(line.strip("* ").strip())
+    for td in learned_tiers.values():
+        late = td.pop("late_by_tokens")
+        pres = td.pop("auto_pre")
+        td["late_median"] = round(statistics.median(late)) if late else None
+        td["auto_pre_median"] = round(statistics.median(pres)) if pres else None
 
     # 3. live telemetry (hooks actually running?)
     evs = day_events()
@@ -289,6 +315,8 @@ def main() -> int:
         "expected_trigger": expected_trigger,
         "breaker_suspects": breaker_suspects,
         "micro_marker_sessions": micro_n,
+        "learned_tiers": learned_tiers,
+        "native_ceiling_blocked_sessions": native_ceiling_blocked_sessions,
         "dead_signals": dead, "issues": issues, "notes": notes,
     }
     with open(HISTORY, "a", encoding="utf-8") as fh:
@@ -309,6 +337,18 @@ def main() -> int:
         md.append(f"- watches: expected trigger ~{expected_trigger:,.0f}t, "
                   f"breaker suspects {breaker_suspects}, "
                   f"micro markers {micro_n}")
+    if learned_tiers:
+        md.append("- learned windows: " + "; ".join(
+            f"{tier}: sessions {data['sessions']}, "
+            f"compactions {data['compactions']}"
+            + (f", auto median {data['auto_pre_median']:,.0f}t"
+               if data.get("auto_pre_median") else "")
+            + (f", late median {data['late_median']:,.0f}t"
+               if data.get("late_median") else "")
+            for tier, data in sorted(learned_tiers.items())))
+    if native_ceiling_blocked_sessions:
+        md.append("- native ceiling blocks learned window: "
+                  f"{native_ceiling_blocked_sessions} session(s)")
     md.append("")
     md.append("## Issues" if issues else "## No issues")
     md += [f"- {i}" for i in issues]

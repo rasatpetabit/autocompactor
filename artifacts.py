@@ -181,7 +181,7 @@ def build_digest(arts: dict, budget_tokens: int = 1500,
         sections["files"] = ("FILES: edited=" + ", ".join(f.get("edited", []))
                              + " | read=" + ", ".join(f.get("read", [])))
 
-    keep = list(PRIORITY)
+    keep = [k for k in PRIORITY if k in sections]
     while keep:
         body = "\n\n".join(sections[k] for k in keep if k in sections)
         if len(body) // 4 <= budget_tokens or len(keep) == 1:
@@ -189,6 +189,12 @@ def build_digest(arts: dict, budget_tokens: int = 1500,
         keep.pop()  # drop lowest priority
     if not keep:
         return ""
+    if not body.strip():
+        return ""
+    if len(body) // 4 > budget_tokens and len(keep) == 1:
+        max_chars = max(1, budget_tokens * 4)
+        if len(body) > max_chars:
+            body = body[:max_chars].rstrip() + "\n...[truncated]"
     header = ("[autocompactor] Durable artifacts recovered from before "
               "compaction (mechanically extracted; trust over summary "
               "paraphrase):")

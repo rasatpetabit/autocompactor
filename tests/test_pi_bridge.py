@@ -88,6 +88,27 @@ def test_evaluate_recommends_near_ceiling(tmp_path):
     assert isinstance(data["reason"], str) and len(data["reason"]) > 0
 
 
+def test_evaluate_logs_runtime_window_learning_fields(tmp_path):
+    state_dir = tmp_path / "state"
+    fixture_path = REPO_ROOT / "tests" / "fixtures" / "pi" / "with_compaction.jsonl"
+    result = run_bridge(
+        ["evaluate", "--session", str(fixture_path), "--tokens", "300000",
+         "--context-window", "512000"],
+        state_dir,
+    )
+    assert result.returncode == 0
+    data = parse_single_json(result.stdout)
+    assert data is not None
+    events = (state_dir / "stats" / "events.jsonl").read_text().splitlines()
+    ev = json.loads(events[-1])
+    assert ev["runtime_context_window"] == 512_000
+    assert ev["reserve"] == 40_000
+    assert ev["effective_window"] == 472_000
+    assert ev["learned_window"] == 512_000
+    assert ev["learned_tier"] == "512k"
+    assert ev["window_source"] == "runtime"
+
+
 def test_evaluate_mode_comes_from_config_without_env(tmp_path):
     # run_bridge strips all AUTOCOMPACTOR_* env: the verdict mode must come
     # from config.json (pi section), so actuation works in env-less Pi

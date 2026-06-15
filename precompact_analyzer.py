@@ -42,6 +42,7 @@ from transcript_lib import (analyze, active_signals,  # noqa: E402
                             build_preservation_instructions, detect_phase)
 import artifacts  # noqa: E402
 from stats import log_event  # noqa: E402
+import window_resolver  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 BACKUP_DIR = os.path.join(STATE_DIR, "backups")
@@ -260,17 +261,22 @@ def main() -> int:
     # Content-free by convention — counts/ratios/phases, no transcript text.
     summary = ""
     phase = detect_phase(st) if st else None
+    resolution = None
     if st is not None:
         try:
-            window = config_lib.cfg.float("WINDOW", default=200_000)
+            configured_window = config_lib.cfg.float("WINDOW", default=200_000)
         except ValueError:
-            window = 200_000.0
+            configured_window = 200_000.0
         # Same effective-window clamp as the monitor: sessions that never
         # exceeded what a 200k model can hold are judged against 200k.
         peak = max(st.usage_series) if st.usage_series else st.context_tokens
         peak = max(peak, int(state2.get("peak_ctx", 0) or 0))
-        if peak < 190_000:
-            window = min(window, 200_000)
+        resolution = window_resolver.resolve_window(
+            configured_window=configured_window,
+            observed_peak=peak,
+            harness="claude",
+            native_ceiling=window_resolver.native_ceiling_from_settings())
+        window = resolution.effective_window
         sigs = [desc for _, desc in active_signals(st, window=window)]
         parts = [
             f"compaction #{state2['compaction_count']} ({trigger})",
@@ -304,6 +310,7 @@ def main() -> int:
         "had_user_instructions": bool(user_instructions),
         "instr_chars": len(instructions),
         "artifact_chars": art_sizes,
+        **(resolution.event_fields() if resolution else {}),
     })
     out = {}
     if instructions.strip():

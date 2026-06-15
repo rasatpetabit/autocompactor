@@ -52,6 +52,7 @@ from transcript_lib import (analyze, active_signals,  # noqa: E402
                             find_last_boundary_offset, observe_only)
 import artifacts  # noqa: E402
 from stats import log_event  # noqa: E402
+import window_resolver  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 
@@ -69,7 +70,8 @@ def main() -> int:
     if not transcript or not os.path.exists(os.path.expanduser(transcript)):
         return 0
 
-    window = config_lib.cfg.float("WINDOW", default=200_000)
+    configured_window = config_lib.cfg.float("WINDOW", default=200_000)
+    window = configured_window
     soft = config_lib.cfg.float("SOFT_PCT", default=0.40)
     hard = config_lib.cfg.float("HARD_PCT", default=0.65)
     cooldown = config_lib.cfg.float("COOLDOWN", default=25_000)
@@ -123,8 +125,12 @@ def main() -> int:
                 json.dump(state, fh)
         except OSError:
             pass
-    if peak < 190_000:
-        window = min(window, 200_000)
+    resolution = window_resolver.resolve_window(
+        configured_window=configured_window,
+        observed_peak=peak,
+        harness="claude",
+        native_ceiling=window_resolver.native_ceiling_from_settings())
+    window = resolution.effective_window
     occupancy = st.context_tokens / window
 
     # One-shot artifact re-injection on the first prompt after a compaction.
@@ -187,6 +193,7 @@ def main() -> int:
         "tail_parse": bool(offset),
         "recommended": recommend and not suppressed,
         "suppressed_by_cooldown": recommend and suppressed,
+        **resolution.event_fields(),
     })
     if not recommend or suppressed:
         return 0

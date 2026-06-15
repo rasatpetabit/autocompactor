@@ -166,6 +166,36 @@ class Config:
             return cfg[name]
         return default
 
+    def raw(self, name: str, harness: str = "claude", default=None):
+        """Return an uncoerced config value with the standard precedence."""
+        for key in _env_chain(name, harness):
+            raw = os.environ.get(key)
+            if raw is not None:
+                return raw
+        cfg = _load_config()
+        if harness and harness in cfg:
+            hvals = cfg[harness]
+            if isinstance(hvals, dict) and name in hvals:
+                return hvals[name]
+        return cfg.get(name, default)
+
+    def list(self, name: str, harness: str = "claude", default=None) -> list:
+        raw = self.raw(name, harness=harness, default=default or [])
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                pass
+            return [part.strip() for part in raw.split(",") if part.strip()]
+        return default or []
+
     @property
     def path(self) -> str:
         return _CONFIG
