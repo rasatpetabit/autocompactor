@@ -190,6 +190,22 @@ def test_stale_output_threshold_respected():
         tl.active_signals(st, stale_frac_thr=0.9))
 
 
+def test_active_signals_empty_and_degenerate_transcripts():
+    """active_signals must not crash and fires nothing on empty / single-entry
+    transcripts (no usage series, no boundary signals to gate on)."""
+    assert tl.active_signals(tl.analyze(entries=[])) == []
+    assert tl.active_signals(tl.analyze(entries=[_human("hi")])) == []
+    one = tl.analyze(entries=[_assistant(usage=_usage(40_000))])
+    assert isinstance(tl.active_signals(one), list)
+
+
+def test_topic_shift_degenerate_prompts():
+    st = tl.TranscriptStats()
+    st.recent_words = {"database", "migration", "schema"}
+    assert not tl.topic_shift("", st)                 # empty prompt
+    assert not tl.topic_shift("the and for with", st)  # all stopwords
+
+
 def test_failed_tap_output_does_not_count_as_tests_passed():
     entries = [
         _assistant("Bash", {"command": "node --test"}, tool_id="t1"),
@@ -492,6 +508,36 @@ def test_analyze_prefix_includes_sampled_entry():
     assert st.recent_commit
 
 
+def test_analyze_prefix_boundary_cases():
+    """Backtester fidelity (fix 6d4a533 uses entries[:upto+1]): upto=0 keeps
+    exactly the first entry; upto<0 yields an empty analysis, never an error."""
+    entries = [_human("start"), _assistant(usage=_usage(50_000))]
+    st0 = analyze_corpus.analyze_prefix(entries, 0)
+    assert len(st0.entries) == 1 and st0.context_tokens == 0
+    st_neg = analyze_corpus.analyze_prefix(entries, -1)
+    assert st_neg.entries == [] and st_neg.context_tokens == 0
+
+
+def test_backtester_signal_registry_matches_monitor():
+    """Invariant: the live monitor and the backtester MUST share one signal
+    registry. Pin it — analyze_corpus.active_signals (names) equals the names
+    transcript_lib yields for the same state, so the two cannot silently
+    diverge (the backtester is just the name-projection of the registry)."""
+    st = tl.TranscriptStats()
+    st.recent_commit = True
+    st.todos = [{"content": "a", "status": "completed"}]
+    st.todos_all_done = True
+    st.stale_tool_chars, st.total_tool_chars = 80, 100
+    st.usage_series = [100_000, 130_000, 160_000]
+    st.context_tokens = 160_000
+    registry = [name for name, _ in tl.active_signals(
+        st, window=200_000, stale_frac_thr=0.5)]
+    backtester = analyze_corpus.active_signals(
+        st, window=200_000, stale_frac_thr=0.5)
+    assert backtester == registry
+    assert "commit" in backtester  # sanity: this state actually fires signals
+
+
 def test_backtest_replay_uses_configured_signal_thresholds(tmp_path):
     entries = [_assistant(usage=_usage(t)) for t in (
         120_000, 130_000, 140_000, 150_000, 160_000, 200_000, 160_000)]
@@ -779,6 +825,105 @@ def test_hooks_never_raise(script, payload, tmp_path):
     r = _run_hook(script, payload, tmp_path)
     assert r.returncode == 0, r.stderr
     assert "Traceback" not in r.stderr
+
+
+# --------------------------- never-raise hardening (malformed transcript body)
+
+def test_analyze_survives_non_dict_usage():
+    """A non-dict message.usage (corruption / producer-version skew) reaches
+    usage.get(...) and used to crash analyze(); the turn is now skipped and a
+    later well-formed turn is still counted."""
+    entries = [
+        _human("hi"),
+        {"type": "assistant", "message": {"usage": "not-a-dict", "content": []}},
+        _assistant(usage=_usage(50_000)),
+    ]
+    st = tl.analyze(entries=entries)
+    assert st.context_tokens == 50_000
+
+
+def test_load_transcript_skips_non_object_json_lines(tmp_path):
+    """Valid JSON that isn't an object (bare string/number) would crash the
+    .get() calls in analyze(); load_transcript drops it so the parse holds."""
+    p = tmp_path / "t.jsonl"
+    p.write_text('"a bare string"\n42\n[1,2,3]\n{"type":"assistant"}\n')
+    entries = tl.load_transcript(str(p))
+    assert [e.get("type") for e in entries] == ["assistant"]
+
+
+def test_hooks_survive_malformed_transcript_content(tmp_path):
+    """End-to-end: a transcript with a bare-string line and a non-dict usage
+    block must not crash either hook — they parse what they can and exit 0."""
+    t = tmp_path / "t.jsonl"
+    t.write_text(
+        '"a bare string line"\n'
+        + json.dumps({"type": "assistant",
+                      "message": {"usage": "not-a-dict", "content": []}}) + "\n"
+        + json.dumps(_assistant(usage=_usage(120_000))) + "\n")
+    for script in (MONITOR, ANALYZER):
+        payload = json.dumps({
+            "session_id": "malformed", "cwd": "/tmp", "transcript_path": str(t),
+            "hook_event_name": "UserPromptSubmit", "prompt": "hi",
+            "trigger": "manual"})
+        r = _run_hook(script, payload, tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert "Traceback" not in r.stderr
+
+
+def test_run_hook_backstops_exceptions(tmp_path, monkeypatch):
+    """run_hook is the belt-and-suspenders backstop: an exception escaping the
+    inner function becomes exit 0 plus a content-free hook_skip breadcrumb
+    (error class name only — never the exception message / transcript text)."""
+    from autocompactor import stats
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("AUTOCOMPACTOR_STATE_DIR", raising=False)
+
+    def boom():
+        raise RuntimeError("secret transcript text")
+
+    assert stats.run_hook("unit_probe", boom) == 0
+    ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
+                     / "events.jsonl").read_text().splitlines()[-1])
+    assert ev["type"] == "hook_skip" and ev["hook"] == "unit_probe"
+    assert ev["error"] == "RuntimeError"
+    assert "secret transcript text" not in json.dumps(ev)
+
+
+def test_run_hook_passes_through_return_code(tmp_path, monkeypatch):
+    """A clean inner run returns its own exit code unchanged."""
+    from autocompactor import stats
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert stats.run_hook("ok_probe", lambda: 0) == 0
+
+
+# ------------------------------------------------ every-prompt I/O cheapness
+
+def test_monitor_skips_redundant_writes_on_unchanged_prompt(tmp_path):
+    """C1+C2: a second identical prompt with no new transcript activity must
+    rewrite neither the artifact file nor the state file (an identical-content
+    rewrite still bumps mtime, so mtime is the right witness)."""
+    t = tmp_path / "t.jsonl"
+    # Low context (no recommendation) but with extractable activity, so the
+    # artifact file exists after the first run.
+    t.write_text(
+        json.dumps(_human("build the thing")) + "\n"
+        + json.dumps(_assistant("Edit", {"file_path": "/a.py"},
+                                usage=_usage(40_000))) + "\n")
+    payload = json.dumps({
+        "session_id": "cheap", "cwd": "/tmp", "transcript_path": str(t),
+        "hook_event_name": "UserPromptSubmit", "prompt": "build the thing"})
+
+    assert _run_hook(MONITOR, payload, tmp_path).returncode == 0
+    base = tmp_path / ".claude" / "autocompactor"
+    art = base / "artifacts" / "cheap.json"
+    state = base / "cheap.state.json"
+    assert art.exists() and state.exists()
+    m_art, m_state = art.stat().st_mtime_ns, state.stat().st_mtime_ns
+
+    # Second identical run: nothing changed -> neither file is rewritten.
+    assert _run_hook(MONITOR, payload, tmp_path).returncode == 0
+    assert art.stat().st_mtime_ns == m_art, "artifact rewritten with no change"
+    assert state.stat().st_mtime_ns == m_state, "state rewritten with no change"
 
 
 def _isolate_config(monkeypatch):

@@ -65,13 +65,20 @@ def _content_blocks(entry: dict) -> list:
 
 
 def _block_text(block: dict) -> str:
-    """Flatten a content block (or tool_result) to text."""
+    """Flatten a content block (or tool_result) to text.
+
+    Shared by both harnesses (pi_session_lib aliases this). The `thinking`
+    branch is unreachable on the Claude path — analyze() only calls this on
+    user/tool_result blocks, never assistant thinking — but Pi's _message_text
+    relies on it, so the registry stays single-source."""
     if isinstance(block, str):
         return block
     if not isinstance(block, dict):
         return ""
     if block.get("type") == "text":
         return block.get("text", "") or ""
+    if block.get("type") == "thinking":
+        return block.get("thinking", "") or ""
     inner = block.get("content")
     if isinstance(inner, str):
         return inner
@@ -135,9 +142,14 @@ def load_transcript(path: str, start_offset: int = 0) -> list:
                 if not line:
                     continue
                 try:
-                    entries.append(json.loads(line.decode("utf-8", "replace")))
+                    obj = json.loads(line.decode("utf-8", "replace"))
                 except json.JSONDecodeError:
                     continue
+                # Only dict entries are usable; a valid-JSON-but-non-object
+                # line (bare string/number) would crash the .get() calls in
+                # analyze(). Skip it rather than poison the whole parse.
+                if isinstance(obj, dict):
+                    entries.append(obj)
     except OSError:
         pass
     return entries
@@ -192,6 +204,43 @@ def find_last_boundary_offset(path: str, needle: bytes = b'"compact_boundary"',
     return 0
 
 
+def _finalize_stats(st: TranscriptStats, edited: dict, read: dict,
+                    task_state: dict, recent_result_flags: list) -> None:
+    """Derive summary fields from the raw material the analyze() loop
+    accumulated: live context size, ordered file lists, trimmed ledgers,
+    synthesized todo state, and the concluded-debug-loop flag. Split out of
+    analyze() as a self-contained finalize step — no control flow, just
+    projection of the loop's accumulators onto `st`."""
+    u = st.last_usage
+    st.context_tokens = (
+        int(u.get("input_tokens", 0))
+        + int(u.get("cache_read_input_tokens", 0))
+        + int(u.get("cache_creation_input_tokens", 0))
+        + int(u.get("output_tokens", 0))
+    )
+    st.edited_files = [fp for fp, _ in sorted(edited.items(), key=lambda kv: kv[1])]
+    st.read_files = [fp for fp, _ in sorted(read.items(), key=lambda kv: kv[1])
+                     if fp not in edited]
+    st.recent_errors = st.recent_errors[-3:]
+    st.working_commands = st.working_commands[-15:]
+    st.corrections = st.corrections[-20:]
+    st.hex_constants = st.hex_constants[-20:]
+    if not st.todos and task_state:
+        # No TodoWrite in transcript: synthesize from TaskCreate/TaskUpdate
+        st.todos = list(task_state.values())
+    if st.todos:
+        st.todos_all_done = all(t.get("status") == "completed" for t in st.todos)
+        st.todo_step = (any(t.get("status") == "completed" for t in st.todos)
+                        and any(t.get("status") != "completed" for t in st.todos))
+    # debug-loop concluded: errors occurred in the window, but the trailing
+    # results are a clean streak
+    if recent_result_flags:
+        had_err = any(recent_result_flags)
+        tail = recent_result_flags[-3:]
+        st.recent_error_then_clean = (had_err and len(tail) == 3
+                                      and not any(tail))
+
+
 def analyze(path: str = "", recent_window: int = 30,
             entries: list = None, start_offset: int = 0) -> TranscriptStats:
     st = TranscriptStats()
@@ -243,7 +292,7 @@ def analyze(path: str = "", recent_window: int = 30,
 
         if etype == "assistant":
             usage = (entry.get("message") or {}).get("usage") or {}
-            if usage:
+            if isinstance(usage, dict) and usage:
                 st.last_usage = usage
                 st.usage_series.append(
                     int(usage.get("input_tokens", 0))
@@ -338,34 +387,7 @@ def analyze(path: str = "", recent_window: int = 30,
                     if CORRECTION_RE.search(text):
                         st.corrections.append(text[:200])
 
-    u = st.last_usage
-    st.context_tokens = (
-        int(u.get("input_tokens", 0))
-        + int(u.get("cache_read_input_tokens", 0))
-        + int(u.get("cache_creation_input_tokens", 0))
-        + int(u.get("output_tokens", 0))
-    )
-    st.edited_files = [fp for fp, _ in sorted(edited.items(), key=lambda kv: kv[1])]
-    st.read_files = [fp for fp, _ in sorted(read.items(), key=lambda kv: kv[1])
-                     if fp not in edited]
-    st.recent_errors = st.recent_errors[-3:]
-    st.working_commands = st.working_commands[-15:]
-    st.corrections = st.corrections[-20:]
-    st.hex_constants = st.hex_constants[-20:]
-    if not st.todos and task_state:
-        # No TodoWrite in transcript: synthesize from TaskCreate/TaskUpdate
-        st.todos = list(task_state.values())
-    if st.todos:
-        st.todos_all_done = all(t.get("status") == "completed" for t in st.todos)
-        st.todo_step = (any(t.get("status") == "completed" for t in st.todos)
-                        and any(t.get("status") != "completed" for t in st.todos))
-    # debug-loop concluded: errors occurred in the window, but the trailing
-    # results are a clean streak
-    if recent_result_flags:
-        had_err = any(recent_result_flags)
-        tail = recent_result_flags[-3:]
-        st.recent_error_then_clean = (had_err and len(tail) == 3
-                                      and not any(tail))
+    _finalize_stats(st, edited, read, task_state, recent_result_flags)
     return st
 
 
@@ -599,3 +621,29 @@ def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:
     if cwd:
         lines.append(f"- Working directory: {cwd}")
     return "\n".join(lines)
+
+
+def append_artifact_restatement(instructions: str, arts: dict) -> str:
+    """Append the founding-goal restatement + the on-disk-artifacts NOTE.
+
+    Shared by both PreCompact paths (Claude precompact_analyzer + Pi bridge
+    prepare): every compaction pass must restate the session's original
+    prompts verbatim — staged instructions built from a tail-only parse may
+    predate their capture, but the old-wins artifact merge always carries
+    them — and must tell the summarizer not to spend space duplicating the
+    mechanically-extracted artifacts that are re-injected post-compaction.
+    """
+    founding = [p.replace("\n", " ") for p in arts.get("initial_prompts") or []]
+    if founding and founding[0][:200] not in instructions:
+        instructions += (
+            "\n\nThe ORIGINAL user request(s) that framed this session "
+            "(quote these VERBATIM in GOAL; never paraphrase):\n"
+            + "\n".join("    * " + p for p in founding))
+    instructions += (
+        "\n\nNOTE: the following are preserved on disk and will be "
+        "re-injected after compaction -- do NOT spend summary space "
+        "duplicating them: user corrections, error texts, working "
+        "commands, discovered constants, file lists. Focus the summary "
+        "on what regexes cannot extract: decisions and rationale, plan "
+        "position, failed approaches, open questions.")
+    return instructions

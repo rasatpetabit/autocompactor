@@ -90,6 +90,43 @@ def test_local_overlay_merges_over_config(temp_config):
     assert config_lib.cfg.float("HARD_PCT") == 0.65
 
 
+def test_str_empty_env_is_deliberate_override(temp_config, monkeypatch):
+    """An empty-string env var is a deliberate override (presence wins, not
+    truthiness) — e.g. AUTOCOMPACTOR_OBSERVE_ONLY="" clears the configured
+    list rather than falling through to it."""
+    temp_config({"OBSERVE_ONLY": "error_resolved,tests_pass"})
+    monkeypatch.setenv("AUTOCOMPACTOR_OBSERVE_ONLY", "")
+    assert config_lib.cfg.str("OBSERVE_ONLY") == ""
+
+
+def test_list_json_array_env(temp_config, monkeypatch):
+    temp_config({})
+    monkeypatch.setenv("AUTOCOMPACTOR_TIERS", '["a", "b", "c"]')
+    assert config_lib.cfg.list("TIERS") == ["a", "b", "c"]
+
+
+def test_list_malformed_json_falls_back_to_comma_split(temp_config, monkeypatch):
+    """Non-JSON env values degrade to a comma-split list, never raise."""
+    temp_config({})
+    monkeypatch.setenv("AUTOCOMPACTOR_TIERS", "alpha, beta ,gamma")
+    assert config_lib.cfg.list("TIERS") == ["alpha", "beta", "gamma"]
+    monkeypatch.setenv("AUTOCOMPACTOR_TIERS", "[not valid json")
+    assert config_lib.cfg.list("TIERS") == ["[not valid json"]
+    monkeypatch.setenv("AUTOCOMPACTOR_TIERS", "")
+    assert config_lib.cfg.list("TIERS") == []
+
+
+def test_float_wide_and_harness_section_compose(temp_config):
+    """_WIDE selection and harness-section precedence compose: a wide window
+    picks the harness section's _WIDE key; a narrow one picks its bare key."""
+    temp_config({"HARD_PCT": 0.65,
+                 "pi": {"HARD_PCT": 0.90, "HARD_PCT_WIDE": 0.60}})
+    assert config_lib.cfg.float_windowed("HARD_PCT", 400_000, harness="pi") == 0.60
+    assert config_lib.cfg.float_windowed("HARD_PCT", 200_000, harness="pi") == 0.90
+    # claude (no section) still reads the top-level bare key
+    assert config_lib.cfg.float_windowed("HARD_PCT", 400_000) == 0.65
+
+
 def test_repo_config_ships_pi_actuate(monkeypatch):
     # The shipped config.json must keep Pi in actuate mode: this is the
     # actual regression fix (advise-only behavior in env-less processes).

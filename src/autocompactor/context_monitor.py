@@ -51,13 +51,13 @@ from autocompactor.transcript_lib import (analyze, active_signals,  # noqa: E402
                                           detect_phase,
                                           find_last_boundary_offset,
                                           observe_only)
-from autocompactor.stats import log_event  # noqa: E402
+from autocompactor.stats import log_event, run_hook  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 
 
 
-def main() -> int:
+def _run() -> int:
     try:
         data = json.load(sys.stdin)
     except Exception:
@@ -90,6 +90,20 @@ def main() -> int:
         pass
     last_reco_tokens = state.get("last_reco_tokens", -10**9)
 
+    # State is written at most once per prompt: mutate `state` freely and set
+    # state_dirty; _save_state() flushes before each return. (Every-turn
+    # cheapness — the previous code wrote the state file up to four times.)
+    state_dirty = False
+
+    def _save_state() -> None:
+        if not state_dirty:
+            return
+        try:
+            with open(state_file, "w") as fh:
+                json.dump(state, fh)
+        except OSError:
+            pass
+
     # Bound worst-case parse cost: past a size threshold, parse only the
     # active segment (after the last compaction boundary). The active
     # segment is capped by the autocompact ceiling; the dead prefix grows
@@ -119,6 +133,11 @@ def main() -> int:
     peak = max(peak, int(state.get("peak_ctx", 0)))
     if peak != state.get("peak_ctx"):
         state["peak_ctx"] = peak
+        # Persist the peak IMMEDIATELY, not via the batched flush: it is the
+        # durability anchor for tail-only parses (a later mid-prompt exception
+        # would otherwise lose it, since run_hook swallows the raise). The
+        # other state writes (cooldown reset, staged instructions) are not
+        # durability-critical mid-prompt and stay batched in _save_state().
         try:
             with open(state_file, "w") as fh:
                 json.dump(state, fh)
@@ -141,8 +160,8 @@ def main() -> int:
             stats_line=state.get("last_compaction_stats", ""))
         state["pending_reinject"] = False
         state["last_reco_tokens"] = -10**9   # fresh context, reset cooldown
-        with open(state_file, "w") as fh:
-            json.dump(state, fh)
+        state_dirty = True
+        _save_state()
         if digest:
             log_event({"type": "reinject", "session_id": session_id,
                        "digest_tokens": len(digest) // 4,
@@ -151,13 +170,16 @@ def main() -> int:
                 "hookEventName": "UserPromptSubmit",
                 "additionalContext": digest}}))
         return 0
-    # Continuous artifact extraction: merge-persist on every prompt so
-    # mechanically extracted facts survive compactions that arrive with
-    # no warning (autocompact, crash, another tool's /compact). Analysis
-    # is already done above — this adds one small JSON read+write.
+    # Continuous artifact extraction: merge-persist so mechanically extracted
+    # facts survive compactions that arrive with no warning (autocompact,
+    # crash, another tool's /compact). Write only when the merge actually
+    # changed something — a steady-state prompt adds nothing new and skips the
+    # disk write entirely (the on-disk content is identical either way).
     try:
-        artifacts.save(session_id, artifacts.merge(
-            artifacts.load(session_id), artifacts.extract(st)))
+        existing = artifacts.load(session_id)
+        merged = artifacts.merge(existing, artifacts.extract(st))
+        if merged != existing:
+            artifacts.save(session_id, merged)
     except Exception:
         pass
 
@@ -168,11 +190,7 @@ def main() -> int:
     if st.context_tokens < last_reco_tokens:
         last_reco_tokens = -10**9
         state["last_reco_tokens"] = last_reco_tokens
-        try:
-            with open(state_file, "w") as fh:
-                json.dump(state, fh)
-        except OSError:
-            pass
+        state_dirty = True
     suppressed = 0 <= (st.context_tokens - last_reco_tokens) < cooldown
 
     stale_frac = (st.stale_tool_chars / st.total_tool_chars
@@ -207,14 +225,15 @@ def main() -> int:
         **resolution.event_fields(),
     })
     if not recommend or suppressed:
+        _save_state()
         return 0
 
     # Stage tailored preservation instructions for the PreCompact hook.
     instructions = build_preservation_instructions(st, cwd)
     state.update({"last_reco_tokens": st.context_tokens,
                   "staged_instructions": instructions})
-    with open(state_file, "w") as fh:
-        json.dump(state, fh)
+    state_dirty = True
+    _save_state()
 
     reason = ("context is at "
               f"{occupancy:.0%} (~{st.context_tokens:,} tokens)")
@@ -239,6 +258,11 @@ def main() -> int:
     }
     print(json.dumps(out))
     return 0
+
+
+def main() -> int:
+    """Never-raise wrapper (hook contract): any failure degrades to exit 0."""
+    return run_hook("context_monitor", _run)
 
 
 if __name__ == "__main__":

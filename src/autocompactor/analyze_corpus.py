@@ -271,12 +271,23 @@ def aggregate_events(stats_dir=None):
                             1 for e in pre if e.get("had_staged"))
                             / max(len(pre), 1), 1)},
     }
+    # Reduction ratio = first monitor_eval after each precompact, same
+    # session. Partition monitor events by session once (events.jsonl is
+    # append-ordered, so each per-session list stays chronological) instead
+    # of rescanning all monitor events per precompact (was O(pre x mon)).
+    mon_by_session = {}
+    for m in mon:
+        if m.get("context_tokens"):
+            mon_by_session.setdefault(m.get("session_id"), []).append(m)
     reductions = []
     for p in pre:
-        later = [m for m in mon if m.get("session_id") == p.get("session_id")
-                 and m.get("ts", "") > p.get("ts", "") and m.get("context_tokens")]
-        if later and p.get("context_tokens"):
-            reductions.append(round(1 - later[0]["context_tokens"]
+        if not p.get("context_tokens"):
+            continue
+        p_ts = p.get("ts", "")
+        nxt = next((m for m in mon_by_session.get(p.get("session_id"), [])
+                    if m.get("ts", "") > p_ts), None)
+        if nxt:
+            reductions.append(round(1 - nxt["context_tokens"]
                                     / p["context_tokens"], 3))
     out["compaction_reduction_ratio"] = _dist(reductions)
     return out

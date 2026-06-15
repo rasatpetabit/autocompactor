@@ -38,9 +38,10 @@ import urllib.request
 
 from autocompactor import config_lib, artifacts, window_resolver  # noqa: E402
 from autocompactor.transcript_lib import (analyze, active_signals,  # noqa: E402
+                                          append_artifact_restatement,
                                           build_preservation_instructions,
                                           detect_phase)
-from autocompactor.stats import log_event  # noqa: E402
+from autocompactor.stats import log_event, run_hook  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 BACKUP_DIR = os.path.join(STATE_DIR, "backups")
@@ -167,7 +168,7 @@ def llm_digest(transcript_path: str) -> str:
         return ""
 
 
-def main() -> int:
+def _run() -> int:
     try:
         data = json.load(sys.stdin)
     except Exception:
@@ -225,24 +226,9 @@ def main() -> int:
         arts = artifacts.merge(artifacts.load(session_id),
                                artifacts.extract(st))
         art_sizes = artifacts.save(session_id, arts)
-        # Founding-goal restatement (owner directive): staged instructions
-        # built from a tail-only parse can miss the session's original
-        # prompts; the merged artifacts always carry them (old-wins merge).
-        # Every compaction pass must restate the founding goal verbatim.
-        founding = [p.replace("\n", " ")
-                    for p in arts.get("initial_prompts") or []]
-        if founding and founding[0][:200] not in instructions:
-            instructions += (
-                "\n\nThe ORIGINAL user request(s) that framed this session "
-                "(quote these VERBATIM in GOAL; never paraphrase):\n"
-                + "\n".join("    * " + p for p in founding))
-        instructions += (
-            "\n\nNOTE: the following are preserved on disk and will be "
-            "re-injected after compaction -- do NOT spend summary space "
-            "duplicating them: user corrections, error texts, working "
-            "commands, discovered constants, file lists. Focus the summary "
-            "on what regexes cannot extract: decisions and rationale, plan "
-            "position, failed approaches, open questions.")
+        # Founding-goal restatement + on-disk-artifacts NOTE (shared with the
+        # Pi bridge so the two paths can't drift).
+        instructions = append_artifact_restatement(instructions, arts)
 
     # mark for one-shot re-injection + leave a stats line for the digest
     state_file = os.path.join(STATE_DIR, f"{session_id}.state.json")
@@ -322,6 +308,11 @@ def main() -> int:
         return 0
     print(json.dumps(out))
     return 0
+
+
+def main() -> int:
+    """Never-raise wrapper (hook contract): any failure degrades to exit 0."""
+    return run_hook("precompact_analyzer", _run)
 
 
 if __name__ == "__main__":
