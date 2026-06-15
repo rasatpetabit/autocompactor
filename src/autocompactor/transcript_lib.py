@@ -204,6 +204,43 @@ def find_last_boundary_offset(path: str, needle: bytes = b'"compact_boundary"',
     return 0
 
 
+def _finalize_stats(st: TranscriptStats, edited: dict, read: dict,
+                    task_state: dict, recent_result_flags: list) -> None:
+    """Derive summary fields from the raw material the analyze() loop
+    accumulated: live context size, ordered file lists, trimmed ledgers,
+    synthesized todo state, and the concluded-debug-loop flag. Split out of
+    analyze() as a self-contained finalize step — no control flow, just
+    projection of the loop's accumulators onto `st`."""
+    u = st.last_usage
+    st.context_tokens = (
+        int(u.get("input_tokens", 0))
+        + int(u.get("cache_read_input_tokens", 0))
+        + int(u.get("cache_creation_input_tokens", 0))
+        + int(u.get("output_tokens", 0))
+    )
+    st.edited_files = [fp for fp, _ in sorted(edited.items(), key=lambda kv: kv[1])]
+    st.read_files = [fp for fp, _ in sorted(read.items(), key=lambda kv: kv[1])
+                     if fp not in edited]
+    st.recent_errors = st.recent_errors[-3:]
+    st.working_commands = st.working_commands[-15:]
+    st.corrections = st.corrections[-20:]
+    st.hex_constants = st.hex_constants[-20:]
+    if not st.todos and task_state:
+        # No TodoWrite in transcript: synthesize from TaskCreate/TaskUpdate
+        st.todos = list(task_state.values())
+    if st.todos:
+        st.todos_all_done = all(t.get("status") == "completed" for t in st.todos)
+        st.todo_step = (any(t.get("status") == "completed" for t in st.todos)
+                        and any(t.get("status") != "completed" for t in st.todos))
+    # debug-loop concluded: errors occurred in the window, but the trailing
+    # results are a clean streak
+    if recent_result_flags:
+        had_err = any(recent_result_flags)
+        tail = recent_result_flags[-3:]
+        st.recent_error_then_clean = (had_err and len(tail) == 3
+                                      and not any(tail))
+
+
 def analyze(path: str = "", recent_window: int = 30,
             entries: list = None, start_offset: int = 0) -> TranscriptStats:
     st = TranscriptStats()
@@ -350,34 +387,7 @@ def analyze(path: str = "", recent_window: int = 30,
                     if CORRECTION_RE.search(text):
                         st.corrections.append(text[:200])
 
-    u = st.last_usage
-    st.context_tokens = (
-        int(u.get("input_tokens", 0))
-        + int(u.get("cache_read_input_tokens", 0))
-        + int(u.get("cache_creation_input_tokens", 0))
-        + int(u.get("output_tokens", 0))
-    )
-    st.edited_files = [fp for fp, _ in sorted(edited.items(), key=lambda kv: kv[1])]
-    st.read_files = [fp for fp, _ in sorted(read.items(), key=lambda kv: kv[1])
-                     if fp not in edited]
-    st.recent_errors = st.recent_errors[-3:]
-    st.working_commands = st.working_commands[-15:]
-    st.corrections = st.corrections[-20:]
-    st.hex_constants = st.hex_constants[-20:]
-    if not st.todos and task_state:
-        # No TodoWrite in transcript: synthesize from TaskCreate/TaskUpdate
-        st.todos = list(task_state.values())
-    if st.todos:
-        st.todos_all_done = all(t.get("status") == "completed" for t in st.todos)
-        st.todo_step = (any(t.get("status") == "completed" for t in st.todos)
-                        and any(t.get("status") != "completed" for t in st.todos))
-    # debug-loop concluded: errors occurred in the window, but the trailing
-    # results are a clean streak
-    if recent_result_flags:
-        had_err = any(recent_result_flags)
-        tail = recent_result_flags[-3:]
-        st.recent_error_then_clean = (had_err and len(tail) == 3
-                                      and not any(tail))
+    _finalize_stats(st, edited, read, task_state, recent_result_flags)
     return st
 
 

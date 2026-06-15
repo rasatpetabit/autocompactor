@@ -190,6 +190,22 @@ def test_stale_output_threshold_respected():
         tl.active_signals(st, stale_frac_thr=0.9))
 
 
+def test_active_signals_empty_and_degenerate_transcripts():
+    """active_signals must not crash and fires nothing on empty / single-entry
+    transcripts (no usage series, no boundary signals to gate on)."""
+    assert tl.active_signals(tl.analyze(entries=[])) == []
+    assert tl.active_signals(tl.analyze(entries=[_human("hi")])) == []
+    one = tl.analyze(entries=[_assistant(usage=_usage(40_000))])
+    assert isinstance(tl.active_signals(one), list)
+
+
+def test_topic_shift_degenerate_prompts():
+    st = tl.TranscriptStats()
+    st.recent_words = {"database", "migration", "schema"}
+    assert not tl.topic_shift("", st)                 # empty prompt
+    assert not tl.topic_shift("the and for with", st)  # all stopwords
+
+
 def test_failed_tap_output_does_not_count_as_tests_passed():
     entries = [
         _assistant("Bash", {"command": "node --test"}, tool_id="t1"),
@@ -490,6 +506,36 @@ def test_analyze_prefix_includes_sampled_entry():
     st = analyze_corpus.analyze_prefix(entries, 1)
     assert st.context_tokens == 160_000
     assert st.recent_commit
+
+
+def test_analyze_prefix_boundary_cases():
+    """Backtester fidelity (fix 6d4a533 uses entries[:upto+1]): upto=0 keeps
+    exactly the first entry; upto<0 yields an empty analysis, never an error."""
+    entries = [_human("start"), _assistant(usage=_usage(50_000))]
+    st0 = analyze_corpus.analyze_prefix(entries, 0)
+    assert len(st0.entries) == 1 and st0.context_tokens == 0
+    st_neg = analyze_corpus.analyze_prefix(entries, -1)
+    assert st_neg.entries == [] and st_neg.context_tokens == 0
+
+
+def test_backtester_signal_registry_matches_monitor():
+    """Invariant: the live monitor and the backtester MUST share one signal
+    registry. Pin it — analyze_corpus.active_signals (names) equals the names
+    transcript_lib yields for the same state, so the two cannot silently
+    diverge (the backtester is just the name-projection of the registry)."""
+    st = tl.TranscriptStats()
+    st.recent_commit = True
+    st.todos = [{"content": "a", "status": "completed"}]
+    st.todos_all_done = True
+    st.stale_tool_chars, st.total_tool_chars = 80, 100
+    st.usage_series = [100_000, 130_000, 160_000]
+    st.context_tokens = 160_000
+    registry = [name for name, _ in tl.active_signals(
+        st, window=200_000, stale_frac_thr=0.5)]
+    backtester = analyze_corpus.active_signals(
+        st, window=200_000, stale_frac_thr=0.5)
+    assert backtester == registry
+    assert "commit" in backtester  # sanity: this state actually fires signals
 
 
 def test_backtest_replay_uses_configured_signal_thresholds(tmp_path):

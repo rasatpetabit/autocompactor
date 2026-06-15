@@ -2,6 +2,46 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-15 — profiling-pass improvements (never-raise, cheapness, de-dup, tests)
+
+- Scope: profiled the codebase (3 fan-out explorers + source verification) and
+  executed four workstreams. 115 → 130 pytest; smoke + `install.py --verify`
+  green. No behavior change to recommendation/compaction logic except where noted.
+- **Never-raise (A):** the Claude hooks called `sys.exit(main())` with only
+  local guards, so a non-dict `message.usage` (corruption / producer skew) could
+  raise out of `analyze()` and break the hook — `pi_bridge` already had a
+  top-level guard, the Claude hooks did not. Added shared `stats.run_hook()`
+  backstop (exit 0 + content-free `hook_skip` breadcrumb), wrapped both hook
+  `main()`s, made `analyze()`/`load_transcript()` defensive about non-dict
+  usage/entries, and guarded the two unguarded state writes.
+- **Cheapness (C):** artifact merge now writes only when content changed (was a
+  full read+write every prompt); per-prompt state writes batched to ≤1 via a
+  `_save_state()` flush (was up to 4). C3 (min-savings reorder) intentionally
+  skipped — it would skip `active_signals`/`detect_phase` that feed every-eval
+  telemetry the backtester needs, for ~1ms. C4: `aggregate_events` cross-session
+  O(pre×mon) scan partitioned by session_id; `analyze_prefix` left as-is (the
+  ~40-point sampling cap already bounds it — not the O(n²) it looked like).
+- **De-dup (D):** founding-goal + NOTE restatement → shared
+  `transcript_lib.append_artifact_restatement` (was byte-identical in
+  precompact_analyzer + pi_bridge); `_block_text` unified (Pi aliases
+  transcript_lib's, which gained the `thinking` branch — unreachable on the
+  Claude signal path, verified). D1 was a non-issue (`llm_digest` already
+  imported-shared). D4 (window_resolver Pi `small_session_clamp` skipping the
+  tier clamp) is **by design, not a bug** — Pi uses exact `contextWindow −
+  reserve`; documented with a code comment + characterization test. D5 (installer
+  base) deferred.
+- **Decomposition (E):** extracted the self-contained finalize tail of
+  `analyze()` into `_finalize_stats()`. Deliberately left the loop-body state
+  machines inline — extracting them needs 8 shared mutables (parameter-soup,
+  higher risk on the most-depended-on function) for cosmetic gain only.
+- **Cross-vendor review (Codex/GPT-5, `codex exec review --uncommitted`):** no
+  blocking issues; confirmed the `_block_text` thinking branch unreachable on
+  the Claude path and the `aggregate_events` rewrite equivalent. Acted on one
+  non-blocking note: C2 batching had deferred the `peak_ctx` write, so a
+  mid-prompt exception (swallowed by `run_hook`) could lose a peak update that
+  tail-only parses depend on — restored the immediate `peak_ctx` write; the
+  cooldown/staged writes stay batched.
+
 ## 2026-06-14 — observe-first auto-window learning
 
 - Added shared `window_resolver` support for observe-only learned context tiers
