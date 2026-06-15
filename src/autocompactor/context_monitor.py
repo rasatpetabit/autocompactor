@@ -90,6 +90,20 @@ def _run() -> int:
         pass
     last_reco_tokens = state.get("last_reco_tokens", -10**9)
 
+    # State is written at most once per prompt: mutate `state` freely and set
+    # state_dirty; _save_state() flushes before each return. (Every-turn
+    # cheapness — the previous code wrote the state file up to four times.)
+    state_dirty = False
+
+    def _save_state() -> None:
+        if not state_dirty:
+            return
+        try:
+            with open(state_file, "w") as fh:
+                json.dump(state, fh)
+        except OSError:
+            pass
+
     # Bound worst-case parse cost: past a size threshold, parse only the
     # active segment (after the last compaction boundary). The active
     # segment is capped by the autocompact ceiling; the dead prefix grows
@@ -146,8 +160,8 @@ def _run() -> int:
             stats_line=state.get("last_compaction_stats", ""))
         state["pending_reinject"] = False
         state["last_reco_tokens"] = -10**9   # fresh context, reset cooldown
-        with open(state_file, "w") as fh:
-            json.dump(state, fh)
+        state_dirty = True
+        _save_state()
         if digest:
             log_event({"type": "reinject", "session_id": session_id,
                        "digest_tokens": len(digest) // 4,
@@ -156,13 +170,16 @@ def _run() -> int:
                 "hookEventName": "UserPromptSubmit",
                 "additionalContext": digest}}))
         return 0
-    # Continuous artifact extraction: merge-persist on every prompt so
-    # mechanically extracted facts survive compactions that arrive with
-    # no warning (autocompact, crash, another tool's /compact). Analysis
-    # is already done above — this adds one small JSON read+write.
+    # Continuous artifact extraction: merge-persist so mechanically extracted
+    # facts survive compactions that arrive with no warning (autocompact,
+    # crash, another tool's /compact). Write only when the merge actually
+    # changed something — a steady-state prompt adds nothing new and skips the
+    # disk write entirely (the on-disk content is identical either way).
     try:
-        artifacts.save(session_id, artifacts.merge(
-            artifacts.load(session_id), artifacts.extract(st)))
+        existing = artifacts.load(session_id)
+        merged = artifacts.merge(existing, artifacts.extract(st))
+        if merged != existing:
+            artifacts.save(session_id, merged)
     except Exception:
         pass
 
@@ -173,11 +190,7 @@ def _run() -> int:
     if st.context_tokens < last_reco_tokens:
         last_reco_tokens = -10**9
         state["last_reco_tokens"] = last_reco_tokens
-        try:
-            with open(state_file, "w") as fh:
-                json.dump(state, fh)
-        except OSError:
-            pass
+        state_dirty = True
     suppressed = 0 <= (st.context_tokens - last_reco_tokens) < cooldown
 
     stale_frac = (st.stale_tool_chars / st.total_tool_chars
@@ -212,14 +225,15 @@ def _run() -> int:
         **resolution.event_fields(),
     })
     if not recommend or suppressed:
+        _save_state()
         return 0
 
     # Stage tailored preservation instructions for the PreCompact hook.
     instructions = build_preservation_instructions(st, cwd)
     state.update({"last_reco_tokens": st.context_tokens,
                   "staged_instructions": instructions})
-    with open(state_file, "w") as fh:
-        json.dump(state, fh)
+    state_dirty = True
+    _save_state()
 
     reason = ("context is at "
               f"{occupancy:.0%} (~{st.context_tokens:,} tokens)")
