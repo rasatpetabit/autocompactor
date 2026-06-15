@@ -49,5 +49,16 @@ echo "$ERR" | grep -q "Traceback" && fail "stack trace leaked" || true
 
 python3 "$BRIDGE" frobnicate >/dev/null 2>&1 || fail "unknown subcommand exited non-zero"
 
+echo "6) shim: actuate-mode compaction runs prepare exactly once (no double-prepare)"
+if command -v bun >/dev/null 2>&1; then
+  # The double-prepare fix lives in the TS shim; this exercises the live
+  # event flow against the real module with a mocked ExtensionAPI. Run from
+  # the repo root so the shim's config read resolves.
+  ( cd "$(dirname "$0")/.." && bun test tests/shim_prepare.test.ts ) \
+    || fail "shim prepare-count regression test failed"
+else
+  echo "   (bun not installed; skipped)"
+fi
+
 echo ""
 echo "ALL PI SMOKE TESTS PASSED"
