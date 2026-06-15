@@ -632,6 +632,54 @@ def test_monitor_min_savings_guard_suppresses(tmp_path):
     assert 0 < ev["est_reclaim"] < 30_000
 
 
+def test_monitor_cooldown_deadlock_breaks_on_shrink(tmp_path):
+    """Regression for issue #1 (Claude harness): a reco staged at a high token
+    count that reinject never reset used to pin last_reco_tokens above the
+    live context forever — a shrunken context's negative delta was always
+    < cooldown, so the monitor stayed mute even far past HARD_PCT.
+
+    Fix: cooldown debounces rising context only; a shrunken context resets
+    the baseline and the bricked state self-heals.
+    """
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    state_dir.mkdir(parents=True)
+    # Bricked state: a reco staged at 494339 that reinject never reset.
+    # (pending_reinject is False here: the monitor clears it on the prompt
+    # after compaction, then the cooldown logic runs — that is the state in
+    # which the deadlock actually persists across turns.)
+    (state_dir / "deadlock.state.json").write_text(json.dumps({
+        "last_reco_tokens": 494339,
+        "pending_reinject": False,
+        "compaction_count": 2,
+    }))
+    payload = json.dumps({
+        "session_id": "deadlock", "cwd": "/tmp",
+        "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "now plan the website redesign"})
+    env = _hook_env(tmp_path)
+    # Fixture context ~84k; force a hard-threshold occupancy against a tiny
+    # window so occupancy >= HARD_PCT regardless of signals.
+    env["AUTOCOMPACTOR_WINDOW"] = "100000"   # 84k/100k = 84%
+    env["AUTOCOMPACTOR_HARD_PCT"] = "0.5"
+    env["AUTOCOMPACTOR_COOLDOWN"] = "20000"
+    env["AUTOCOMPACTOR_POST_FLOOR"] = "0"      # don't let min_savings mask
+    env["AUTOCOMPACTOR_MIN_SAVINGS"] = "0"
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=payload, capture_output=True, text=True, env=env,
+        cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    # Past HARD_PCT must recommend despite the stale high baseline.
+    assert "Good moment to compact" in r.stdout
+    ev = json.loads((state_dir / "stats" / "events.jsonl")
+                    .read_text().splitlines()[-1])
+    assert ev["recommended"] is True
+    # Bricked baseline self-healed.
+    healed = json.loads((state_dir / "deadlock.state.json").read_text())
+    assert healed["last_reco_tokens"] != 494339
+
+
 def test_observe_only_signals_never_gate(tmp_path):
     """Anti-predictive signals (error_resolved et al.) keep flowing into
     telemetry but must not appear in — or justify — a recommendation."""

@@ -162,7 +162,19 @@ def main() -> int:
     except Exception:
         pass
 
-    suppressed = st.context_tokens - last_reco_tokens < cooldown
+    # Cooldown debounces RISING context only (see pi_bridge.py for the full
+    # rationale): a context that has shrunk below the last staging point has
+    # more room, not less, so reset the baseline. Persist the reset so a
+    # bricked state file self-heals on the next prompt.
+    if st.context_tokens < last_reco_tokens:
+        last_reco_tokens = -10**9
+        state["last_reco_tokens"] = last_reco_tokens
+        try:
+            with open(state_file, "w") as fh:
+                json.dump(state, fh)
+        except OSError:
+            pass
+    suppressed = 0 <= (st.context_tokens - last_reco_tokens) < cooldown
 
     stale_frac = (st.stale_tool_chars / st.total_tool_chars
                   if st.total_tool_chars else 0.0)

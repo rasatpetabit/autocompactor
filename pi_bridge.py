@@ -150,7 +150,18 @@ def cmd_evaluate(opts: dict) -> dict:
 
     state = _load_state(session_id)
     last_reco = state.get("last_reco_tokens", -10**9)
-    suppressed = context_tokens - last_reco < cooldown
+    # Cooldown debounces RISING context only: don't re-recommend every turn
+    # as tokens creep up past the last staging point. A context that has
+    # SHRUNK below the last staging point has more room, not less, so reset
+    # the baseline. Without this a reco staged at a high token count that
+    # never reached the reinject reset (native compaction, crash, race) would
+    # deadlock the session permanently: a negative delta is always < cooldown.
+    # Persist the reset so a bricked state file self-heals on the next eval.
+    if context_tokens < last_reco:
+        last_reco = -10**9
+        state["last_reco_tokens"] = last_reco
+        _save_state(session_id, state)
+    suppressed = 0 <= (context_tokens - last_reco) < cooldown
 
     stale_frac = (st.stale_tool_chars / st.total_tool_chars
                   if st.total_tool_chars else 0.0)

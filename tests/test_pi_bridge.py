@@ -167,6 +167,39 @@ def test_cooldown_round_trip(tmp_path):
     assert state_data["last_reco_tokens"] == 150000
 
 
+def test_cooldown_deadlock_breaks_when_context_shrinks(tmp_path):
+    """Regression for issue #1: a reco staged at a high token count that never
+    reached the reinject reset (native compaction, crash, race) used to pin
+    last_reco_tokens above the live context forever. A negative delta was
+    always < cooldown -> permanent suppression, even at 150% occupancy.
+
+    Fix: cooldown debounces RISING context only; a shrunken context resets
+    the baseline (and the bricked state file self-heals).
+    """
+    state_dir = tmp_path / "state"
+    fixture_path = REPO_ROOT / "tests" / "fixtures" / "pi" / "with_compaction.jsonl"
+    state_file = state_dir / "with_compaction.state.json"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    # Bricked state: a reco staged at 494339 that reinject never reset.
+    state_file.write_text(json.dumps({
+        "last_reco_tokens": 494339,
+        "pending_reinject": True,
+        "compaction_count": 2,
+    }))
+    args = ["evaluate", "--session", str(fixture_path),
+            "--tokens", "240175", "--context-window", "200000"]
+    result = run_bridge(args, state_dir)
+    assert result.returncode == 0
+    data = parse_single_json(result.stdout)
+    assert data is not None
+    # 150% occupancy must NOT be suppressed by a stale high baseline.
+    assert data["recommend"] is True
+    assert "suppressed" not in data["reason"]
+    # The bricked baseline self-heals: no longer the stale 494339.
+    healed = json.loads(state_file.read_text())
+    assert healed["last_reco_tokens"] != 494339
+
+
 def test_prepare_emits_instructions_and_side_effects(tmp_path):
     state_dir = tmp_path / "state"
     fixture_path = REPO_ROOT / "tests" / "fixtures" / "pi" / "with_compaction.jsonl"
