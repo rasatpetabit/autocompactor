@@ -4,7 +4,6 @@
   "MODE": "advise",
   "PROFILE": "economy",
   "WINDOW": 200000,
-  "SOFT_PCT": 0.35,
   "HARD_PCT": 0.65,
   "HARD_PCT_WIDE": 0.60,
   "STALE_FRAC": 0.90,
