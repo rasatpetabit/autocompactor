@@ -46,7 +46,7 @@ def test_nightly_passes_live_config_to_backtester(tmp_path, monkeypatch):
     assert nightly_eval.main() == 0
     cmd = seen["backtest_cmd"]
     assert cmd[cmd.index("--window") + 1] == "200000.0"
-    assert cmd[cmd.index("--soft") + 1] == "0.35"
+    assert cmd[cmd.index("--soft") + 1] == "0.5"
     assert cmd[cmd.index("--hard") + 1] == "0.55"
     assert cmd[cmd.index("--stale-frac") + 1] == "0.9"
     record = json.loads((reports / "nightly_history.jsonl").read_text().splitlines()[-1])

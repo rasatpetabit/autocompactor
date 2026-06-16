@@ -95,6 +95,21 @@ Deliverable: a normal user sees only `PROFILE`, `MAX_CONTEXT_TOKENS`, `MODE` fir
 
 Deliverable: only if it measurably improves lead time / `auto_unwarned`.
 
+## Workstream I — window-size-aware target & ceiling (Opus-4.8 advisor — see window-aware.md)
+
+The owner's directive (handle 64k→1m differently) requires replacing flat `SOFT`/`HARD` percentages with absolute `target(W)`/`ceiling(W)` curves derived from window + floor + profile.
+
+1. Add `target(W)` / `ceiling(W)` to `policy.py` (reserve-independent target first; ceiling gated on the reserve re-measurement).
+2. `a[profile]` replaces the existing `soft` fractions in `_PROFILES` (`{economy:130, balanced:188, lazy:266}`).
+3. `decide()`: SOFT line = `context >= target(W) AND boundary`; HARD line = `context >= ceiling(W)`; gate expansion on `est_reclaim ≥ MS` + predictive signals, **never `stale_output`**.
+4. Promote `native_ceiling` to Claude's effective window when present (`window_resolver`); add 64k/128k to `AUTO_WINDOW_TIERS` as fallback only.
+5. Force `MODE→observe` below `W_min (~110–130k)`; surface in `--status`.
+6. Retire `_WIDE` (degenerate 1-breakpoint version of this curve) — inert-deprecate then delete.
+7. **Pi actuation safety:** SOFT-band actuation requires a *strong* signal (subagent_done/commit), not just any boundary — real tokens are spent.
+8. Backtest `target/ceiling` per window tier before trusting `ceiling(W)` at the extremes.
+
+Deliverable: the three regimes (small=physics-protected, medium=target+expand, large=efficient-but-grow) realized with **zero new public knobs**.
+
 ## Proposed execution order
 
 1. **Workstream 0** — miss attribution (report + smallest fixes).

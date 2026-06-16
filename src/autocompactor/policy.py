@@ -22,6 +22,7 @@ the Workstream-0 fixes), and weighted boundary scoring.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from autocompactor import config_lib
@@ -29,11 +30,45 @@ from autocompactor import config_lib
 
 # Profile -> derived constants (internal; surfaced in --status). "balanced"
 # mirrors today's code defaults so the migration starts at exact parity.
+# `soft` here is the FALLBACK fraction used only when the window-aware
+# target curve cannot apply (or an explicit SOFT_PCT override is set); the
+# live SOFT line is target_tokens/effective_limit (see target_tokens()).
 _PROFILES = {
-    "economy":  {"soft": 0.32, "hard": 0.50, "cooldown": 15_000, "stale_frac": 0.40},
-    "balanced": {"soft": 0.40, "hard": 0.65, "cooldown": 25_000, "stale_frac": 0.50},
-    "lazy":     {"soft": 0.55, "hard": 0.80, "cooldown": 40_000, "stale_frac": 0.60},
+    "economy":  {"soft": 0.32, "hard": 0.50, "cooldown": 15_000, "stale_frac": 0.40, "a": 130},
+    "balanced": {"soft": 0.40, "hard": 0.65, "cooldown": 25_000, "stale_frac": 0.50, "a": 188},
+    "lazy":     {"soft": 0.55, "hard": 0.80, "cooldown": 40_000, "stale_frac": 0.60, "a": 266},
 }
+
+
+# Window-size-aware SOFT (boundary-gated) target curve. See
+# docs/masterplan/simplify-compaction-model/window-aware.md.
+#
+# The post-compaction floor F (~69k, measured) is WINDOW-INDEPENDENT: it is
+# system prompt + tool schemas + the injected summary, which do not shrink
+# for a smaller model. So a small window is almost entirely floor (little to
+# reclaim) while a large window is mostly headroom. target(W) therefore grows
+# sub-linearly: a coding task's live working set does not grow 4x just because
+# the window did. Reserve-independent -> safe to adopt before ceiling(W)
+# (which needs the measured native-auto reserve; see window-aware.md caveat).
+#
+# The interim ceiling is the current HARD line (hard_pct * W): it keeps the
+# SOFT target strictly below HARD so the SOFT->HARD band never inverts until
+# the proper ceiling(W) lands.
+def target_tokens(effective_window, profile: str,
+                  post_floor: float, min_savings: float,
+                  hard_pct: float) -> int:
+    """Absolute SOFT-line target in tokens for this window + profile."""
+    W = max(int(effective_window or 0), 0)
+    F = max(float(post_floor), 0.0)
+    MS = max(float(min_savings), 0.0)
+    if W <= F:
+        return W                       # at/below the floor: target = window
+    a = _PROFILES.get(profile, _PROFILES["balanced"])["a"]
+    curve = F + a * math.sqrt(W - F)
+    interim_ceiling = hard_pct * W - MS   # stay below the HARD line
+    target = min(curve, interim_ceiling)
+    target = max(target, F + MS)          # actionable floor
+    return int(target)
 
 
 @dataclass
@@ -47,6 +82,7 @@ class PolicyConfig:
     post_floor: float
     min_savings: float
     effective_limit: int
+    target_tokens: int = 0     # window-aware SOFT target (0 = legacy soft fraction)
 
 
 @dataclass
@@ -80,20 +116,35 @@ def resolve_policy_config(harness: str, effective_limit: int,
     (SOFT_PCT/HARD_PCT/COOLDOWN/STALE_FRAC/POST_FLOOR/MIN_SAVINGS) win over
     the profile base via the standard config_lib precedence (env > harness
     section > top-level > default), so existing tuned installs are unchanged.
+
+    SOFT line: when no explicit SOFT_PCT override is set, the SOFT threshold is
+    the window-aware target curve (target_tokens/effective_limit) rather than a
+    flat fraction — small windows are not starved, large windows target lower
+    occupancy. An explicit SOFT_PCT (deprecated) still wins (migration safety).
     """
     requested = profile or config_lib.cfg.str(
         "PROFILE", harness=harness, default="balanced") or "balanced"
     base = _PROFILES.get(requested, _PROFILES["balanced"])
     pname = requested if requested in _PROFILES else "balanced"
-    soft = config_lib.cfg.float("SOFT_PCT", harness=harness, default=base["soft"])
     hard = config_lib.cfg.float("HARD_PCT", harness=harness, default=base["hard"])
     cooldown = config_lib.cfg.float("COOLDOWN", harness=harness, default=base["cooldown"])
     stale_frac = config_lib.cfg.float("STALE_FRAC", harness=harness, default=base["stale_frac"])
     post_floor = config_lib.cfg.float("POST_FLOOR", harness=harness, default=70_000)
     min_savings = config_lib.cfg.float("MIN_SAVINGS", harness=harness, default=30_000)
     mode = config_lib.cfg.str("MODE", harness=harness, default="advise") or "advise"
+    eff = max(int(effective_limit), 1)
+
+    # Window-aware SOFT target, unless a deprecated SOFT_PCT override is set.
+    raw_soft = config_lib.cfg.raw("SOFT_PCT", harness=harness)
+    if raw_soft is not None:
+        soft = config_lib.cfg.float("SOFT_PCT", harness=harness, default=base["soft"])
+        tgt = 0
+    else:
+        tgt = target_tokens(eff, pname, post_floor, min_savings, hard)
+        soft = tgt / eff
+
     return PolicyConfig(pname, mode, soft, hard, cooldown, stale_frac,
-                        post_floor, min_savings, max(int(effective_limit), 1))
+                        post_floor, min_savings, eff, target_tokens=tgt)
 
 
 def decide(inp: PolicyInput, cfg: PolicyConfig) -> PolicyDecision:
@@ -121,7 +172,9 @@ def decide(inp: PolicyInput, cfg: PolicyConfig) -> PolicyDecision:
     recommend = bool(want and not blocked_by_savings)
 
     reason = (f"context at {occupancy:.0%} of ~{eff:,} tokens "
-              f"(profile={cfg.profile})")
+              f"(profile={cfg.profile}")
+    if cfg.target_tokens:
+        reason += f", target={cfg.target_tokens:,}t"
     if inp.gating and occupancy < cfg.hard:
         reason += " with a boundary signal"
     if blocked_by_savings:

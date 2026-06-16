@@ -662,8 +662,8 @@ def test_monitor_min_savings_guard_suppresses(tmp_path):
         "hook_event_name": "UserPromptSubmit",
         "prompt": "now plan the website redesign"})
     env = _hook_env(tmp_path)
-    env["AUTOCOMPACTOR_POST_FLOOR"] = "70000"   # fixture ctx ~84k ->
-    env["AUTOCOMPACTOR_MIN_SAVINGS"] = "30000"  # est. reclaim ~14k < 30k
+    env["AUTOCOMPACTOR_POST_FLOOR"] = "160000"  # fixture ctx ~170k ->
+    env["AUTOCOMPACTOR_MIN_SAVINGS"] = "30000"  # est. reclaim ~10k < 30k
     r = subprocess.run(
         [sys.executable, os.path.join(REPO, MONITOR)],
         input=payload, capture_output=True, text=True, env=env,

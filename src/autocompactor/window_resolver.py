@@ -154,6 +154,21 @@ def resolve_window(configured_window: float, observed_peak: int,
                 effective = float(max(effective - reserve, 1))
 
     blocks = bool(native and native < learned)
+
+    # Claude blind spot: it cannot see the live model window, so it inferred a
+    # tier from observed peak. CLAUDE_CODE_AUTO_COMPACT_WINDOW (native_ceiling)
+    # is the one hard fact about the enforced wall — and the tier inference was
+    # provably wrong (miss-attribution.md: inferred 512k when native was 500k).
+    # Cap the effective window at native_ceiling so it can never exceed the
+    # enforced reality. This is a CAP, not a replacement: an owner who set a
+    # tighter WINDOW (aggressive) keeps it; native_ceiling only binds when the
+    # inferred/configured window would exceed the enforced ceiling (over-
+    # inference, or a small model: a 64k/128k ceiling correctly caps down).
+    # Pi is unaffected (its runtime context window is authoritative).
+    if harness != "pi" and native and effective > native:
+        effective = float(native)
+        if source in ("configured", "observed_peak", "small_session_clamp"):
+            source = "native_ceiling_capped"
     return WindowResolution(
         effective_window=effective,
         configured_window=configured,

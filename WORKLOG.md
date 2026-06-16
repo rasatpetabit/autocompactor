@@ -246,3 +246,80 @@ Pi unchanged (conservative actuate). Verified resolved values per harness
 via config_lib. Updated test_nightly_eval config-fidelity pins (200k/0.35/
 0.55/110k) + pytest.approx for the float. TODO: one-day reserve check, then
 decide 300k->200k.
+
+## 2026-06-16 — window-size-aware target(W) curve + native_ceiling cap
+
+Opus-4.8/xhigh advisor (paseo 040952be) designed the window-aware policy
+(window-aware.md). Two verified pivots: (1) the ~69k post-compaction floor is
+WINDOW-INDEPENDENT, so small windows (64k) are already physics-protected (the
+new value lands at >=256k); (2) stale_output is a RECENCY proxy not relevance
+(anti-predictive 0.9x) -> WRONG gate for "expand when relevant". Design:
+target(W)=F+a[profile]*sqrt(W-F) (SOFT line) + ceiling(W) (HARD safety line),
+gate expansion on est_reclaim>=MS + predictive signals (subagent_done/
+burn_rate/commit), NOT stale_output. Window=shape, profile=aggressiveness.
+
+Implemented this increment (157 pytest + Claude/Pi smoke green):
+
+target(W) — policy.py (foundation; activates with the adapter rewire):
+- target_tokens(W, profile, F, MS, hard_pct): sub-linear SOFT curve, clamped
+  to the current HARD line as interim ceiling (keeps SOFT<HARD; proper
+  ceiling(W) deferred until reserve measured). _A={economy:130,balanced:188,
+  lazy:266}. Verified: balanced 64k->100%, 512k->195k, 1m->251k (matches
+  advisor table).
+- resolve_policy_config derives soft=target/effective_limit UNLESS a deprecated
+  SOFT_PCT override is set (migration safety -> tuned installs unchanged; curve
+  governs once SOFT_PCT retired). PolicyConfig.target_tokens surfaces it.
+- NOT yet wired to live UserPromptSubmit/pi_bridge (the highest-risk gated
+  step; also retires SOFT_PCT + needs rich-fixture test update).
+
+native_ceiling — window_resolver.py (LIVE now):
+- Promoted as a CAP (effective=min(resolved, native_ceiling), Claude-only), not
+  a full replacement. The advisor's "native_ceiling IS the window" assumed
+  WINDOW was a loose default; for this owner's deliberate aggressive WINDOW
+  (200k<ceiling 300k) a full replacement would loosen it + move the hard line
+  later (unmeasured-reserve regression). The cap honors "enforced wall"
+  (caps over-inference 512k->500k; small models 128k binds) WITHOUT loosening.
+- Live effect for current config: DORMANT (200k<300k). Activates for big-window
+  models / small enforced ceilings.
+
+ceiling(W)/native_safe_line DEFERRED: needs the pending reserve re-measurement
+(the W-63k constant is stale on CC 2.1.178; ~153k under 500k, unknown under
+300k). Until then flat HARD_PCT is the interim ceiling.
+
+## 2026-06-16 — window-aware target(W) curve + native_ceiling cap (LIVE)
+
+Opus-4.8/xhigh advisor (paseo 040952be) designed the window-aware policy
+(window-aware.md). Two verified pivots: (1) the ~69k post-compaction floor is
+WINDOW-INDEPENDENT (small windows like 64k are already physics-protected —
+new value lands at >=256k); (2) stale_output is a RECENCY proxy not relevance
+(anti-predictive 0.9x) -> WRONG gate for expansion. Design: target(W)=
+F+a[profile]*sqrt(W-F) (SOFT line) + ceiling(W) (HARD safety line).
+
+Implemented + LIVE (157 pytest + Claude/Pi smoke green):
+
+target(W) — policy.py:
+- target_tokens(W, profile, F, MS, hard_pct): sub-linear SOFT curve, clamped
+  to the current HARD line as interim ceiling (proper ceiling(W) deferred
+  until the native-auto reserve is measured). _A={economy:130,balanced:188,
+  lazy:266}. resolve_policy_config derives soft=target/effective_limit UNLESS
+  a deprecated SOFT_PCT override is set.
+
+native_ceiling cap — window_resolver.py:
+- effective=min(resolved, native_ceiling), Claude-only. Chose cap over the
+  advisor's full-replacement so the deliberate aggressive WINDOW (200k<ceiling
+  300k) is not loosened + the unmeasured-reserve regression avoided. Caps
+  over-inference (512k->500k) and small models (128k binds).
+
+ACTIVATED on the Claude main path:
+- context_monitor._run() reads SOFT from policy.resolve_policy_config (target
+  curve) after window resolution; nightly_eval derives its backtester --soft
+  from the curve too. Top-level SOFT_PCT retired from config.json (pi.SOFT_PCT
+  0.50 stays pinned — Pi is actuate, kept conservative per advisor trap #4).
+- LIVE resolved soft (economy): 200k->50%(100k), 512k->31%(156k), 1m->20%
+  (195k) — small windows not starved, large windows target low occupancy.
+- Rich fixture bumped to ~170k context so recommend tests fire under the
+  curve; min_savings test floor bumped to match. pi_bridge left on pinned flat
+  soft (actuate; full Pi rewire is follow-up).
+
+ceiling(W)/native_safe_line DEFERRED: needs the reserve re-measurement (W-63k
+stale on CC 2.1.178). Until then flat HARD_PCT is the interim ceiling.

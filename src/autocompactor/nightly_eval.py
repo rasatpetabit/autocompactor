@@ -38,6 +38,7 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # checkout root
 import autocompactor.config_lib as config_lib  # noqa: E402
+from autocompactor import policy  # noqa: E402
 
 BASE = os.path.expanduser("~/.claude/autocompactor")
 REPORTS = os.path.join(BASE, "reports")
@@ -109,9 +110,17 @@ def main() -> int:
     today = datetime.date.today().isoformat()
     env = settings_env()
     window = config_lib.cfg.float("WINDOW", default=200_000)
-    soft_pct = config_lib.cfg.float("SOFT_PCT", default=0.40)
     hard_pct = config_lib.cfg.float("HARD_PCT", default=0.65)
     stale_frac = config_lib.cfg.float("STALE_FRAC", default=0.90)
+    # Window-aware SOFT: derive from the target curve (parity with the live
+    # monitor) unless a deprecated SOFT_PCT override is set.
+    if config_lib.cfg.raw("SOFT_PCT") is not None:
+        soft_pct = config_lib.cfg.float("SOFT_PCT", default=0.40)
+    else:
+        _prof = config_lib.cfg.str("PROFILE", default="balanced") or "balanced"
+        _F = config_lib.cfg.float("POST_FLOOR", default=70_000)
+        _MS = config_lib.cfg.float("MIN_SAVINGS", default=30_000)
+        soft_pct = policy.target_tokens(window, _prof, _F, _MS, hard_pct) / window
     hard_tokens = window * hard_pct
     ceiling = float(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", 0)) or None
     issues, notes = [], []

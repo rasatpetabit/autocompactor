@@ -1,7 +1,7 @@
 # Spec: three-knob compaction model
 
 Date: 2026-06-16
-Status: brainstorm/masterplan draft (revised after GPT-5.5 advisor pass — see review.md)
+Status: brainstorm/masterplan draft (revised after GPT-5.5 advisor pass — see review.md; window-size-aware model added after Opus-4.8 pass — see window-aware.md)
 
 ## Summary
 
@@ -134,6 +134,21 @@ recommend when:
   )
   AND not cooldown_suppressed
 ```
+
+### Window-size-aware target & ceiling (Opus-4.8 advisor — see window-aware.md)
+
+The flat-percentage model is **ceiling-driven** and window-blind. The owner's directive (small windows shouldn't be starved; medium/large should target ~150k+ but expand when relevant) requires **absolute target/ceiling curves derived from window + floor + profile**:
+
+```
+target(W)  = F + a[profile]·sqrt(W − F)     # SOFT/boundary-gated line
+ceiling(W) = clamp(native_safe_line(W), F+2·MS, 0.90·W)   # HARD/safety line
+```
+
+- **Below target:** never compact (don't artificially limit). For small windows target≈window → automatic.
+- **Target→ceiling:** compact only if `est_reclaim ≥ MS` **and** a predictive boundary signal (subagent_done/burn_rate/commit) — NOT `stale_output` (verified a recency proxy, anti-predictive). This is the relevance-gated expansion.
+- **At/above ceiling:** unconditional safety.
+
+Key verified facts: (1) the ~69k floor is window-independent, so small windows (64k) are *already* blocked by physics — the new value lands at ≥256k; (2) the balanced 200k row reproduces live hand-tuning (target 100k, ceiling 130k); (3) `a[profile]` replaces the 3 soft fractions — **zero new public knobs**, and `_WIDE` retires (it's a 1-breakpoint version of this curve). Caveat: `ceiling`'s `native_safe_line` uses a stale 2.1.170 reserve constant (63k); on 2.1.178 it's ~153k → re-measure before trusting `ceiling(W)`. `target(W)` is reserve-independent → safe to adopt now. Window sets shape; profile sets aggressiveness — they compose, not replace.
 
 ### Boundary handling — keep binary for now
 

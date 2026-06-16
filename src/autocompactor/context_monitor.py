@@ -184,7 +184,6 @@ def _run() -> int:
 
     configured_window = config_lib.cfg.float("WINDOW", default=200_000)
     window = configured_window
-    soft = config_lib.cfg.float("SOFT_PCT", default=0.40)
     hard = config_lib.cfg.float("HARD_PCT", default=0.65)
     cooldown = config_lib.cfg.float("COOLDOWN", default=25_000)
     stale_frac_thr = config_lib.cfg.float("STALE_FRAC", default=0.50)
@@ -263,6 +262,13 @@ def _run() -> int:
         native_ceiling=window_resolver.native_ceiling_from_settings())
     window = resolution.effective_window
     occupancy = st.context_tokens / window
+
+    # Window-aware SOFT line: the target(W) curve (policy.target_tokens), not
+    # a flat fraction. Small windows aren't starved (target rides near the
+    # window); large windows target lower occupancy (keep ~150k, expand only
+    # on a boundary signal). See docs/masterplan/simplify-compaction-model/
+    # window-aware.md. A deprecated SOFT_PCT override (if set) still wins.
+    soft = policy.resolve_policy_config("claude", int(window)).soft
 
     # One-shot artifact re-injection on the first prompt after a compaction.
     if state.get("pending_reinject"):

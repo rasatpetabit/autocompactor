@@ -72,15 +72,18 @@ def test_native_ceiling_warning_for_learned_large_window():
 
 
 def test_no_observed_peak_uses_configured_window_as_source():
+    # native_ceiling CAPS the effective window for Claude: configured 512k is
+    # over the enforced 300k ceiling, so effective is capped to 300k (the
+    # enforced reality). learned_tier still reflects the configured window.
     res = window_resolver.resolve_window(
         configured_window=512_000,
         observed_peak=0,
         native_ceiling=300_000,
     )
-    assert res.effective_window == 512_000
+    assert res.effective_window == 300_000
     assert res.learned_window == 512_000
     assert res.learned_tier == "512k"
-    assert res.window_source == "configured"
+    assert res.window_source == "native_ceiling_capped"
     assert res.native_ceiling_blocks_learned_window is True
 
 
@@ -107,3 +110,44 @@ def test_observe_mode_keeps_effective_window_on_current_live_path():
     )
     assert pi.effective_window == 472_000
     assert pi.learned_window == 200_000
+
+
+def test_native_ceiling_caps_over_inference_for_claude():
+    """The tier inference can overshoot the enforced ceiling (miss-attribution:
+    inferred 512k when native was 500k). native_ceiling must cap it down."""
+    res = window_resolver.resolve_window(
+        configured_window=1_000_000, observed_peak=341_000,
+        native_ceiling=500_000)
+    assert res.effective_window == 500_000          # capped, not 1m
+    assert res.window_source == "native_ceiling_capped"
+    assert res.learned_window == 512_000            # tier still recorded
+
+
+def test_native_ceiling_small_model_caps_down():
+    """A 64k/128k model has a small CLAUDE_CODE_AUTO_COMPACT_WINDOW; it must
+    cap the effective window down so thresholds track the small wall."""
+    res = window_resolver.resolve_window(
+        configured_window=200_000, observed_peak=120_000,
+        native_ceiling=128_000)
+    assert res.effective_window == 128_000
+    assert res.window_source == "native_ceiling_capped"
+
+
+def test_native_ceiling_never_loosens_a_tighter_window():
+    """An owner who set an aggressive WINDOW below the ceiling keeps it —
+    native_ceiling only binds when effective would EXCEED it. So a 200k
+    configured session under a 300k ceiling stays at 200k (not loosened)."""
+    res = window_resolver.resolve_window(
+        configured_window=200_000, observed_peak=180_000,
+        native_ceiling=300_000)
+    assert res.effective_window == 200_000          # NOT raised to 300k
+    assert res.window_source == "small_session_clamp"  # clamp path, uncapped
+
+
+def test_native_ceiling_does_not_affect_pi():
+    """Pi's runtime context window is authoritative; the cap is Claude-only."""
+    res = window_resolver.resolve_window(
+        harness="pi", configured_window=1_000_000, observed_peak=490_000,
+        runtime_context_window=600_000, reserve=40_000, native_ceiling=300_000)
+    assert res.effective_window == 560_000          # 600k - 40k, NOT capped to 300k
+    assert res.window_source == "runtime"

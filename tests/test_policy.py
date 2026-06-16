@@ -96,7 +96,12 @@ def test_resolve_policy_config_profile_defaults(monkeypatch):
     monkeypatch.setenv("AUTOCOMPACTOR_CONFIG", "")   # hermetic
     cfg = policy.resolve_policy_config("claude", 200_000, profile="balanced")
     assert cfg.profile == "balanced"
-    assert cfg.soft == 0.40 and cfg.hard == 0.65 and cfg.cooldown == 25_000
+    # SOFT is now the window-aware target curve (no SOFT_PCT override):
+    # balanced 200k -> target 100k (interim ceiling = hard 0.65*200k - MS 30k),
+    # so soft = 100k/200k = 0.50. hard/cooldown come from the profile base.
+    assert cfg.hard == 0.65 and cfg.cooldown == 25_000
+    assert cfg.target_tokens == 100_000
+    assert cfg.soft == 0.50
 
 
 def test_resolve_policy_config_unknown_profile_falls_back(monkeypatch):
@@ -125,3 +130,62 @@ def test_economy_profile_compacts_earlier_than_lazy(monkeypatch):
     d_l = policy.decide(policy.PolicyInput(110_000, eff, gating=False), cfg_l)
     assert d_e.recommend is True
     assert d_l.recommend is False
+
+
+# -------------------------------------- window-size-aware target curve
+
+def test_target_curve_small_window_target_equals_window():
+    """64k regime: the floor (~70k) exceeds the window, so there is nothing
+    to reclaim — target rides up at the window (compact only on stale data,
+    never to hit a percentage). target_tokens returns the window itself."""
+    t = policy.target_tokens(64_000, "balanced", 70_000, 30_000, 0.65)
+    assert t == 64_000
+
+
+def test_target_curve_large_window_targets_low_occupancy():
+    """1m regime: a large window is mostly reclaimable headroom (the ~69k
+    floor is window-independent), so target sits far below the window.
+    balanced 1m -> ~251k (25%), matching the advisor's table."""
+    t = policy.target_tokens(1_000_000, "balanced", 70_000, 30_000, 0.65)
+    assert 245_000 < t < 258_000
+    assert t / 1_000_000 < 0.30          # well below the window
+
+
+def test_target_curve_medium_window_around_150k():
+    """256k/512k regime: keep ~150k for efficiency. balanced 512k ~195k."""
+    t512 = policy.target_tokens(512_000, "balanced", 70_000, 30_000, 0.65)
+    assert 190_000 < t512 < 200_000
+
+
+def test_target_curve_never_exceeds_hard_line():
+    """The interim ceiling keeps SOFT strictly below HARD so the SOFT->HARD
+    band never inverts (target < hard_tokens - min_savings)."""
+    for W in (200_000, 300_000, 512_000, 1_000_000):
+        hard = 0.65
+        t = policy.target_tokens(W, "balanced", 70_000, 30_000, hard)
+        assert t < hard * W - 30_000 + 1   # strictly below the hard line
+
+
+def test_target_curve_never_below_actionable_floor():
+    """target is floored at F + MS so a recommendation is always actionable."""
+    for W in (200_000, 512_000):
+        t = policy.target_tokens(W, "balanced", 70_000, 30_000, 0.65)
+        assert t >= 100_000
+
+
+def test_resolve_uses_target_curve_when_no_soft_override(monkeypatch):
+    monkeypatch.setenv("AUTOCOMPACTOR_CONFIG", "")
+    # 512k balanced -> target ~195k, soft ~0.38 (NOT the flat 0.40 fallback)
+    cfg = policy.resolve_policy_config("claude", 512_000, profile="balanced")
+    assert cfg.target_tokens > 0
+    assert 0.36 < cfg.soft < 0.40
+
+
+def test_resolve_soft_pct_override_disables_curve(monkeypatch):
+    """A deprecated explicit SOFT_PCT wins and zeroes target_tokens (the curve
+    is not used) — no silent behavior change for tuned installs."""
+    monkeypatch.setenv("AUTOCOMPACTOR_CONFIG", "")
+    monkeypatch.setenv("AUTOCOMPACTOR_SOFT_PCT", "0.35")
+    cfg = policy.resolve_policy_config("claude", 512_000, profile="balanced")
+    assert cfg.soft == 0.35
+    assert cfg.target_tokens == 0
