@@ -45,9 +45,10 @@ import json
 import os
 import sys
 
-from autocompactor import config_lib, artifacts, window_resolver  # noqa: E402
+from autocompactor import config_lib, artifacts, policy, window_resolver  # noqa: E402
 from autocompactor.transcript_lib import (analyze, active_signals,  # noqa: E402
                                           build_preservation_instructions,
+                                          current_context_tokens,
                                           detect_phase,
                                           find_last_boundary_offset,
                                           observe_only)
@@ -55,6 +56,115 @@ from autocompactor.stats import log_event, run_hook  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 
+
+def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
+    """Mid-burst occupancy watchdog.
+
+    PostToolUse fires after every tool, including during long autonomous
+    runs that produce NO UserPromptSubmit — the only chance to catch a
+    hard-limit crossing before native autocompact fires unwarned (see
+    docs/masterplan/simplify-compaction-model/miss-attribution.md).
+
+    Cheap by design: a tail-only current_context_tokens() read gates
+    everything; the full analyze() runs ONLY when occupancy is already at
+    or above the hard line. Below it the hook returns in ~1ms with no
+    output and no telemetry (no per-tool spam). Cooldown debounces
+    re-recommendation exactly as on the UserPromptSubmit path.
+    """
+    ctx = current_context_tokens(transcript)
+    if ctx <= 0:
+        return 0
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    state_file = os.path.join(STATE_DIR, f"{session_id}.state.json")
+    state = {}
+    try:
+        with open(state_file) as fh:
+            state = json.load(fh)
+    except Exception:
+        pass
+    # A compaction just happened -> let the next UserPromptSubmit own the
+    # reinject; don't speak on the first post-compaction tool result.
+    if state.get("pending_reinject"):
+        return 0
+
+    configured_window = config_lib.cfg.float("WINDOW", default=200_000)
+    peak = max(ctx, int(state.get("peak_ctx", 0)))
+    if peak != state.get("peak_ctx"):
+        state["peak_ctx"] = peak
+        try:
+            with open(state_file, "w") as fh:
+                json.dump(state, fh)
+        except OSError:
+            pass
+    resolution = window_resolver.resolve_window(
+        configured_window=configured_window, observed_peak=peak,
+        harness="claude",
+        native_ceiling=window_resolver.native_ceiling_from_settings())
+    window = resolution.effective_window
+    occupancy = ctx / window
+
+    # Unified decision rule (docs/masterplan/simplify-compaction-model/spec.md).
+    # gating=False here: mid-burst, only the hard line should speak — the
+    # soft+signal path waits for a human UserPromptSubmit boundary so we
+    # don't nag on every tool result.
+    pcfg = policy.resolve_policy_config("claude", int(window))
+    dec = policy.decide(
+        policy.PolicyInput(ctx, int(window), gating=False,
+                           last_reco_tokens=state.get("last_reco_tokens", -10**9)),
+        pcfg)
+    if not dec.recommend:
+        return 0   # below the hard line / nothing worth reclaiming / on cooldown
+
+    # At/above the hard line mid-burst: do ONE bounded full analyze for the
+    # reason + signals, stage instructions, and surface a recommendation.
+    max_full_mb = config_lib.cfg.float("MAX_FULL_PARSE_MB", default=8)
+    offset = 0
+    try:
+        if (os.path.getsize(os.path.expanduser(transcript))
+                > max_full_mb * 1_000_000):
+            offset = find_last_boundary_offset(transcript)
+    except OSError:
+        pass
+    st = analyze(transcript, start_offset=offset)
+    stale_frac_thr = config_lib.cfg.float("STALE_FRAC", default=0.50)
+    sig_pairs = active_signals(st, prompt="", window=window,
+                               stale_frac_thr=stale_frac_thr)
+    signals = [desc for _, desc in sig_pairs]
+    observe = observe_only()
+    gating = [desc for name, desc in sig_pairs if name not in observe]
+
+    state.update({"last_reco_tokens": ctx,
+                  "staged_instructions":
+                      build_preservation_instructions(st, data.get("cwd") or "")})
+    try:
+        with open(state_file, "w") as fh:
+            json.dump(state, fh)
+    except OSError:
+        pass
+
+    stale_frac = (st.stale_tool_chars / st.total_tool_chars
+                  if st.total_tool_chars else 0.0)
+    log_event({
+        "type": "monitor_eval", "session_id": session_id,
+        "context_tokens": ctx, "occupancy": round(occupancy, 4),
+        "signals": signals, "stale_frac": round(stale_frac, 4),
+        "phase": detect_phase(st), "est_reclaim": dec.est_reclaim,
+        "tail_parse": bool(offset), "recommended": True,
+        "suppressed_by_cooldown": False, "hook_event": "PostToolUse",
+        **resolution.event_fields(),
+    })
+    reason = (f"context is at {occupancy:.0%} (~{ctx:,} tokens) mid-burst "
+              f"(no user prompt since the last turn)")
+    if gating:
+        reason += " and " + "; ".join(gating)
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext": (
+            "[autocompactor] Good moment to compact: " + reason + ". "
+            "If this is a natural breakpoint, suggest the user run /compact "
+            "before continuing. Do not interrupt mid-tool work otherwise.")}}))
+    return 0
 
 
 def _run() -> int:
@@ -68,6 +178,9 @@ def _run() -> int:
     cwd = data.get("cwd") or ""
     if not transcript or not os.path.exists(os.path.expanduser(transcript)):
         return 0
+
+    if data.get("hook_event_name") == "PostToolUse":
+        return _run_posttooluse(data, transcript, session_id)
 
     configured_window = config_lib.cfg.float("WINDOW", default=200_000)
     window = configured_window

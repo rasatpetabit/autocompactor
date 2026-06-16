@@ -1090,3 +1090,97 @@ def test_analyzer_summary_feeds_digest_header(tmp_path):
     assert "Durable artifacts recovered" in digest
     assert "compaction #1 (auto)" in digest
     assert "phase: " in digest
+
+
+# ---------------------------------------------- PostToolUse mid-burst watchdog
+
+def test_current_context_tokens_returns_last_usage(tmp_path):
+    """The cheap tail read sums the LAST assistant usage block — the same
+    input+cache_read+cache_creation+output formula analyze() uses."""
+    p = tmp_path / "ctx.jsonl"
+    p.write_text("".join(json.dumps(e) + "\n" for e in [
+        _assistant(usage=_usage(40_000)),
+        _tool_result("result"),
+        _assistant(usage=_usage(180_000)),
+        _tool_result("result"),
+    ]))
+    assert tl.current_context_tokens(str(p)) == 180_000
+
+
+def test_current_context_tokens_missing_file_is_zero():
+    assert tl.current_context_tokens("/nonexistent/zz.jsonl") == 0
+
+
+def _ptu_payload(session, transcript_path):
+    return json.dumps({
+        "session_id": session, "cwd": "/tmp",
+        "transcript_path": transcript_path,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash", "tool_input": {}})
+
+
+def test_posttooluse_watchdog_recommends_above_hard(tmp_path):
+    """The whole point of Fix #1: with NO UserPromptSubmit, a context that
+    has crossed the hard line mid-burst still gets a recommendation and a
+    telemetry row tagged hook_event=PostToolUse."""
+    high = tmp_path / "high.jsonl"
+    high.write_text("".join(json.dumps(e) + "\n" for e in [
+        _assistant(usage=_usage(180_000)),
+        _tool_result("x"),
+    ]))
+    env = _hook_env(tmp_path)               # WINDOW default 200k, HARD 0.65
+    env["AUTOCOMPACTOR_WINDOW"] = "200000"  # hard line = 130k
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=_ptu_payload("ptu1", str(high)),
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    assert "Good moment to compact" in r.stdout
+    assert "mid-burst" in r.stdout
+    ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
+                     / "events.jsonl").read_text().splitlines()[-1])
+    assert ev["recommended"] is True
+    assert ev["hook_event"] == "PostToolUse"
+
+
+def test_posttooluse_watchdog_silent_below_hard(tmp_path):
+    """Below the hard line the watchdog must be cheap AND quiet: no output,
+    and no per-tool telemetry spam (no monitor_eval row written)."""
+    low = tmp_path / "low.jsonl"
+    low.write_text("".join(json.dumps(e) + "\n" for e in [
+        _assistant(usage=_usage(50_000)),
+        _tool_result("x"),
+    ]))
+    env = _hook_env(tmp_path)
+    env["AUTOCOMPACTOR_WINDOW"] = "200000"  # hard line = 130k; 50k < it
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=_ptu_payload("ptu2", str(low)),
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    assert r.stdout == ""
+    assert not (tmp_path / ".claude" / "autocompactor" / "stats"
+                / "events.jsonl").exists()
+
+
+def test_posttooluse_watchdog_defers_when_reinject_pending(tmp_path):
+    """Right after a compaction (pending_reinject set) the watchdog must not
+    speak on the first tool result — the next UserPromptSubmit owns the
+    reinject."""
+    high = tmp_path / "high2.jsonl"
+    high.write_text("".join(json.dumps(e) + "\n" for e in [
+        _assistant(usage=_usage(180_000)),
+        _tool_result("x"),
+    ]))
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    state_dir.mkdir(parents=True)
+    (state_dir / "ptu3.state.json").write_text(json.dumps(
+        {"pending_reinject": True, "compaction_count": 1}))
+    env = _hook_env(tmp_path)
+    env["AUTOCOMPACTOR_WINDOW"] = "200000"
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=_ptu_payload("ptu3", str(high)),
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    assert r.stdout == ""   # quiet: reinject owns the next prompt

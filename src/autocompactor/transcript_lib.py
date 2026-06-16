@@ -204,6 +204,50 @@ def find_last_boundary_offset(path: str, needle: bytes = b'"compact_boundary"',
     return 0
 
 
+def current_context_tokens(path: str) -> int:
+    """Cheap current-context estimate: the summed usage of the LAST
+    assistant entry in the transcript.
+
+    Reverse tail read (no full parse): try a 256KB tail, then a 4MB tail if
+    no assistant usage block is found there. ~1ms typical. Returns 0 if no
+    assistant usage is present or on any error.
+
+    Purpose: the PostToolUse trigger needs to detect hard-limit crossings
+    mid-burst (during long autonomous tool runs that produce no
+    UserPromptSubmit) without paying for a full analyze() on every tool
+    call. The full analyze runs only once occupancy is already at/above
+    the hard line.
+    """
+    try:
+        p = os.path.expanduser(path)
+        size = os.path.getsize(p)
+        for tail_bytes in (1 << 18, 1 << 22):   # 256KB, then 4MB
+            with open(p, "rb") as fh:
+                if size > tail_bytes:
+                    fh.seek(size - tail_bytes)
+                    fh.readline()   # drop the partial first line
+                data = fh.read()
+            for line in reversed(data.split(b"\n")):
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line.decode("utf-8", "replace"))
+                except Exception:
+                    continue
+                if entry.get("type") == "assistant":
+                    usage = (entry.get("message") or {}).get("usage") or {}
+                    if isinstance(usage, dict) and usage:
+                        return (int(usage.get("input_tokens", 0))
+                                + int(usage.get("cache_read_input_tokens", 0))
+                                + int(usage.get("cache_creation_input_tokens", 0))
+                                + int(usage.get("output_tokens", 0)))
+            if size <= tail_bytes:
+                break   # whole file already scanned; retrying won't help
+        return 0
+    except OSError:
+        return 0
+
+
 def _finalize_stats(st: TranscriptStats, edited: dict, read: dict,
                     task_state: dict, recent_result_flags: list) -> None:
     """Derive summary fields from the raw material the analyze() loop

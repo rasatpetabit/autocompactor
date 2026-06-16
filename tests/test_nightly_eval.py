@@ -3,6 +3,8 @@ import os
 import sys
 import datetime
 
+import pytest  # noqa: E402
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
@@ -43,12 +45,12 @@ def test_nightly_passes_live_config_to_backtester(tmp_path, monkeypatch):
 
     assert nightly_eval.main() == 0
     cmd = seen["backtest_cmd"]
-    assert cmd[cmd.index("--window") + 1] == "300000.0"
-    assert cmd[cmd.index("--soft") + 1] == "0.5"
-    assert cmd[cmd.index("--hard") + 1] == "0.62"
+    assert cmd[cmd.index("--window") + 1] == "200000.0"
+    assert cmd[cmd.index("--soft") + 1] == "0.35"
+    assert cmd[cmd.index("--hard") + 1] == "0.55"
     assert cmd[cmd.index("--stale-frac") + 1] == "0.9"
     record = json.loads((reports / "nightly_history.jsonl").read_text().splitlines()[-1])
-    assert record["hard_tokens"] == 186000.0
+    assert record["hard_tokens"] == pytest.approx(110000.0)
 
 
 def test_nightly_reports_learned_tiers_and_native_cap_blocks(tmp_path, monkeypatch):

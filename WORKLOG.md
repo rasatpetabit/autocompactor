@@ -160,3 +160,89 @@ Terse handoff log for collaborating agents. Newest entry first.
   the live qwen endpoint through config.local.json before this).
 - Caveat: harness sections wholly outrank top-level keys, so a harness
   needing a _WIDE value must carry it in its own section (pi.HARD_PCT_WIDE).
+
+## 2026-06-16 — simplify-compaction-model: miss attribution + Fix #1 + policy.py
+
+Masterplan bundle at docs/masterplan/simplify-compaction-model/ (findings,
+spec, plan, review, miss-attribution). GPT-5.5/xhigh advisor pass (paseo
+a406d072) redirected the work: the real bug is NOT config verbosity — it is
+Claude auto-compactions arriving with no advance recommendation.
+
+Miss attribution (miss-attribution.md), confirmed against source:
+- Structural: the advisor hook fires on UserPromptSubmit (human prompts only),
+  not tool-result turns. Unwarned session grew 37k->343k across 130 tool-result
+  turns but only 7 human prompts -> the hook had almost no chance to recommend
+  before native auto. A profile/config rename cannot fix this.
+- Secondary: evals/day collapsed 142->6 after the 2.1.173 upgrade (2026-06-11);
+  PreCompact hook events dropped to ~1 vs ~87 transcript compactions same day
+  -> broad hook-invocation regression (recovered on 2.1.178).
+- Ruled out (verified): tail-parse-returns-0, broken session_id propagation,
+  and the analyze() "under-count" (correct: compaction summarizes away
+  pre-boundary usage; peak_ctx state-carrying preserves the true peak).
+
+Fix #1 (the actual cure) — DONE, live, tested:
+- transcript_lib.current_context_tokens(): cheap reverse-tail read of the last
+  assistant usage block (~1ms), so the hook can check occupancy mid-burst
+  without a full analyze() per tool call.
+- context_monitor._run_posttooluse(): a PostToolUse watchdog. Cheap path gates
+  on current_context_tokens; full analyze runs only at/above the hard line;
+  cooldown debounces; quiet + no telemetry below the line (no per-tool spam).
+- install.py: registers PostToolUse -> context_monitor.py (idempotent). Live
+  settings.json updated; --status shows PostToolUse 1/1.
+
+Workstream 2 — DONE: nightly_eval hook-coverage self-check
+(precompact_events / transcript compactions; flags <50% with >=3 compactions)
+— robust to total hook death because both hook counts drop together. Collapse
+pinned as regression in miss-attribution.md.
+
+Workstream 3 — foundation landed: policy.py (unified decision rule: hard line,
+soft+gating, min-savings guard, rising-only cooldown; PROFILE table at parity
+with today's defaults; old-key overrides still win). Wired into the PostToolUse
+path (gating=False: hard-line-only mid-burst). tests/test_policy.py (11 cases).
+
+REMAINING (gated, highest-risk): rewire the UserPromptSubmit path
+(context_monitor._run) and pi_bridge.cmd_evaluate to call policy.decide() with
+parity tests as the gate; then old-vs-new backtest; then docs/config rewrite;
+weighted boundary scoring last/optional.
+
+## 2026-06-16 — aggressive local config (advisor-validated, floor-safe)
+
+Verified deployment is LIVE and healthy: all 4 Claude hooks (incl. the new
+PostToolUse watchdog, already firing — 9 evals day-one), nightly cron, Pi
+extension (bridge path correct), 146 pytest + Claude/Pi smoke green. The
+2026-06-15 "offline locally" memory is stale.
+
+GPT-5.5/xhigh advisor (paseo 02633d39) pressure-tested the aggressive config.
+Its key catch: the native-auto reserve model is UNKNOWABLE from corrupted
+data — nightly_history mislabels old sessions with the CURRENT ceiling (the
+backtest reads native_ceiling from settings.json at backtest time, not
+session time), so e.g. 336k "under a 200k ceiling" is garbage. The only
+trustworthy same-day/current-ceiling point is 2026-06-16: 500k ceiling ->
+autos at 344-350k -> reserve ~153k (NOT the ~65k the HANDOFF claims for the
+old 2.1.170). Under an absolute-153k reserve, a 200k native ceiling would
+fire compactions at ~47k — BELOW the 69k floor (catastrophic). So:
+
+- Native ceiling CLAUDE_CODE_AUTO_COMPACT_WINDOW: 500000 -> 300000 (floor-
+  safe under BOTH reserve models: 147k absolute / 207k proportional). Tighten
+  to 200k only after tomorrow's nightly measures the actual 2.1.178 reserve.
+
+Aggressive config applied (config.json):
+- PROFILE: economy (new; affects PostToolUse + future policy.py path)
+- top: SOFT_PCT 0.5->0.35, COOLDOWN 20000->15000
+- claude: WINDOW 300000->200000, HARD_PCT 0.62->0.55  (hard nag @110k)
+- POST_FLOOR 70000 + MIN_SAVINGS 30000 kept (advisor: don't lower — going to
+  MIN_SAVINGS 20000 + HARD 0.45 makes 90k recs legal, reclaiming only 20k =
+  the stall-with-little-gain zone). Effective Claude boundaries: soft+signal
+  legal @~100k (floor), hard @110k.
+- Pi section PINNED (advisor catch: top-level changes bleed into Pi via
+  config_lib precedence unless pinned): added pi.SOFT_PCT 0.50, pi.COOLDOWN
+  20000, pi.MIN_SAVINGS 30000. Pi stays HARD_PCT 0.90 (actuate = real
+  compactions; 0.70 on a 160k effective window actuates at 112k, reclaiming
+  only 42k — too close to floor for auto-interrupt). Experiment with 0.80
+  later, never 0.70 while actuating.
+
+Result: Claude recommends @100-110k, native enforces @~145-207k (was 345k);
+Pi unchanged (conservative actuate). Verified resolved values per harness
+via config_lib. Updated test_nightly_eval config-fidelity pins (200k/0.35/
+0.55/110k) + pytest.approx for the float. TODO: one-day reserve check, then
+decide 300k->200k.

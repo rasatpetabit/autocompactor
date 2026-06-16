@@ -62,6 +62,15 @@ def hook_config() -> dict:
             "hooks": [{"type": "command",
                        "command": f"python3 {SRC_ROOT}/context_monitor.py"}]
         }],
+        # Mid-burst watchdog: PostToolUse fires after every tool, including
+        # during long autonomous runs that produce no UserPromptSubmit — the
+        # only chance to catch a hard-limit crossing before native autocompact
+        # fires unwarned. context_monitor.py takes the cheap path on this event
+        # (tail-only context read; full analyze only at/above the hard line).
+        "PostToolUse": [{
+            "hooks": [{"type": "command",
+                       "command": f"python3 {SRC_ROOT}/context_monitor.py"}]
+        }],
         "PreCompact": [
             {"matcher": "manual",
              "hooks": [{"type": "command",
@@ -296,7 +305,7 @@ def run_status() -> int:
     print(f"autocompactor status  ({SRC_ROOT})  v{__version__}\n")
 
     counts = hooks_registered(settings)
-    expected = {"UserPromptSubmit": 1, "PreCompact": 2}
+    expected = {"UserPromptSubmit": 1, "PostToolUse": 1, "PreCompact": 2}
     for event, n in counts.items():
         ok = n == expected[event]
         problems += not ok

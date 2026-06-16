@@ -246,6 +246,22 @@ def main() -> int:
                       "telemetry — hooks may be unregistered or crashing")
     recos = sum(1 for e in mon if e.get("recommended"))
 
+    # Hook-coverage self-check: transcript compactions (ground truth, from
+    # the backtest) vs PreCompact hook events. Both hook event counts drop
+    # TOGETHER in a Claude Code hook-invocation regression, so an
+    # evals/precompact ratio cannot detect a total hook death — but this
+    # ratio against transcript compactions can, and it catches PARTIAL
+    # deaths too (a silent regression that still logs a few evals; e.g. the
+    # 2026-06-11 2.1.173 upgrade left ~87 transcript compactions but only
+    # ~1 precompact event). See miss-attribution.md.
+    hook_coverage = (len(pre) / compactions_n) if compactions_n else None
+    if compactions_n >= 3 and (hook_coverage or 0) < 0.5:
+        issues.append(
+            f"PreCompact hook fired for only {len(pre)}/{compactions_n} "
+            f"transcript compactions ({(hook_coverage or 0):.0%}) — hooks "
+            "are under-firing (upgrade regression? ensure the PostToolUse "
+            "watchdog is installed: python3 src/install.py)")
+
     # The purpose metric: of the auto-compactions the hooks saw, how many
     # got an advance recommendation in the same session beforehand?
     auto_events = [e for e in pre if e.get("trigger") == "auto"]
@@ -310,6 +326,8 @@ def main() -> int:
         "monitor_evals": len(mon), "recommendations": recos,
         "precompact_events": len(pre), "reinjects": len(rei),
         "auto_seen_by_hooks": len(auto_events), "auto_unwarned": unwarned,
+        "hook_coverage": (round(hook_coverage, 3)
+                          if hook_coverage is not None else None),
         "hard_tokens": hard_tokens, "ceiling": ceiling,
         "expected_trigger": expected_trigger,
         "breaker_suspects": breaker_suspects,
@@ -331,7 +349,10 @@ def main() -> int:
         line += f", ceiling {ceiling:,.0f}t)" if ceiling else ")"
         md.append(line)
     md.append(f"- hooks: {len(mon)} evals, {recos} recommendations, "
-              f"{len(pre)} precompact, {len(rei)} reinjects")
+              f"{len(pre)} precompact, {len(rei)} reinjects"
+              + (f"  (hook coverage {hook_coverage:.0%} of "
+                  f"{compactions_n} compactions)" if hook_coverage is not None
+                  else ""))
     if expected_trigger:
         md.append(f"- watches: expected trigger ~{expected_trigger:,.0f}t, "
                   f"breaker suspects {breaker_suspects}, "
