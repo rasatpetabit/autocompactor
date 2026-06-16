@@ -2,12 +2,13 @@
   "_comment": "autocompactor unified config. Read at runtime by config_lib (both harnesses); AUTOCOMPACTOR_* / AUTOCOMPACTOR_PI_* env vars are overrides only. Site-local values (LLM endpoints/models) go in config.local.json (gitignored), merged over this file.",
 
   "MODE": "advise",
+  "PROFILE": "economy",
   "WINDOW": 200000,
-  "SOFT_PCT": 0.5,
+  "SOFT_PCT": 0.35,
   "HARD_PCT": 0.65,
   "HARD_PCT_WIDE": 0.60,
   "STALE_FRAC": 0.90,
-  "COOLDOWN": 20000,
+  "COOLDOWN": 15000,
   "POST_FLOOR": 70000,
   "MIN_SAVINGS": 30000,
   "MAX_FULL_PARSE_MB": 8,
@@ -18,14 +19,17 @@
   "AUTO_WINDOW_PROMOTE_FRAC": 0.95,
 
   "claude": {
-    "WINDOW": 300000,
-    "HARD_PCT": 0.62
+    "WINDOW": 200000,
+    "HARD_PCT": 0.55
   },
 
   "pi": {
     "MODE": "actuate",
     "RESERVE": 40000,
+    "SOFT_PCT": 0.50,
     "HARD_PCT": 0.90,
-    "HARD_PCT_WIDE": 0.60
+    "HARD_PCT_WIDE": 0.60,
+    "COOLDOWN": 20000,
+    "MIN_SAVINGS": 30000
   }
 }
