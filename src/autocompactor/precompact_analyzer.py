@@ -175,6 +175,15 @@ def _run() -> int:
     except Exception:
         return 0
 
+    # PostCompact (CC v2.1.x) runs AFTER the compaction redraw that swallows a
+    # PreCompact systemMessage, so it's the reliable surface for a user-visible
+    # status notice. Same entrypoint, branched on the event name.
+    if (data.get("hook_event_name") or "") == "PostCompact":
+        return _run_postcompact(data)
+    return _run_precompact(data)
+
+
+def _run_precompact(data: dict) -> int:
     transcript = data.get("transcript_path") or ""
     session_id = data.get("session_id") or "unknown"
     trigger = data.get("trigger") or "auto"
@@ -300,6 +309,12 @@ def _run() -> int:
             arts, art_sizes, lossy_tokens=comp.get("assistant", 0))
         if ledger:
             summary += "\n" + ledger
+        # Stash for the PostCompact notice (fires after the redraw that
+        # swallows the PreCompact systemMessage): the pre-compaction total +
+        # the content-free composition dict, so the post notice can render
+        # even if a fresh re-parse of the compacted transcript fails.
+        state2["pre_compact_tokens"] = st.context_tokens
+        state2["pre_comp"] = comp
     state2["last_compaction_stats"] = summary
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -332,6 +347,68 @@ def _run() -> int:
     if not out:
         return 0
     print(json.dumps(out))
+    return 0
+
+
+def _run_postcompact(data: dict) -> int:
+    """Post-compaction, user-visible notice. The PreCompact systemMessage is
+    swallowed by the compaction redraw; PostCompact renders in the fresh view.
+    Shows before->after context + the composition + skill warning so the user
+    sees what compaction did — and what it could NOT reclaim (loaded skills).
+    Content-free (token counts / category names only), never raises."""
+    session_id = data.get("session_id") or "unknown"
+    transcript = data.get("transcript_path") or ""
+    trigger = data.get("trigger") or "auto"
+
+    pre_tokens, pre_comp = None, {}
+    state_file = os.path.join(STATE_DIR, f"{session_id}.state.json")
+    try:
+        with open(state_file) as fh:
+            s = json.load(fh)
+        pre_tokens = s.get("pre_compact_tokens")
+        pre_comp = s.get("pre_comp") or {}
+    except Exception:
+        pass
+
+    # Best-effort fresh parse of the NEW (compacted) transcript. Adopt it only
+    # when it plausibly reflects the smaller post-compaction state; otherwise
+    # fall back to the known-good pre-compaction composition.
+    comp, after_tokens = pre_comp, None
+    try:
+        if transcript and os.path.exists(os.path.expanduser(transcript)):
+            st = analyze(transcript)
+            if st is not None:
+                fresh = context_composition(st, st.context_tokens)
+                ftot = int(fresh.get("total", 0) or 0) if fresh else 0
+                if ftot > 0 and (pre_tokens is None or ftot < pre_tokens):
+                    comp, after_tokens = fresh, ftot
+    except Exception:
+        pass
+
+    head = "compaction complete"
+    if pre_tokens and after_tokens and after_tokens < pre_tokens:
+        head += (f" — context {policy._fmt_tokens(pre_tokens)} → "
+                 f"{policy._fmt_tokens(after_tokens)} (reclaimed "
+                 f"~{policy._fmt_tokens(pre_tokens - after_tokens)})")
+    elif pre_tokens:
+        head += (f" — {policy._fmt_tokens(pre_tokens)} in context "
+                 "before compaction")
+    lines = ["autocompactor: " + head]
+    comp_line = policy.composition_line(comp) if comp else ""
+    if comp_line:
+        lines.append("  └ " + comp_line)
+    skill_warn = policy.skill_warning(comp) if comp else ""
+    if skill_warn:
+        lines.append("  " + skill_warn)
+
+    log_event({
+        "type": "postcompact", "session_id": session_id, "trigger": trigger,
+        "pre_tokens": pre_tokens, "after_tokens": after_tokens,
+        "composition": comp or None,
+    })
+    # Suppress a contentless "compaction complete" with nothing to add.
+    if len(lines) > 1 or pre_tokens:
+        print(json.dumps({"systemMessage": "\n".join(lines)}))
     return 0
 
 

@@ -1202,6 +1202,72 @@ def test_analyzer_summary_reports_staged_instructions(tmp_path):
     assert "instructions: staged by monitor" in out["systemMessage"]
 
 
+def test_postcompact_notice_surfaces_skills_from_pre_state(tmp_path, monkeypatch,
+                                                           capsys):
+    """PostCompact (new surface): a PreCompact systemMessage is swallowed by the
+    compaction redraw, so the user-visible notice fires here. With no parseable
+    new transcript it renders from the stashed pre-compaction composition —
+    including the loaded-skill warning."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(pa, "STATE_DIR", str(tmp_path))
+    (tmp_path / "s1.state.json").write_text(json.dumps({
+        "pre_compact_tokens": 244_000,
+        "pre_comp": {"total": 244_000, "base": 52_000, "skills": 156_000,
+                     "skill_names": ["claude-api"], "summary": 4_000,
+                     "tool": 7_000, "tool_stale_frac": 0.8,
+                     "assistant": 2_000, "prompts": 12}}))
+    rc = pa._run_postcompact({"hook_event_name": "PostCompact",
+                              "session_id": "s1",
+                              "transcript_path": "/nonexistent/x.jsonl",
+                              "trigger": "auto"})
+    assert rc == 0
+    msg = json.loads(capsys.readouterr().out)["systemMessage"]
+    assert msg.startswith("autocompactor: compaction complete")
+    assert "244k in context before compaction" in msg
+    assert "loaded skills (claude-api — reclaimable)" in msg
+    assert "won't reclaim" in msg          # skill warning rendered
+
+
+def test_postcompact_shows_before_after_delta(tmp_path, monkeypatch, capsys):
+    """When the compacted transcript parses to a smaller total, show the
+    before -> after delta the user just gained."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(pa, "STATE_DIR", str(tmp_path))
+    (tmp_path / "d1.state.json").write_text(json.dumps({
+        "pre_compact_tokens": 244_000,
+        "pre_comp": {"total": 244_000, "base": 80_000, "tool": 150_000,
+                     "tool_stale_frac": 0.9, "assistant": 14_000,
+                     "prompts": 5, "skills": 0, "summary": 0}}))
+    t = tmp_path / "compacted.jsonl"
+    t.write_text("\n".join(json.dumps(e) for e in [
+        _human("resume"), _assistant(text="ok", usage=_usage(8000))]))
+    rc = pa._run_postcompact({"hook_event_name": "PostCompact",
+                              "session_id": "d1", "transcript_path": str(t),
+                              "trigger": "auto"})
+    assert rc == 0
+    msg = json.loads(capsys.readouterr().out)["systemMessage"]
+    assert "→" in msg and "reclaimed" in msg and "244k" in msg
+
+
+def test_postcompact_hook_reads_precompact_state(tmp_path):
+    """End-to-end: the real entrypoint branches on hook_event_name. PreCompact
+    stashes pre_compact_tokens; PostCompact reads it and emits a notice-only
+    systemMessage (no hookSpecificOutput/customInstructions)."""
+    pre = json.dumps({"session_id": "pc1", "cwd": "/tmp",
+                      "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+                      "hook_event_name": "PreCompact", "trigger": "manual"})
+    assert _run_hook(ANALYZER, pre, tmp_path).returncode == 0
+    post = json.dumps({"session_id": "pc1", "cwd": "/tmp",
+                       "transcript_path": "/nonexistent/none.jsonl",
+                       "hook_event_name": "PostCompact", "trigger": "auto"})
+    r = _run_hook(ANALYZER, post, tmp_path)
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert "hookSpecificOutput" not in out        # PostCompact: notice only
+    assert out["systemMessage"].startswith("autocompactor: compaction complete")
+    assert "in context before compaction" in out["systemMessage"]
+
+
 def test_analyzer_restates_founding_goal_when_staged_lacks_it(tmp_path):
     """Owner directive: every compaction pass must restate the founding
     goal verbatim. Staged instructions built from a tail-only parse can

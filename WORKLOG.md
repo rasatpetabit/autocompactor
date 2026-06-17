@@ -505,3 +505,39 @@ precompact_analyzer summary, pi_bridge prepare). Content-free (counts + skill
 identifiers). Live: `⚠ 156k (64%) of context is loaded skills (systematic-
 debugging, claude-api) — /compact won't reclaim these; unload the skill to drop
 them`. Verify: 168 pytest (+2), smoke + Pi smoke, install.py --verify PASS.
+
+## 2026-06-17 — PostCompact notice + customInstructions is a Claude no-op
+
+Owner: "show the status line in the pre-compact notice on Claude; it's not
+showing." Investigated (systematic-debugging, evidence over assertion):
+
+ROOT CAUSE (display). Telemetry confirms the PreCompact hook fires (157 events,
+all comp=yes) and DOES emit the composition+skill line via `systemMessage`
+(correct field per current hooks docs). But a PreCompact `systemMessage` is
+emitted in the instant before Claude Code tears down the transcript view to
+compact — it's swallowed by the redraw. The only guaranteed pre-stage user
+output is exit-2 stderr, which BLOCKS compaction. So a non-blocking pre-compact
+notice isn't reliably possible. CC v2.1.x added a `PostCompact` event ("react
+to the new compacted state") that renders in the fresh post-compaction view.
+
+FIX (owner chose "PostCompact + keep PreCompact"). precompact_analyzer now
+branches on hook_event_name: PreCompact stashes `pre_compact_tokens` + the
+content-free `pre_comp` dict into session state; PostCompact reads them, does a
+best-effort fresh parse of the compacted transcript (adopted only when it's
+plausibly the smaller post state), and emits a notice-only systemMessage:
+`autocompactor: compaction complete — <before>→<after> (reclaimed ~N)` +
+composition + skill warning. install.py registers PostCompact (manual+auto);
+--status now checks 4 hook types. PostCompact registered live (2/2).
+
+FINDING (customInstructions — owner asked to verify, not change). Our PreCompact
+output sets `hookSpecificOutput.customInstructions` to steer the summarizer.
+That field is in NEITHER the current hooks docs NOR anywhere in the full CC
+CHANGELOG. PreCompact's only documented/changelogged output is `decision:
+"block"`; `custom_instructions` is an INPUT (what the user typed into /compact).
+Conclusion (documentary, not yet live-observed): on Claude Code there is no hook
+channel to steer the native summarizer — our phase-aware instructions are almost
+certainly a NO-OP. The robust path on Claude was always the mechanical artifact
+extraction + post-compaction re-injection (which works). On Pi the bridge passes
+customInstructions into ctx.compact(), which IS honored — so the feature is
+Pi-only. DECISION PENDING with owner (stop emitting dead field / keep as
+harmless / re-document). 171 pytest (+3), smoke + Pi smoke, --verify PASS.

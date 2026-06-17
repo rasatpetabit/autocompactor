@@ -79,6 +79,18 @@ def hook_config() -> dict:
              "hooks": [{"type": "command",
                         "command": f"python3 {SRC_ROOT}/precompact_analyzer.py"}]},
         ],
+        # PostCompact (CC v2.1.x): the reliable user-visible compaction notice.
+        # A PreCompact systemMessage is swallowed by the compaction redraw;
+        # PostCompact renders in the fresh post-compaction view. Same script,
+        # branched on hook_event_name.
+        "PostCompact": [
+            {"matcher": "manual",
+             "hooks": [{"type": "command",
+                        "command": f"python3 {SRC_ROOT}/precompact_analyzer.py"}]},
+            {"matcher": "auto",
+             "hooks": [{"type": "command",
+                        "command": f"python3 {SRC_ROOT}/precompact_analyzer.py"}]},
+        ],
     }
 
 
@@ -305,11 +317,13 @@ def run_status() -> int:
     print(f"autocompactor status  ({SRC_ROOT})  v{__version__}\n")
 
     counts = hooks_registered(settings)
-    expected = {"UserPromptSubmit": 1, "PostToolUse": 1, "PreCompact": 2}
-    for event, n in counts.items():
-        ok = n == expected[event]
+    expected = {"UserPromptSubmit": 1, "PostToolUse": 1,
+                "PreCompact": 2, "PostCompact": 2}
+    for event, exp in expected.items():
+        n = counts.get(event, 0)
+        ok = n == exp
         problems += not ok
-        print(f"  hooks {event}: {n}/{expected[event]} registered"
+        print(f"  hooks {event}: {n}/{exp} registered"
               + ("" if ok else "  <-- run: python3 src/install.py"))
 
     env = settings.get("env", {})
