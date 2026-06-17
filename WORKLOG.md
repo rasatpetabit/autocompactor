@@ -2,6 +2,52 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-17 — WI-1 root cause: "mid-burst lateness" is mostly a metric artifact
+
+Diagnostic only (systematic-debugging Phase 1; NO fix this turn). Investigated the
+nightly "6/10 autos arrive unwarned" alarm. Evidence: 677-event events.jsonl
+(2026-06-09→06-17), code paths in context_monitor.py + nightly_eval.py:278-294.
+
+Verdict — the complaint is dominated by **measurement defects (hypothesis d)**, not
+late thresholds. On the CURRENT config epoch (native_ceiling=300000, 22 autos):
+**86% warned (19/22), 13% unwarned (3/22)** — far below the 50% alarm line.
+
+Why the nightly metric over-reports:
+1. **No epoch filtering.** 107/130 auto-precompacts predate the `native_ceiling`
+   field (=None); they include an OLD config epoch (effective_window ~150k → native
+   auto at ~133k) and a stray 400k day. nightly's `day_events` 26h window usually
+   dodges this, but the corpus-wide view and any multi-day read conflate epochs.
+   Autos recorded at ~133k are NOT native autos at a 300k ceiling — they're old-
+   config events masquerading as current.
+2. **Telemetry asymmetry.** PostToolUse logs a `monitor_eval` ONLY on the recommend
+   branch (context_monitor.py:117-118 returns before the :151 log_event);
+   UserPromptSubmit logs every eval. PostToolUse non-recommends are invisible, so
+   any uniform coverage/cadence metric is biased. (Recommended PostToolUse events
+   ARE logged — 6/19 current-epoch warnings were first raised by PostToolUse — so
+   the watchdog works; it's the denominator that's unmeasurable.)
+3. **Per-interval + cold-start window.** nightly marks an auto "unwarned" unless a
+   recommended eval falls strictly between the previous precompact and this one.
+   Repeat autos in a rapid-refill session get marked unwarned even when the session
+   was warned earlier; resumed/cold-start autos (native auto fires before the first
+   UserPromptSubmit/PostToolUse hook → `prior=0`) are counted unwarnable.
+
+Other hypotheses: (b) cooldown-starvation REJECTED — sessions reaching auto were
+warned many times (one had 27 recs before an auto); rising-only cooldown suppresses
+re-nags by design, not first warnings. (c) single-jump RARE — 2/19 warned autos had
+≥50k jumps (med jump last_eval→auto = 11k). (a) wiring — only real gap is cold-start
+resumed sessions (3/22, all one sid), not fixable from the hook side.
+
+Data-quality caveat: precompact `context_tokens` is unreliable on cold start / tail
+parse (saw a 300k-epoch auto logged at 109k). Don't trust a single precompact ctx.
+
+Follow-up (separate turn, owner decision): the indicated fix is a METRIC correction
+in nightly_eval.py — (i) filter auto_events to the current native_ceiling epoch;
+(ii) exclude cold-start autos with zero prior monitor_evals (or report them
+separately as "unwarnable"); (iii) widen the warned window beyond the immediately-
+preceding precompact, or count session-level warning. Optionally backfill
+hook_event on the UserPromptSubmit log + log PostToolUse non-recommends (gated) to
+make coverage measurable. No monitor/threshold behavior change indicated.
+
 ## 2026-06-17 — display: de-dup + shrink readout + combine compaction outputs
 
 Owner feedback on the now-visible readout: (1) "double-outputting" (same numbers
