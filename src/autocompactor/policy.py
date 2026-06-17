@@ -170,6 +170,32 @@ def composition_line(comp: dict) -> str:
     return "≈ " + " · ".join(parts)
 
 
+# Fraction of the window above which loaded skills are called out as the
+# dominant (and persistent) consumer. Loaded skills do NOT shrink on /compact.
+SKILL_DOMINANCE_FRAC = 0.40
+
+
+def skill_warning(comp: dict, threshold: float = SKILL_DOMINANCE_FRAC) -> str:
+    """When loaded skills dominate the window, name them and warn that they are
+    NOT reclaimable by /compact (skill bodies persist across compaction) — the
+    real lever is not loading the skill. Returns "" below the threshold.
+    Content-free: token counts + skill identifiers only."""
+    total = int(comp.get("total", 0) or 0)
+    skills = int(comp.get("skills", 0) or 0)
+    if not total or skills <= 0:
+        return ""
+    frac = skills / total
+    if frac < threshold:
+        return ""
+    names = [n for n in (comp.get("skill_names") or []) if n]
+    label = ", ".join(names[:3]) if names else "loaded skills"
+    if len(names) > 3:
+        label += f", +{len(names) - 3}"
+    return (f"⚠ {_fmt_tokens(skills)} ({frac:.0%}) of context is loaded skills "
+            f"({label}) — /compact won't reclaim these; unload the skill to "
+            f"drop them")
+
+
 def advisory_band(cfg: "PolicyConfig") -> tuple[int, int]:
     """(soft, hard) advisory thresholds in tokens, for readout_line(). soft is
     the window-aware target (or soft fraction × window if an explicit SOFT_PCT

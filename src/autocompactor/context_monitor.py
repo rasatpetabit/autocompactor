@@ -162,9 +162,13 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
     reason += " (mid-burst, no user prompt since the last turn)"
     if gating:
         reason += " — triggered by: " + "; ".join(gating)
-    comp_line = policy.composition_line(context_composition(st, ctx))
+    comp = context_composition(st, ctx)
+    comp_line = policy.composition_line(comp)
     if comp_line:
         reason += "\n  └ " + comp_line
+    skill_warn = policy.skill_warning(comp)
+    if skill_warn:
+        reason += "\n  " + skill_warn
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PostToolUse",
         "additionalContext": (
@@ -375,10 +379,13 @@ def _run() -> int:
                                  native_auto, model_window)
     if gating:
         reason += " — triggered by: " + "; ".join(gating)
-    comp_line = policy.composition_line(
-        context_composition(st, st.context_tokens))
+    comp = context_composition(st, st.context_tokens)
+    comp_line = policy.composition_line(comp)
     if comp_line:
         reason += "\n  └ " + comp_line
+    skill_warn = policy.skill_warning(comp)
+    if skill_warn:
+        reason += "\n  " + skill_warn
 
     out = {
         "hookSpecificOutput": {

@@ -703,6 +703,23 @@ def test_context_composition_skill_free_session_keeps_floor_label():
     assert "floor" in line and "loaded skills" not in line
 
 
+def test_skill_warning_fires_when_skills_dominate():
+    """When loaded skills exceed the dominance threshold, the advisor calls
+    them out by name and states /compact won't reclaim them."""
+    comp = {"total": 200_000, "skills": 150_000,
+            "skill_names": ["claude-api", "systematic-debugging"]}
+    w = policy.skill_warning(comp)
+    assert w.startswith("⚠")
+    assert "150k (75%)" in w
+    assert "claude-api" in w and "won't reclaim" in w and "unload" in w
+
+
+def test_skill_warning_silent_below_threshold_and_when_empty():
+    assert policy.skill_warning({"total": 200_000, "skills": 20_000,
+                                 "skill_names": ["x"]}) == ""   # 10% < 40%
+    assert policy.skill_warning({"total": 0, "skills": 0}) == ""
+
+
 def test_preservation_ledger_names_preserved_lossy_and_dropped():
     """Owner request (b): the compaction ledger names what's kept verbatim,
     what's left to the lossy summarizer, and what was trimmed for budget."""

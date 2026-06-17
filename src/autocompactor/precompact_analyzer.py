@@ -292,6 +292,9 @@ def _run() -> int:
         comp_line = policy.composition_line(comp)
         if comp_line:
             summary += "\n  └ " + comp_line
+        skill_warn = policy.skill_warning(comp)
+        if skill_warn:
+            summary += "\n  " + skill_warn
         art_kept, art_dropped = artifacts.budget_plan(arts)
         ledger = artifacts.preservation_ledger(
             arts, art_sizes, lossy_tokens=comp.get("assistant", 0))

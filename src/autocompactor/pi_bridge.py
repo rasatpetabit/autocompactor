@@ -277,6 +277,9 @@ def cmd_prepare(opts: dict) -> dict:
     comp_line = policy.composition_line(comp)
     if comp_line:
         state["last_compaction_stats"] += "\n  └ " + comp_line
+    skill_warn = policy.skill_warning(comp)
+    if skill_warn:
+        state["last_compaction_stats"] += "\n  " + skill_warn
     ledger = artifacts.preservation_ledger(
         arts, art_sizes, lossy_tokens=comp.get("assistant", 0))
     if ledger:

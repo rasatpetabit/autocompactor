@@ -492,3 +492,16 @@ assistant`. Shared brain -> Claude + Pi.
 Caveat worth noting: skills persist across /compact, so the 156k is reclaimable
 by NOT loading the skill, not by compacting. Verify: 166 pytest (+2), smoke +
 Pi smoke, install.py --verify PASS incl. live probe.
+
+## 2026-06-17 — advisor flags dominant loaded skills
+
+Follow-on (owner chose it via AUQ): act on the cost lever the surfacing
+exposed. `policy.skill_warning(comp, threshold=SKILL_DOMINANCE_FRAC=0.40)`
+returns a one-line warning when loaded skills exceed 40% of the window — names
+them and states the non-obvious part: /compact won't reclaim them (skill bodies
+persist), the lever is unloading the skill. Wired in after the composition line
+at all four readout sites (context_monitor PostToolUse + UserPromptSubmit,
+precompact_analyzer summary, pi_bridge prepare). Content-free (counts + skill
+identifiers). Live: `⚠ 156k (64%) of context is loaded skills (systematic-
+debugging, claude-api) — /compact won't reclaim these; unload the skill to drop
+them`. Verify: 168 pytest (+2), smoke + Pi smoke, install.py --verify PASS.
