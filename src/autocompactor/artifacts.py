@@ -146,12 +146,8 @@ def load(session_id: str, harness: str = "claude") -> dict:
         return {}
 
 
-def build_digest(arts: dict, budget_tokens: int = 1500,
-                 stats_line: str = "") -> str:
-    """Compose a re-injection digest, trimming lowest-priority artifacts
-    first until the (approximate) token budget is met."""
-    if not arts:
-        return ""
+def _sections(arts: dict) -> dict:
+    """Build the per-category re-injection sections (no budgeting applied)."""
     sections = {}
     if arts.get("initial_prompts"):
         sections["initial_prompts"] = (
@@ -180,15 +176,40 @@ def build_digest(arts: dict, budget_tokens: int = 1500,
     if f.get("edited") or f.get("read"):
         sections["files"] = ("FILES: edited=" + ", ".join(f.get("edited", []))
                              + " | read=" + ", ".join(f.get("read", [])))
+    return sections
 
+
+def budget_plan(arts: dict, budget_tokens: int = 1500) -> tuple:
+    """Predict which artifact categories survive the re-injection budget and
+    which get trimmed (lowest-priority first), WITHOUT building the digest.
+
+    Single source of the trimming order so the preservation ledger (owner
+    request b) and build_digest() can never disagree about what was kept.
+    Returns (kept, dropped) — both PRIORITY-ordered category-name lists."""
+    sections = _sections(arts)
     keep = [k for k in PRIORITY if k in sections]
     while keep:
         body = "\n\n".join(sections[k] for k in keep if k in sections)
         if len(body) // 4 <= budget_tokens or len(keep) == 1:
             break
         keep.pop()  # drop lowest priority
+    dropped = [k for k in PRIORITY if k in sections and k not in keep]
+    return keep, dropped
+
+
+def build_digest(arts: dict, budget_tokens: int = 1500,
+                 stats_line: str = "") -> str:
+    """Compose a re-injection digest, trimming lowest-priority artifacts
+    first until the (approximate) token budget is met."""
+    if not arts:
+        return ""
+    sections = _sections(arts)
+    if not sections:
+        return ""
+    keep, _ = budget_plan(arts, budget_tokens)
     if not keep:
         return ""
+    body = "\n\n".join(sections[k] for k in keep if k in sections)
     if not body.strip():
         return ""
     if len(body) // 4 > budget_tokens and len(keep) == 1:
@@ -201,3 +222,62 @@ def build_digest(arts: dict, budget_tokens: int = 1500,
     if stats_line:
         header += f"\n({stats_line})"
     return header + "\n\n" + body
+
+
+_LEDGER_LABELS = {
+    "initial_prompts": "initial prompt(s)",
+    "corrections": "corrections",
+    "error_ledger": "errors",
+    "working_commands": "commands",
+    "hex_constants": "constants",
+    "files": "files",
+}
+
+
+def _counts(arts: dict) -> dict:
+    f = arts.get("files") or {}
+    return {
+        "initial_prompts": len(arts.get("initial_prompts") or []),
+        "corrections": len(arts.get("corrections") or []),
+        "error_ledger": len(arts.get("error_ledger") or []),
+        "working_commands": len(arts.get("working_commands") or []),
+        "hex_constants": len(arts.get("hex_constants") or []),
+        "files": len(f.get("edited") or []) + len(f.get("read") or []),
+    }
+
+
+def preservation_ledger(arts: dict, sizes: dict = None,
+                        budget_tokens: int = 1500,
+                        lossy_tokens: int = 0) -> str:
+    """Owner request (b): a compress-vs-preserve accounting shown at compaction.
+
+    Names what is extracted VERBATIM to disk (lossless, survives the summary)
+    vs what is LEFT to the summarizer (lossy), plus any artifact category
+    trimmed to fit the re-injection budget. Counts / category-names / sizes
+    only — content-free, like the rest of telemetry. Empty string when there
+    is nothing preserved."""
+    if not arts:
+        return ""
+    counts = _counts(arts)
+    kept, dropped = budget_plan(arts, budget_tokens)
+    preserved = ", ".join(f"{counts[k]} {_LEDGER_LABELS[k]}"
+                          for k in PRIORITY
+                          if k in kept and counts.get(k, 0) > 0)
+    if sizes:
+        total_b = sum(sizes.values())
+    else:
+        total_b = sum(len(json.dumps(v)) for v in arts.values())
+    lines = []
+    if preserved:
+        lines.append("preserved verbatim → disk (survive the summary): "
+                     f"{preserved} (~{total_b:,}B)")
+    lossy = "assistant reasoning, decisions, open questions"
+    tail = ""
+    if lossy_tokens and lossy_tokens > 0:
+        from autocompactor import policy
+        tail = f" (~{policy._fmt_tokens(lossy_tokens)})"
+    lines.append(f"left to summarizer (lossy): {lossy}{tail}")
+    dropped_real = [k for k in dropped if counts.get(k, 0) > 0]
+    if dropped_real:
+        lines.append("dropped for budget: " + ", ".join(dropped_real))
+    return "\n".join(lines)

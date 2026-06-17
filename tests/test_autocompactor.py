@@ -20,7 +20,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(REPO, "tests", "fixtures")
 sys.path.insert(0, REPO)
 
-from autocompactor import analyze_corpus, artifacts  # noqa: E402
+from autocompactor import analyze_corpus, artifacts, policy  # noqa: E402
 from autocompactor import precompact_analyzer as pa, transcript_lib as tl  # noqa: E402
 
 
@@ -588,10 +588,17 @@ def test_backtest_late_by_tokens_resets_after_each_compaction(tmp_path):
     p.write_text("".join(json.dumps(e) + "\n" for e in entries))
     report = analyze_corpus.backtest_session(
         str(p), window=300_000, soft=0.5, hard=0.65, min_eval=0)
+    # Cycle 1 has a git commit at 160k (commit stays a gating signal), so the
+    # first viable SOFT recommendation is at 160k -> 50k before the 210k compaction.
     assert report["compactions"][0]["late_by_tokens"] == 50_000
-    # Burn-rate is a live gating signal, so the second cycle's first viable
-    # recommendation is at 170k, not the later hard-threshold point at 210k.
-    assert report["compactions"][1]["late_by_tokens"] == 80_000
+    # Cycle 2 has no gating signal: burn_rate was demoted to observe-only in the
+    # 2026-06-17 recalibration (0.9x lift, sub-baseline), so it no longer gates a
+    # SOFT recommendation at 170k. The first viable recommendation is now the
+    # unconditional HARD line (0.65*300k = 195k, first crossed at 210k) -> 40k
+    # before the 250k compaction. This is the precision/early-warning tradeoff of
+    # the recalibration; the burst-lateness root cause (pending_reinject) is a
+    # separate lever tracked in WORKLOG WI-1.
+    assert report["compactions"][1]["late_by_tokens"] == 40_000
 
 
 def test_build_context_state_uses_window_harness_and_default_count(monkeypatch):
@@ -604,6 +611,96 @@ def test_build_context_state_uses_window_harness_and_default_count(monkeypatch):
     assert "Occupancy: 40%" in out
     assert "Active signals: none" in out
     assert "Compaction count: 0" in out
+
+
+# ------------------------------------------- dual-anchor readout + composition
+
+def test_readout_line_separates_advisory_band_from_forced_wall():
+    """The advisory soft–hard band and the forced native wall are different
+    things; the readout must show both with headroom so 'near the soft limit'
+    can't be misread as 'one turn from auto-compacting' (owner feedback)."""
+    line = policy.readout_line(209_000, 100_000, 110_000, 270_000, 1_000_000)
+    assert "209k in context" in line
+    assert "compact advised ~100k–110k" in line
+    assert "forced auto-compact ~270k" in line
+    assert "61k away" in line              # headroom to the forced wall is shown
+    assert "%" not in line                 # never a bare occupancy %
+
+
+def test_readout_line_flags_when_forced_wall_reached():
+    """Edge case: context at/over the forced wall must not silently drop the
+    headroom clause and read as 'comfortably below'."""
+    line = policy.readout_line(285_000, 100_000, 110_000, 270_000)
+    assert "reached" in line and "imminent" in line
+
+
+def test_readout_line_pi_shape_omits_absent_forced_wall():
+    """Pi actuates at its own hard line — there is no separate native wall, so
+    forced_auto is None and only the advisory band + true model window show."""
+    line = policy.readout_line(210_000, 225_000, 405_000, None, 450_000)
+    assert "forced auto-compact" not in line
+    assert "model window 450k" in line
+
+
+def test_context_composition_reconciles_to_true_total():
+    """Per-category estimates (chars/4) are reconciled so the parts always sum
+    to the authoritative context_tokens; the residual 'base' absorbs error."""
+    st = tl.TranscriptStats(context_tokens=209_000, total_tool_chars=480_000,
+                            stale_tool_chars=437_000,
+                            assistant_text_chars=60_000,
+                            user_prompt_chars=16_000)
+    comp = tl.context_composition(st, st.context_tokens)
+    assert comp["base"] + comp["tool"] + comp["assistant"] + comp["prompts"] \
+        == comp["total"] == 209_000
+    assert 0.90 <= comp["tool_stale_frac"] <= 0.92
+    line = policy.composition_line(comp)
+    assert "floor" in line and "tool output" in line and "stale" in line
+
+
+def test_context_composition_scales_when_estimate_overshoots():
+    """If chars/4 exceeds the true total, content categories scale down to fit
+    and base goes to 0 — never a breakdown that sums past the real total."""
+    st = tl.TranscriptStats(context_tokens=50_000, total_tool_chars=400_000,
+                            stale_tool_chars=200_000,
+                            assistant_text_chars=200_000,
+                            user_prompt_chars=40_000)
+    comp = tl.context_composition(st, st.context_tokens)
+    assert comp["base"] == 0
+    assert comp["tool"] + comp["assistant"] + comp["prompts"] == 50_000
+
+
+def test_preservation_ledger_names_preserved_lossy_and_dropped():
+    """Owner request (b): the compaction ledger names what's kept verbatim,
+    what's left to the lossy summarizer, and what was trimmed for budget."""
+    arts = {
+        "initial_prompts": ["do the thing"],
+        "corrections": ["c1", "c2", "c3"],
+        "error_ledger": [{"error": "e%d" % i, "count": 1} for i in range(5)],
+        "working_commands": ["cmd%d" % i for i in range(12)],
+        "hex_constants": ["0xAB ctx"],
+        "files": {"edited": ["a", "b"], "read": list("cdefgh")},
+    }
+    full = artifacts.preservation_ledger(arts, lossy_tokens=15_000)
+    assert "preserved verbatim" in full
+    assert "3 corrections" in full and "12 commands" in full
+    assert "left to summarizer (lossy)" in full and "15k" in full
+    # A tight budget forces low-priority categories out of the digest, and the
+    # ledger must say so — sharing budget_plan() with build_digest so they
+    # can never disagree about what was kept.
+    trimmed = artifacts.preservation_ledger(arts, budget_tokens=20)
+    _, dropped = artifacts.budget_plan(arts, budget_tokens=20)
+    assert dropped and "dropped for budget" in trimmed
+
+
+def test_burn_rate_signal_does_not_claim_forced_autocompact():
+    """The burn_rate description approaches the ADVISORY compact line, not the
+    forced native wall — the two were conflated (owner feedback)."""
+    st = tl.TranscriptStats(context_tokens=100_000,
+                            usage_series=[70_000, 80_000, 90_000, 100_000])
+    sigs = dict(tl.active_signals(st, window=200_000, hard_tokens=110_000))
+    assert "burn_rate" in sigs              # within the horizon at this burn
+    assert "autocompact" not in sigs["burn_rate"]
+    assert "compact line" in sigs["burn_rate"]
 
 
 # ------------------------------------------------------------ hook contract
@@ -629,7 +726,7 @@ def test_monitor_clamps_window_for_small_sessions(tmp_path):
         input=payload, capture_output=True, text=True, env=env,
         cwd=REPO, timeout=60)
     assert r.returncode == 0
-    assert "Good moment to compact" in r.stdout  # clamped to 200k, not mute
+    assert "early-compaction suggestion" in r.stdout  # clamped to 200k, not mute
 
 
 def test_monitor_recommends_on_rich_fixture(tmp_path):
@@ -640,7 +737,7 @@ def test_monitor_recommends_on_rich_fixture(tmp_path):
         "prompt": "now plan the website redesign"})
     r = _run_hook(MONITOR, payload, tmp_path)
     assert r.returncode == 0
-    assert "Good moment to compact" in r.stdout
+    assert "early-compaction suggestion" in r.stdout
     ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
                      / "events.jsonl").read_text().splitlines()[-1])
     for key in (
@@ -669,7 +766,7 @@ def test_monitor_min_savings_guard_suppresses(tmp_path):
         input=payload, capture_output=True, text=True, env=env,
         cwd=REPO, timeout=60)
     assert r.returncode == 0
-    assert "Good moment to compact" not in r.stdout
+    assert "early-compaction suggestion" not in r.stdout
     ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
                      / "events.jsonl").read_text().splitlines()[-1])
     assert ev["recommended"] is False
@@ -715,7 +812,7 @@ def test_monitor_cooldown_deadlock_breaks_on_shrink(tmp_path):
         cwd=REPO, timeout=60)
     assert r.returncode == 0
     # Past HARD_PCT must recommend despite the stale high baseline.
-    assert "Good moment to compact" in r.stdout
+    assert "early-compaction suggestion" in r.stdout
     ev = json.loads((state_dir / "stats" / "events.jsonl")
                     .read_text().splitlines()[-1])
     assert ev["recommended"] is True
@@ -734,7 +831,7 @@ def test_observe_only_signals_never_gate(tmp_path):
         "prompt": "now plan the website redesign"})
     r = _run_hook(MONITOR, payload, tmp_path)
     assert r.returncode == 0
-    assert "Good moment to compact" in r.stdout       # gates on todo_step etc.
+    assert "early-compaction suggestion" in r.stdout       # gates on todo_step etc.
     assert "debug loop just concluded" not in r.stdout
     ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
                      / "events.jsonl").read_text().splitlines()[-1])
@@ -1024,7 +1121,12 @@ def test_analyzer_systemmessage_summary(tmp_path):
     assert "hookSpecificOutput" in out          # instructions still emitted
     msg = out["systemMessage"]
     assert msg.startswith("autocompactor: compaction #1 (auto)")
-    assert "context ~" in msg
+    # Absolute-anchor readout (WI-2): "<used> in context · compact advised
+    # ~<soft>–<hard> · forced auto-compact ~<auto> (~<headroom> away)" replaced
+    # the old bare "context ~Xt (Y% of Zk)" occupancy string. The advisory/forced
+    # split + headroom prevents the "one turn from auto-compacting" misread.
+    assert "in context" in msg
+    assert "compact advised ~" in msg
     assert "phase: " in msg
     assert "artifacts to disk: " in msg
     assert "instructions: fresh analysis" in msg
@@ -1135,7 +1237,7 @@ def test_posttooluse_watchdog_recommends_above_hard(tmp_path):
         input=_ptu_payload("ptu1", str(high)),
         capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
     assert r.returncode == 0
-    assert "Good moment to compact" in r.stdout
+    assert "early-compaction suggestion" in r.stdout
     assert "mid-burst" in r.stdout
     ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
                      / "events.jsonl").read_text().splitlines()[-1])

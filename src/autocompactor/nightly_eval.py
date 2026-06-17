@@ -38,7 +38,7 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # checkout root
 import autocompactor.config_lib as config_lib  # noqa: E402
-from autocompactor import policy  # noqa: E402
+from autocompactor import policy, window_resolver  # noqa: E402
 
 BASE = os.path.expanduser("~/.claude/autocompactor")
 REPORTS = os.path.join(BASE, "reports")
@@ -46,10 +46,12 @@ HISTORY = os.path.join(REPORTS, "nightly_history.jsonl")
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 RETENTION_DAYS = 30
 CEILING_SLACK = 40_000   # auto-compact may overshoot the ceiling mid-turn
-# Both observed auto-trigger models (proportional ~0.675*window and
-# absolute window-65k reserve) predict ~135k at a 200k ceiling; the
-# estimate is only trustworthy up to 200k, hence the min() at use site.
-EXPECTED_TRIGGER_FRAC = 0.675
+# Where native autocompact actually fires = native_ceiling ×
+# CLAUDE_AUTOCOMPACT_PCT_OVERRIDE% (default 90%). On this host: 300k × 90% =
+# 270k, matching the measured median (~254k / max ~280k, 2026-06-17). The old
+# `0.675 × min(ceiling, 200k)` model hard-predicted 135k regardless of the
+# real ceiling and so phantom-flagged every session as "drifted"; it is
+# retired in favour of window_resolver.native_auto_estimate().
 TRIGGER_DEVIATION = 25_000   # |auto-pre median - estimate| worth a note
 MICRO_MARKER = "[Old tool result content cleared]"   # native microcompaction
 
@@ -172,8 +174,8 @@ def main() -> int:
     sessions_n = compactions_n = breaker_suspects = 0
     learned_tiers = {}
     native_ceiling_blocked_sessions = 0
-    expected_trigger = (EXPECTED_TRIGGER_FRAC * min(ceiling, 200_000)
-                        if ceiling else None)
+    expected_trigger = window_resolver.native_auto_estimate(
+        ceiling, window_resolver.pct_override_from_settings()) if ceiling else None
     try:
         with open(report_path, encoding="utf-8") as fh:
             sessions = json.load(fh)["sessions"]
@@ -221,9 +223,9 @@ def main() -> int:
                 notes.append(
                     f"auto-trigger median {med:,.0f}t is >"
                     f"{TRIGGER_DEVIATION / 1000:.0f}k from the "
-                    f"~{expected_trigger:,.0f}t estimate — retune "
-                    "AUTOCOMPACTOR_HARD_PCT to stay ahead of the real "
-                    "trigger")
+                    f"~{expected_trigger:,.0f}t estimate (ceiling×pct) — "
+                    "retune HARD_PCT (config.json claude section) to stay "
+                    "ahead of the real trigger")
         if breaker_suspects:
             issues.append(
                 f"{breaker_suspects} session(s) show rapid-refill-breaker "

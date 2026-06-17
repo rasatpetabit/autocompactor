@@ -2,6 +2,88 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-17 — skeptical regression re-eval + targeted remediation
+
+- Trigger: owner reported 4 regressions (mistimed fires, useless display, "not
+  intelligent", wrong context-limit messaging) after "massive changes"; asked for
+  a skeptical, evidence-backed re-eval. Plan: `~/.claude/plans/keen-sprouting-raccoon.md`.
+- **Verdict (all 4 real, root causes differ from surface):**
+  - #4 (limits): display computes occupancy vs the 200k configured target → **22/191
+    live fires >100%, backtest median 124%** on a 1M host w/ native auto ~254–280k.
+    The 200k effective window is **intended** (window-aware.md §121–124 cap-not-source
+    was deliberate, NOT a regression — corrects an explorer over-claim). Bug is the
+    *display semantics*, not the resolver.
+  - #1 (timing): logic is aggressive-correct (nag 110k); failure is structural lateness
+    on bursts — see WI-1 root cause below.
+  - #2 (display): silent below ~100k (floor+min_savings) + the >100% noise.
+  - #3 (intelligence): instruction gen is mechanical-by-design (OK); real defect is
+    **signal miscalibration** — best signals idle_gap(7.5×)/tests_pass(2.7×) are
+    observe-only, while gating burn_rate(0.9×)/subagent_done(0.8×) are sub-baseline.
+  - Docs drifted (CLAUDE.md says ceiling 400k/trigger 336k/env thresholds that aren't
+    set; reality 300k/254k/no AUTOCOMPACTOR_* env, HARD_PCT 0.55).
+- **WI-1 ROOT CAUSE (diagnostic complete; fix gated to a follow-up turn).** Why
+  6/10 autos arrive unwarned despite the PostToolUse watchdog: `pending_reinject`.
+  `precompact_analyzer.py:240` sets it True on every compaction; `context_monitor.py:88`
+  makes the PostToolUse watchdog `return 0` whenever it's True; it is cleared
+  (`:280`) **only** inside the UserPromptSubmit reinject block (`:274`). On a
+  post-compaction autonomous burst with no human prompt, it never clears → the
+  watchdog is muted for the rest of the burst → context rides to the next native
+  auto unwarned. Explains both nightly symptoms (unwarned autos + rapid-refill
+  breaker). Evidence: events.jsonl shows the advisor reliably warns the FIRST
+  compaction (113/121 autos had ≥1 session rec) but the nightly's stricter
+  inter-compaction metric (rec must fall between consecutive compactions) catches
+  the muted subsequent ones. Candidate fix (separate turn): `pending_reinject`
+  should gate *reinjection* only, not the occupancy watchdog — the hard-line gate
+  already prevents post-compaction spam (ctx is low right after compaction).
+- Scope (owner-approved): targeted fixes only — preserve 200k target + timing;
+  dual readout (no single >100%); investigate-first on lateness (done); recalibrate
+  signals (backtest-validated) + reconcile docs. NOT touching resolver cap or adding
+  Claude actuation.
+- SHIPPED (WI-2 #4/#2 display): `policy.readout_line()` + `policy.advisory_band()` +
+  `window_resolver.readout_anchors()` replace every bare occupancy-% human string
+  with absolute anchors. Final format (refined after owner feedback below):
+  `"<used> in context · compact advised ~<soft>–<hard> · forced auto-compact
+  ~<ceiling×pct> (~<headroom> away) · model window <tier>"`. Model window shown ONLY
+  when an observed peak exceeds the native ceiling (else omitted — Claude can't see
+  the live window, and a guessed tier is the same failure we're fixing). Wired into
+  the UserPromptSubmit + PostToolUse reasons and the precompact summary. Telemetry
+  `occupancy` unchanged (internal decision var).
+  - OWNER FEEDBACK (this turn): the first cut ("compact target ~110k") was still
+    misread by a downstream session as "73% and one turn from auto-compacting." Two
+    fixes: (1) split the readout into the ADVISORY band (soft..hard — recommendation
+    points, not walls) vs the FORCED wall (native auto-compact) with explicit
+    *headroom-away*, so "near the soft limit" can never read as "about to be
+    force-compacted"; (2) reframed the guidance prose as an "optional early-compaction
+    suggestion … not imminent unless headroom is small" and added an explicit
+    instruction to the relaying model: do NOT cite a single occupancy % or imply
+    auto-compaction is about to happen. Live PostToolUse now reads e.g. "209k in
+    context · compact advised ~100k–110k · forced auto-compact ~270k (~61k away)".
+- SHIPPED (WI-3 #3 signals): recalibrated `OBSERVE_ONLY` from measured lift
+  (backtest 2026-06-17, baseline 8%). Demoted gating→observe `burn_rate` (0.9×) +
+  `subagent_done` (0.8×); re-promoted observe→gating `idle_gap` (7.5×, n=16) +
+  `tests_pass` (2.7×, n=30) — these were genuinely anti-predictive in the smaller
+  2026-06-10 corpus (idle_gap 0 firings) and reversed since. `error_resolved` stays
+  observe. Pi pinned to the prior conservative set (it actuates; must keep
+  subagent_done/commit — design trap #4). TRADEOFF: demoting burn_rate removes early
+  SOFT nags in pure-burst sessions (its 0.9× = ~93% false), so burst *early-warning*
+  shrinks; the mid-burst HARD watchdog is unaffected (it never used burn_rate). The
+  real burst-lateness fix is still WI-1's `pending_reinject` mute (deferred). idle_gap/
+  tests_pass are thin-sample — re-check next nightly before trusting as load-bearing.
+- SHIPPED (WI-4 docs): CLAUDE.md "Tuning + native ceiling" rewritten to reality
+  (ceiling 300k not 400k; native trigger ~254k median/280k max not 336k; no
+  AUTOCOMPACTOR_* env set; claude HARD_PCT 0.55, COOLDOWN 15000; SOFT_PCT retired).
+  AGENTS.md: test baseline 115→157, signal-status note. nightly_eval expected_trigger
+  model: retired the `0.675×min(ceiling,200k)`=135k phantom (always flagged drift)
+  for `native_auto_estimate(ceiling, pct_override)` = 270k, matching the measured
+  median.
+- WI-1 (lateness) remains DIAGNOSTIC ONLY this pass — root cause proven
+  (`pending_reinject` mutes the PostToolUse occupancy watchdog for the whole
+  post-compaction burst); the fix (`pending_reinject` should gate reinjection only,
+  not the watchdog) is a separate, owner-gated turn.
+- Verify: 157 pytest pass (updated 3 expectation pins: late_by_tokens 80k→40k from
+  the burn_rate demotion, the analyzer summary readout substrings, the OBSERVE_ONLY
+  pin); smoke + pi-smoke green; `install.py --verify` PASS, `--status` OK.
+
 ## 2026-06-15 — profiling-pass improvements (never-raise, cheapness, de-dup, tests)
 
 - Scope: profiled the codebase (3 fan-out explorers + source verification) and
@@ -323,3 +405,61 @@ ACTIVATED on the Claude main path:
 
 ceiling(W)/native_safe_line DEFERRED: needs the reserve re-measurement (W-63k
 stale on CC 2.1.178). Until then flat HARD_PCT is the interim ceiling.
+
+## 2026-06-16 — 3-host rollout of window-aware build (epyc2 + skynet3)
+
+Deployed the window-size-aware build (commit 089df24) live to epyc2 and
+skynet3 (ras@). /srv/dev is Syncthing-synced so the code + config.json
+(PHILE=economy, retired SOFT_PCT, claude.WINDOW 200k, target curve) were
+already converged on both; the live state was the gap.
+
+Per-host live state updated via `python3 src/install.py` (idempotent):
+- PostToolUse watchdog hook: 0/1 -> 1/1 on both (the new mid-burst trigger).
+- PreCompact 2/2, UserPromptSubmit 1/1, Pi extension healthy (shim present,
+  bridge ok, pin 0.78.1) on both. STATUS: OK. 157 pytest pass on both.
+
+Native ceiling is intentionally per-host (NOT normalized): epyc1=300000
+(Claude Code 2.1.178, reserve ~153k -> fire ~147k), epyc2/skynet3=200000
+(Claude Code 2.1.170, reserve ~63k -> fire ~137k). Both are aggressive +
+floor-safe for their respective CC versions. install.py does not touch
+tuned env, so the 200000 ceilings were preserved.
+
+3-host consistency: all at 089df24, PostToolUse+PreCompact registered,
+STATUS OK. epyc1/grojas, epyc2+skynet3/ras.
+
+## 2026-06-17 — defect-class scan + two intelligence displays (composition + ledger)
+
+Owner: "deeper scans for this type of problem [shown-vs-reality mismatch], and
+a better way to show (a) what's in the context window and (b) what we
+compressed vs didn't." Codebase-wide scan for the bare-occupancy-% defect class
+beyond the WI-2 sites: found the same misleading-% pattern still live in
+`pi_bridge.py` cmd_evaluate and `autocompactor.ts` post-compaction notify; the
+backtest occupancy print was unanchored (dev-facing). All fixed.
+
+Two new displays, shared brain (Claude + Pi, content-free):
+- (a) COMPOSITION — `transcript_lib.context_composition()` + `policy.`
+  `composition_line()`: per-category token estimate (chars/4) reconciled so
+  parts ALWAYS sum to the true `context_tokens` (residual "floor" absorbs
+  estimation error; content scaled down on overshoot — never sums past the
+  real total). Rides as a `└` second line on the live readout AND the
+  compaction summary. Chose reconcile-to-total over raw chars/4 because the
+  whole task is about numbers that can't mislead.
+- (b) PRESERVATION LEDGER — `artifacts.preservation_ledger()`: names preserved-
+  verbatim-to-disk (lossless) vs left-to-summarizer (lossy, w/ token estimate)
+  vs dropped-for-budget. Keep/drop comes from new `artifacts.budget_plan()`,
+  factored out of `build_digest` as the SINGLE source so ledger and digest
+  can't disagree about what survived. `build_digest` refactor is behavior-
+  preserving (extracted `_sections`).
+
+Readout semantics clarified: advisory soft–hard band and the forced native
+wall are now DISTINCT anchors with headroom ("~61k away" / "reached —
+imminent"). Pi uses `forced_auto=None` (it actuates at its own hard line — no
+separate native wall) + true `model_window`, so the Pi reason no longer shows a
+bare % or a phantom wall. burn_rate signal text now says "to the compact line"
+not "from autocompact" (the two were conflated).
+
+Verify: 164 pytest (157 + 7 new: readout band/edge/Pi-shape, composition
+reconcile + overshoot, ledger, burn_rate wording); smoke + Pi smoke (bun TS)
+pass; `install.py --verify` PASS incl. live-transcript probe; `--status` OK.
+Docs reconciled (AGENTS baseline 157->164; CLAUDE.md readout + the two
+displays). WI-1 lateness fix stays owner-gated, untouched.

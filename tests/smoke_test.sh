@@ -21,7 +21,7 @@ fail() { echo "FAIL: $1"; exit 1; }
 echo "1) monitor recommends at boundary (rich fixture, new-topic prompt)"
 OUT=$(echo '{"session_id":"smoke","transcript_path":"'$FIX'/rich_transcript.jsonl","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"now plan the website redesign"}' \
   | python3 src/context_monitor.py)
-echo "$OUT" | grep -q "Good moment to compact" || fail "no recommendation"
+echo "$OUT" | grep -q "early-compaction suggestion" || fail "no recommendation"
 echo "$OUT" | grep -q "plan step was just completed" || fail "todo_step signal missing"
 # error_resolved is observe-only (anti-predictive on live data): it must
 # keep flowing into telemetry but never into the recommendation reason.

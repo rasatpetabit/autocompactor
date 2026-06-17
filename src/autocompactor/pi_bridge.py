@@ -43,8 +43,8 @@ import os
 import shutil
 import sys
 
-from autocompactor import (artifacts, pi_session_lib, statedir,  # noqa: E402
-                           transcript_lib, window_resolver)
+from autocompactor import (artifacts, pi_session_lib, policy,  # noqa: E402
+                           statedir, transcript_lib, window_resolver)
 from autocompactor.config_lib import cfg                          # noqa: E402
 from autocompactor.precompact_analyzer import llm_digest          # noqa: E402
 from autocompactor.stats import log_event                         # noqa: E402
@@ -139,6 +139,7 @@ def cmd_evaluate(opts: dict) -> dict:
     # Window-aware thresholds: WIDE suffix for large windows (>=300k)
     soft = cfg.float_windowed("SOFT_PCT", context_window, HARNESS, 0.40)
     hard = cfg.float_windowed("HARD_PCT", context_window, HARNESS, 0.65)
+    soft_t, hard_t = int(soft * window), int(hard * window)
     cooldown = cfg.float("COOLDOWN", harness=HARNESS, default=25_000)
     stale_frac_thr = cfg.float("STALE_FRAC", harness=HARNESS, default=0.50)
     post_floor = cfg.float("POST_FLOOR", harness=HARNESS, default=70_000)
@@ -162,7 +163,7 @@ def cmd_evaluate(opts: dict) -> dict:
     stale_frac = (st.stale_tool_chars / st.total_tool_chars
                   if st.total_tool_chars else 0.0)
     sig_pairs = transcript_lib.active_signals(
-        st, window=window, stale_frac_thr=stale_frac_thr)
+        st, window=window, stale_frac_thr=stale_frac_thr, hard_tokens=hard_t)
     signals = [desc for _, desc in sig_pairs]
     observe = transcript_lib.observe_only(harness=HARNESS)
     gating = [desc for name, desc in sig_pairs if name not in observe]
@@ -201,9 +202,16 @@ def cmd_evaluate(opts: dict) -> dict:
         })
         _save_state(session_id, state)
 
-    reason = f"context is at {occupancy:.0%} (~{context_tokens:,} tokens)"
+    # Anchored readout (shared with Claude) instead of a bare occupancy % that
+    # gave no denominator. Pi ACTUATES at its own hard line, so there is no
+    # separate native wall to show (forced_auto=None); the true model window
+    # (runtime contextWindow) is the ceiling anchor when the runtime reported
+    # it. Composition ("what's in the window") rides on contextState below.
+    reason = policy.readout_line(context_tokens, soft_t, hard_t,
+                                 forced_auto=None,
+                                 model_window=(runtime_context_window or None))
     if gating:
-        reason += " and " + "; ".join(gating)
+        reason += " — triggered by: " + "; ".join(gating)
     if recommend and suppressed:
         reason += " (suppressed: cooldown)"
     elif not recommend and est_reclaim < min_savings:
@@ -255,6 +263,8 @@ def cmd_prepare(opts: dict) -> dict:
     state["pending_reinject"] = True
     state["compaction_count"] = state.get("compaction_count", 0) + 1
     phase = transcript_lib.detect_phase(st)
+    comp = transcript_lib.context_composition(st, st.context_tokens)
+    art_kept, art_dropped = artifacts.budget_plan(arts)
     state["last_compaction_stats"] = " | ".join([
         f"compaction #{state['compaction_count']} ({trigger})",
         f"context ~{st.context_tokens:,}t", f"phase: {phase}",
@@ -263,6 +273,14 @@ def cmd_prepare(opts: dict) -> dict:
         "instructions: " + ("staged" if staged else "fresh analysis")
         + f" ({len(instructions):,} chars)",
     ])
+    # Composition (a) + preservation ledger (b), mirroring the Claude path.
+    comp_line = policy.composition_line(comp)
+    if comp_line:
+        state["last_compaction_stats"] += "\n  └ " + comp_line
+    ledger = artifacts.preservation_ledger(
+        arts, art_sizes, lossy_tokens=comp.get("assistant", 0))
+    if ledger:
+        state["last_compaction_stats"] += "\n" + ledger
     _save_state(session_id, state)
 
     # Pre-compaction context overview — produced at prepare time so it
@@ -282,6 +300,8 @@ def cmd_prepare(opts: dict) -> dict:
         "context_tokens": st.context_tokens, "phase": phase,
         "had_staged": bool(staged), "had_user_instructions": False,
         "instr_chars": len(instructions), "artifact_chars": art_sizes,
+        "composition": comp or None,
+        "artifacts_kept": art_kept, "artifacts_dropped": art_dropped,
         **prepare_resolution.event_fields(),
     }, harness=HARNESS)
 

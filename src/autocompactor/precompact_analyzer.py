@@ -36,10 +36,11 @@ import subprocess
 import sys
 import urllib.request
 
-from autocompactor import config_lib, artifacts, window_resolver  # noqa: E402
+from autocompactor import config_lib, artifacts, policy, window_resolver  # noqa: E402
 from autocompactor.transcript_lib import (analyze, active_signals,  # noqa: E402
                                           append_artifact_restatement,
                                           build_preservation_instructions,
+                                          context_composition,
                                           detect_phase)
 from autocompactor.stats import log_event, run_hook  # noqa: E402
 
@@ -246,6 +247,8 @@ def _run() -> int:
     summary = ""
     phase = detect_phase(st) if st else None
     resolution = None
+    comp = {}                 # context composition (telemetry + ledger)
+    art_kept, art_dropped = [], []
     if st is not None:
         try:
             configured_window = config_lib.cfg.float("WINDOW", default=200_000)
@@ -261,11 +264,15 @@ def _run() -> int:
             harness="claude",
             native_ceiling=window_resolver.native_ceiling_from_settings())
         window = resolution.effective_window
-        sigs = [desc for _, desc in active_signals(st, window=window)]
+        pcfg = policy.resolve_policy_config("claude", int(window))
+        soft_t, hard_t = policy.advisory_band(pcfg)
+        sigs = [desc for _, desc in active_signals(st, window=window,
+                                                   hard_tokens=hard_t)]
+        native_auto, model_window = window_resolver.readout_anchors(resolution)
         parts = [
             f"compaction #{state2['compaction_count']} ({trigger})",
-            (f"context ~{st.context_tokens:,}t "
-             f"({st.context_tokens / window:.0%} of {window / 1000:.0f}k)"),
+            policy.readout_line(st.context_tokens, soft_t, hard_t,
+                                native_auto, model_window),
             f"phase: {phase}",
         ]
         if sigs:
@@ -278,6 +285,18 @@ def _run() -> int:
                      + f" ({len(instructions):,} chars)"
                      + (", user notes kept" if user_instructions else ""))
         summary = " | ".join(parts)
+        # Composition (what's in the window) + preservation ledger (what we
+        # extracted verbatim vs left to the lossy summarizer) — owner requests
+        # (a) and (b), surfaced at the compaction the user is about to run.
+        comp = context_composition(st, st.context_tokens)
+        comp_line = policy.composition_line(comp)
+        if comp_line:
+            summary += "\n  └ " + comp_line
+        art_kept, art_dropped = artifacts.budget_plan(arts)
+        ledger = artifacts.preservation_ledger(
+            arts, art_sizes, lossy_tokens=comp.get("assistant", 0))
+        if ledger:
+            summary += "\n" + ledger
     state2["last_compaction_stats"] = summary
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -294,6 +313,9 @@ def _run() -> int:
         "had_user_instructions": bool(user_instructions),
         "instr_chars": len(instructions),
         "artifact_chars": art_sizes,
+        "composition": comp or None,
+        "artifacts_kept": art_kept,
+        "artifacts_dropped": art_dropped,
         **(resolution.event_fields() if resolution else {}),
     })
     out = {}

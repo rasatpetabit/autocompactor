@@ -11,7 +11,7 @@
   "POST_FLOOR": 70000,
   "MIN_SAVINGS": 30000,
   "MAX_FULL_PARSE_MB": 8,
-  "OBSERVE_ONLY": "error_resolved,tests_pass,idle_gap",
+  "OBSERVE_ONLY": "error_resolved,burn_rate,subagent_done",
   "ARTIFACT_BUDGET": 1500,
   "AUTO_WINDOW_MODE": "observe",
   "AUTO_WINDOW_TIERS": [200000, 300000, 512000, 1000000],
@@ -29,6 +29,8 @@
     "HARD_PCT": 0.90,
     "HARD_PCT_WIDE": 0.60,
     "COOLDOWN": 20000,
-    "MIN_SAVINGS": 30000
+    "MIN_SAVINGS": 30000,
+    "_OBSERVE_ONLY_note": "Pinned to the pre-2026-06-17 conservative set: Pi actuates (burns real tokens), so it must keep subagent_done/commit as strong actuation gates (design trap #4). The Claude-only signal recalibration does not apply here.",
+    "OBSERVE_ONLY": "error_resolved,tests_pass,idle_gap"
   }
 }

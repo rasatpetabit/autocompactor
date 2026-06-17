@@ -124,9 +124,11 @@ def test_active_signals_name_set():
 
 
 def test_observe_only_default_constant():
-    """OBSERVE_ONLY_DEFAULT must equal the three demoted anti-predictive
-    signals; changing this string changes live behavior."""
-    assert tl.OBSERVE_ONLY_DEFAULT == "error_resolved,tests_pass,idle_gap"
+    """OBSERVE_ONLY_DEFAULT pins the (Claude) observe-only signal set; changing
+    this string changes live behavior. 2026-06-17 recalibration: burn_rate +
+    subagent_done demoted (sub-baseline as gates), idle_gap + tests_pass
+    re-promoted to gating; error_resolved stays observe-only."""
+    assert tl.OBSERVE_ONLY_DEFAULT == "error_resolved,burn_rate,subagent_done"
 
 
 # ============================================================ Pin 2

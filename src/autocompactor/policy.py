@@ -71,6 +71,104 @@ def target_tokens(effective_window, profile: str,
     return int(target)
 
 
+def _fmt_tokens(n) -> str:
+    """Compact token count for human-facing readouts: 270000 -> '270k'."""
+    n = int(n or 0)
+    if n >= 1_000_000:
+        v = n / 1_000_000
+        return f"{v:.0f}m" if abs(v - round(v)) < 0.05 else f"{v:.1f}m"
+    if n >= 1000:
+        return f"{round(n / 1000)}k"
+    return str(n)
+
+
+def readout_line(used: int, soft: int = 0, hard: int = 0,
+                 forced_auto: int | None = None,
+                 model_window: int | None = None) -> str:
+    """Human-facing context readout with absolute anchors instead of a single
+    occupancy % (which, computed against the aggressive configured target,
+    routinely read >100% on large-window models — owner complaint #4).
+
+    Distinguishes the two things that are easily — and damagingly — conflated:
+
+    * the autocompactor ADVISORY band (soft..hard): the token range above which
+      this tool *suggests* compacting early to keep cached-read cost low. These
+      are recommendations, NOT walls — being above them is expected and fine.
+    * the forced wall: Claude's own native auto-compaction (forced_auto =
+      native_ceiling × pct). This is the only point where a compaction is
+      actually forced. We show headroom to it so "near the soft limit" can
+      never be misread as "one turn from auto-compacting" (owner feedback).
+
+    model_window is shown only when the caller has a confident estimate (Claude
+    cannot see the live window directly), else omitted."""
+    parts = [f"{_fmt_tokens(used)} in context"]
+    if soft and hard and abs(int(hard) - int(soft)) >= 1000:
+        parts.append(f"compact advised ~{_fmt_tokens(soft)}–{_fmt_tokens(hard)}")
+    elif hard or soft:
+        parts.append(f"compact advised ~{_fmt_tokens(hard or soft)}")
+    if forced_auto:
+        anchor = f"forced auto-compact ~{_fmt_tokens(forced_auto)}"
+        if forced_auto > used:
+            anchor += f" (~{_fmt_tokens(forced_auto - used)} away)"
+        else:
+            # context is already at/over the forced wall — never silently
+            # drop the headroom clause and read as "comfortably below".
+            anchor += " (reached — auto-compact imminent)"
+        parts.append(anchor)
+    if model_window:
+        parts.append(f"model window {_fmt_tokens(model_window)}")
+    return " · ".join(parts)
+
+
+def composition_line(comp: dict) -> str:
+    """Format a transcript_lib.context_composition() dict as the one-line
+    breakdown shown UNDER readout_line — "what is actually in the window".
+
+    Answers owner request (a): not just how full context is, but *where* the
+    tokens are, so the reclaimable part (stale tool output) is visible at a
+    glance. Returns "" when there is nothing meaningful to show.
+
+    The numbers are reconciled to the true total by context_composition (the
+    residual `base` absorbs estimation error), so the parts always sum to the
+    readout's "in context" figure; the leading "≈" flags that per-category
+    splits are a chars/4 estimate, not exact accounting."""
+    if not comp or not comp.get("total"):
+        return ""
+    parts = []
+    base = int(comp.get("base", 0) or 0)
+    if base > 0:
+        parts.append(f"{_fmt_tokens(base)} floor")
+    tool = int(comp.get("tool", 0) or 0)
+    if tool > 0:
+        sf = float(comp.get("tool_stale_frac", 0.0) or 0.0)
+        seg = f"{_fmt_tokens(tool)} tool output"
+        if sf >= 0.5:
+            seg += f" ({sf:.0%} stale, reclaimable)"
+        elif sf > 0:
+            seg += f" ({sf:.0%} stale)"
+        parts.append(seg)
+    asst = int(comp.get("assistant", 0) or 0)
+    if asst > 0:
+        parts.append(f"{_fmt_tokens(asst)} assistant")
+    prompts = int(comp.get("prompts", 0) or 0)
+    if prompts > 0:
+        parts.append(f"{_fmt_tokens(prompts)} prompts")
+    if not parts:
+        return ""
+    return "≈ " + " · ".join(parts)
+
+
+def advisory_band(cfg: "PolicyConfig") -> tuple[int, int]:
+    """(soft, hard) advisory thresholds in tokens, for readout_line(). soft is
+    the window-aware target (or soft fraction × window if an explicit SOFT_PCT
+    override is set); hard is hard_pct × window. Both are recommendation points,
+    not walls."""
+    eff = max(int(cfg.effective_limit), 1)
+    soft = int(cfg.target_tokens) if cfg.target_tokens else int(cfg.soft * eff)
+    hard = int(cfg.hard * eff)
+    return soft, hard
+
+
 @dataclass
 class PolicyConfig:
     profile: str

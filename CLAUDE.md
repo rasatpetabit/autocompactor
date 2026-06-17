@@ -48,18 +48,48 @@ with no traceback.
 
 ### Tuning + native ceiling
 
-- Claude native ceiling uses `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
-  (`native ceiling = min(setting, model window)`).
-- Recovered `settings.json` hook env thresholds: `AUTOCOMPACTOR_WINDOW=200000`,
-  `SOFT_PCT=0.5` (`100k`), `HARD_PCT=0.62` (`124k`), `STALE_FRAC=0.90`,
-  `COOLDOWN=20000`. Live tuning on this host keeps
-  `CLAUDE_CODE_AUTO_COMPACT_WINDOW=400000`.
-- Native auto-trigger confirmed at `400k` (max `preTokens`
-  `336,512 = 400k-63,488`). If the measured trigger differs, keep `HARD_PCT`
-  about `20-30k` ahead of it.
+Values below are the live state verified 2026-06-17 on this host (Opus 4.8,
+1M model window). Re-verify against `config.json` and `~/.claude/settings.json`
+rather than trusting prose — earlier revisions of this section had drifted
+badly (claimed 400k ceiling / 336k trigger / env thresholds that were never set).
+
+- Claude native ceiling uses `CLAUDE_CODE_AUTO_COMPACT_WINDOW`; the resolver
+  treats it as a **cap** (`effective = min(configured WINDOW, native_ceiling)`,
+  Claude-only — see `window_resolver.resolve_window`), never a source. Live
+  `settings.json` env: `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000`,
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=90` (native auto fires near 90% × 300k ≈ 270k).
+- **No `AUTOCOMPACTOR_*` env keys are set** on this host — `config.json` + code
+  defaults govern. Live tuning (`config.json` `claude` section + top-level):
+  `WINDOW=200000`, `HARD_PCT=0.55` (claude; hard line ≈ 110k), `COOLDOWN=15000`,
+  `STALE_FRAC=0.90`, `POST_FLOOR=70000`, `MIN_SAVINGS=30000`, `PROFILE=economy`.
+  Top-level `SOFT_PCT` is retired — the window-aware `target(W)` curve governs
+  the soft line (≈100k at a 200k window).
+- The 200k configured target is **deliberately aggressive** (well below the
+  ~270k native trigger): compact early, keep context low. This is intended, not
+  a misconfiguration — do not "fix" the effective window up to the ceiling.
+- Measured native auto-trigger (nightly 2026-06-17, 300k ceiling): **median
+  ~254k, max ~280k**. If you tighten toward native, keep `HARD_PCT` comfortably
+  ahead of the measured trigger, not the ceiling.
 - Tuning lives in `config.json` (+ gitignored `config.local.json`); runtime
-  env (`AUTOCOMPACTOR_*`) overrides. The installer never seeds `AUTOCOMPACTOR_*`
-  tuning as env.
+  env (`AUTOCOMPACTOR_*`) overrides if present. The installer never seeds
+  `AUTOCOMPACTOR_*` tuning as env.
+- User-facing readouts use absolute anchors (`policy.readout_line`:
+  *in context · compact advised ~soft–hard · forced auto-compact ~Nk (~Mk away)
+  · model window*), not a bare occupancy % — the % is computed against the
+  aggressive 200k target and routinely exceeds 100% on this 1M host, so it is
+  kept to telemetry only. The advisory band (soft–hard) and the forced native
+  wall are shown as *distinct* anchors with headroom, so "near the soft limit"
+  can't be misread as "one turn from auto-compacting".
+- Two intelligence sub-displays ride under the readout / on the compaction
+  summary: **(a) composition** — `policy.composition_line(transcript_lib.`
+  `context_composition(st))` renders *≈ floor · tool output (stale%) ·
+  assistant · prompts*, per-category token estimates (chars/4) reconciled so
+  the parts always sum to the true total (residual `base`/"floor" absorbs
+  error); **(b) preservation ledger** — `artifacts.preservation_ledger()`
+  names what was extracted verbatim to disk vs left to the lossy summarizer vs
+  dropped for budget (keep/drop comes from `artifacts.budget_plan()`, shared
+  with `build_digest` so they can't disagree). Both surface on Claude and Pi;
+  both are content-free (counts/token-estimates/category-names only).
 
 ### Runtime state + nightly
 

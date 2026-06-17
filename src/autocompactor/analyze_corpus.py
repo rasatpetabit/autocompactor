@@ -376,7 +376,11 @@ def main():
     print(f"\nSessions analyzed:        {len(sessions)}")
     print(f"Compaction events found:  {len(all_compactions)}")
     if occs:
-        print(f"Occupancy at compaction:  median {statistics.median(occs):.0%}, "
+        # Ratio against each event's resolved EFFECTIVE window (the aggressive
+        # configured target on this host), not the model window — so >100% is
+        # expected; the absolute preTokens medians below are the real anchor.
+        print(f"Occupancy at compaction (of effective window):  "
+              f"median {statistics.median(occs):.0%}, "
               f"p90 {sorted(occs)[int(0.9 * (len(occs) - 1))]:.0%}")
         print(f"Reduction per compaction: median "
               f"{statistics.median(reductions):.0%}")

@@ -48,6 +48,7 @@ import sys
 from autocompactor import config_lib, artifacts, policy, window_resolver  # noqa: E402
 from autocompactor.transcript_lib import (analyze, active_signals,  # noqa: E402
                                           build_preservation_instructions,
+                                          context_composition,
                                           current_context_tokens,
                                           detect_phase,
                                           find_last_boundary_offset,
@@ -128,8 +129,10 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
         pass
     st = analyze(transcript, start_offset=offset)
     stale_frac_thr = config_lib.cfg.float("STALE_FRAC", default=0.50)
+    soft_t, hard_t = policy.advisory_band(pcfg)
     sig_pairs = active_signals(st, prompt="", window=window,
-                               stale_frac_thr=stale_frac_thr)
+                               stale_frac_thr=stale_frac_thr,
+                               hard_tokens=hard_t)
     signals = [desc for _, desc in sig_pairs]
     observe = observe_only()
     gating = [desc for name, desc in sig_pairs if name not in observe]
@@ -154,16 +157,24 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
         "suppressed_by_cooldown": False, "hook_event": "PostToolUse",
         **resolution.event_fields(),
     })
-    reason = (f"context is at {occupancy:.0%} (~{ctx:,} tokens) mid-burst "
-              f"(no user prompt since the last turn)")
+    native_auto, model_window = window_resolver.readout_anchors(resolution)
+    reason = policy.readout_line(ctx, soft_t, hard_t, native_auto, model_window)
+    reason += " (mid-burst, no user prompt since the last turn)"
     if gating:
-        reason += " and " + "; ".join(gating)
+        reason += " — triggered by: " + "; ".join(gating)
+    comp_line = policy.composition_line(context_composition(st, ctx))
+    if comp_line:
+        reason += "\n  └ " + comp_line
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PostToolUse",
         "additionalContext": (
-            "[autocompactor] Good moment to compact: " + reason + ". "
-            "If this is a natural breakpoint, suggest the user run /compact "
-            "before continuing. Do not interrupt mid-tool work otherwise.")}}))
+            "[autocompactor] Optional early-compaction suggestion (" + reason
+            + "). Autocompactor advises compacting before the forced "
+            "auto-compact wall to keep cached-read cost low; the forced limit "
+            "is only imminent if the headroom above is small. Suggest /compact "
+            "only at a natural breakpoint; never interrupt mid-tool work. When "
+            "relaying this, use the token anchors above — do not cite a single "
+            "occupancy % or imply auto-compaction is about to happen.")}}))
     return 0
 
 
@@ -268,7 +279,8 @@ def _run() -> int:
     # window); large windows target lower occupancy (keep ~150k, expand only
     # on a boundary signal). See docs/masterplan/simplify-compaction-model/
     # window-aware.md. A deprecated SOFT_PCT override (if set) still wins.
-    soft = policy.resolve_policy_config("claude", int(window)).soft
+    pcfg = policy.resolve_policy_config("claude", int(window))
+    soft = pcfg.soft
 
     # One-shot artifact re-injection on the first prompt after a compaction.
     if state.get("pending_reinject"):
@@ -315,8 +327,10 @@ def _run() -> int:
     stale_frac = (st.stale_tool_chars / st.total_tool_chars
                   if st.total_tool_chars else 0.0)
     prompt = data.get("prompt") or ""
+    soft_t, hard_t = policy.advisory_band(pcfg)
     sig_pairs = active_signals(st, prompt=prompt, window=window,
-                               stale_frac_thr=stale_frac_thr)
+                               stale_frac_thr=stale_frac_thr,
+                               hard_tokens=hard_t)
     signals = [desc for _, desc in sig_pairs]
     # Observe-only signals are logged (telemetry keeps measuring them)
     # but never justify a recommendation — they tested anti-predictive.
@@ -354,25 +368,37 @@ def _run() -> int:
     state_dirty = True
     _save_state()
 
-    reason = ("context is at "
-              f"{occupancy:.0%} (~{st.context_tokens:,} tokens)")
+    # Absolute-anchor readout (not a bare occupancy %, which read >100% against
+    # the aggressive configured target on large-window models — owner #4).
+    native_auto, model_window = window_resolver.readout_anchors(resolution)
+    reason = policy.readout_line(st.context_tokens, soft_t, hard_t,
+                                 native_auto, model_window)
     if gating:
-        reason += " and " + "; ".join(gating)
+        reason += " — triggered by: " + "; ".join(gating)
+    comp_line = policy.composition_line(
+        context_composition(st, st.context_tokens))
+    if comp_line:
+        reason += "\n  └ " + comp_line
 
     out = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
-                "[autocompactor] Good moment to compact: " + reason + ". "
-                "If the user's current request starts a new task or this is a "
-                "natural breakpoint, briefly suggest they run /compact before "
-                "proceeding. Do not interrupt mid-task work for this."
+                "[autocompactor] Optional early-compaction suggestion (" + reason
+                + "). Autocompactor advises compacting well before Claude's "
+                "forced auto-compact to keep cached-read cost low; the forced "
+                "limit is NOT imminent unless the headroom above is small. If "
+                "the user's request starts a new task or this is a natural "
+                "breakpoint, briefly suggest they run /compact; otherwise do "
+                "not interrupt. When relaying this, use the token anchors above "
+                "— do not cite a single occupancy % or imply auto-compaction is "
+                "about to happen."
             ),
         },
         "systemMessage": (
-            f"autocompactor: {reason}. Running /compact now is much cheaper "
-            "than waiting for autocompact (tailored preservation "
-            "instructions are staged)."
+            f"autocompactor: {reason}. Early, optional suggestion to keep "
+            "context lean — not an imminent limit. Tailored preservation "
+            "instructions are staged for whenever you compact."
         ),
     }
     print(json.dumps(out))

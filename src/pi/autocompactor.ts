@@ -243,8 +243,13 @@ export default function autocompactor(pi: ExtensionAPI) {
         let msg = "autocompactor: compaction completed."
         if (preTokens > 0 && postTokens != null && postTokens > 0) {
           const reclaimed = Math.max(preTokens - postTokens, 0)
-          const window = (usage?.contextWindow ?? 0) - RESERVE_FALLBACK
-          const postOcc = window > 0 ? ` (${((postTokens / window) * 100).toFixed(0)}%)` : ""
+          // Anchor the post-compaction occupancy to the true model window the
+          // runtime reports (no reserve guess, no bare %): "X% of ~Wt model
+          // window" cannot be misread the way a lone "(47%)" was.
+          const modelWindow = usage?.contextWindow ?? 0
+          const postOcc = modelWindow > 0
+            ? ` (${((postTokens / modelWindow) * 100).toFixed(0)}% of ~${modelWindow.toLocaleString()}t model window)`
+            : ""
           msg = `autocompactor: compaction completed — context ${preTokens.toLocaleString()} → ${postTokens.toLocaleString()} tokens${postOcc}; reclaimed ~${reclaimed.toLocaleString()} tokens.`
         } else if (preTokens > 0) {
           msg = `autocompactor: compaction completed — before context was ${preTokens.toLocaleString()} tokens; current usage will refresh on the next turn.`

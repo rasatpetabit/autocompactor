@@ -37,7 +37,7 @@ evaluation and prioritized open items.
 ## Operating notes (harness-agnostic)
 
 - Before changing behavior, run `python3 -m pytest tests/ -q` and
-  `bash tests/smoke_test.sh` when safe. Current baseline is 115 pytest cases.
+  `bash tests/smoke_test.sh` when safe. Current baseline is 164 pytest cases.
 - Owner directive: `>80%` of spend is cached reads. Compact often and keep
   context low.
 - Every-turn cheapness relies on the min-savings guard: no recommendation when
@@ -50,9 +50,15 @@ evaluation and prioritized open items.
 - Open refinements: improve `topic_shift` precision with prompt replay at
   backtest sample points; keep watching `stale_output`, which was below
   baseline at `0.90`.
-- DONE 2026-06-10: `error_resolved`, `tests_pass`, and `idle_gap` were demoted
-  to observe-only via `AUTOCOMPACTOR_OBSERVE_ONLY`; telemetry and the
-  backtester still measure them, but they no longer gate recommendations.
+- Signal gating (`OBSERVE_ONLY`) is re-derived from measured per-signal lift,
+  not fixed. 2026-06-10 demoted `error_resolved`/`tests_pass`/`idle_gap`
+  (anti-predictive then). 2026-06-17 recalibration (backtest 2026-06-17,
+  Claude only): demoted `burn_rate` (0.9x) + `subagent_done` (0.8x) — now
+  sub-baseline as gates; re-promoted `idle_gap` (7.5x) + `tests_pass` (2.7x) —
+  reversed by the larger corpus. `error_resolved` stays observe-only.
+  `idle_gap` (n=16) / `tests_pass` (n=30) are thin — re-check next nightly.
+  Pi keeps the pre-2026-06-17 conservative set (it actuates; must retain
+  `subagent_done`/`commit` as strong gates — design trap #4).
 
 ## Conventions
 

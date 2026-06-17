@@ -108,6 +108,53 @@ def native_ceiling_from_settings(path: str = "~/.claude/settings.json") -> int |
     return _int_or_none(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"))
 
 
+def pct_override_from_settings(path: str = "~/.claude/settings.json") -> int | None:
+    """CLAUDE_AUTOCOMPACT_PCT_OVERRIDE — the % of the native ceiling at which
+    Claude's own autocompact fires. Used only to estimate the native-auto
+    trigger for the human-facing readout; never feeds the decision."""
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as fh:
+            env = (json.load(fh).get("env") or {})
+    except Exception:
+        return None
+    pct = _int_or_none(env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"))
+    if pct is None or not (0 < pct <= 100):
+        return None
+    return pct
+
+
+def native_auto_estimate(native_ceiling: int | None,
+                         pct_override: int | None) -> int | None:
+    """Best estimate of where native autocompact actually fires:
+    native_ceiling × pct_override%. Returns None when the ceiling is unknown
+    (then the readout simply omits the native-auto anchor)."""
+    if not native_ceiling or native_ceiling <= 0:
+        return None
+    pct = pct_override if (pct_override and 0 < pct_override <= 100) else 90
+    return int(native_ceiling * pct / 100)
+
+
+def readout_anchors(resolution: "WindowResolution",
+                    settings_path: str = "~/.claude/settings.json"
+                    ) -> tuple[int | None, int | None]:
+    """(native_auto_estimate, confident_model_window) for the human readout.
+
+    native_auto: where Claude's own autocompact will force a compaction.
+    model_window: shown ONLY when the tier was learned from an observed peak
+    that exceeds the native ceiling — i.e. we have empirically seen context
+    larger than the enforced wall, proving a bigger model. Otherwise omitted,
+    because Claude cannot see the live model window and a guessed tier (e.g.
+    the 200k small-session clamp on a 1M model) would itself misstate the
+    limit — the exact failure this readout exists to fix."""
+    native_auto = native_auto_estimate(
+        resolution.native_ceiling, pct_override_from_settings(settings_path))
+    model_window = None
+    if (resolution.window_source in ("observed_peak", "runtime")
+            and resolution.learned_window > (resolution.native_ceiling or 0)):
+        model_window = resolution.learned_window
+    return native_auto, model_window
+
+
 def resolve_window(configured_window: float, observed_peak: int,
                    harness: str = "claude",
                    runtime_context_window: int | None = None,

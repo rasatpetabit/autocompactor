@@ -43,6 +43,8 @@ class TranscriptStats:
     todo_step: bool = False          # >=1 completed AND >=1 pending in latest TodoWrite
     stale_tool_chars: int = 0        # chars of tool_result older than window
     total_tool_chars: int = 0
+    assistant_text_chars: int = 0    # chars of assistant text+thinking in context
+    user_prompt_chars: int = 0       # chars of genuine user turns in context
     compaction_count: int = 0        # number of compact_boundary entries seen
     # timing-signal raw material
     usage_series: list = field(default_factory=list)   # context estimate per assistant turn
@@ -344,7 +346,12 @@ def analyze(path: str = "", recent_window: int = 30,
                     + int(usage.get("cache_creation_input_tokens", 0))
                     + int(usage.get("output_tokens", 0)))
             for block in _content_blocks(entry):
-                if block.get("type") != "tool_use":
+                btype = block.get("type")
+                # Composition accounting: the model's own text/reasoning that
+                # currently sits in context (what a summarizer would compress).
+                if btype in ("text", "thinking"):
+                    st.assistant_text_chars += len(_block_text(block))
+                if btype != "tool_use":
                     continue
                 name = block.get("name", "")
                 tin = block.get("input") or {}
@@ -422,6 +429,7 @@ def analyze(path: str = "", recent_window: int = 30,
                     continue
                 text = "\n".join(_block_text(b) for b in blocks).strip()
                 if text and not text.startswith("/") and "<command-name>" not in text:
+                    st.user_prompt_chars += len(text)
                     st.last_user_task = text[:500]
                     if len(st.initial_user_prompts) < INITIAL_PROMPTS_MAX:
                         st.initial_user_prompts.append(
@@ -445,6 +453,52 @@ def burn_rate(st: TranscriptStats, lookback: int = 10) -> float:
     return float(deltas[len(deltas) // 2])
 
 
+CHARS_PER_TOKEN = 4   # chars ~ tokens*4 heuristic (matches artifacts.py)
+
+
+def context_composition(st: TranscriptStats, context_tokens: int = -1) -> dict:
+    """Estimate the per-category token breakdown of the CURRENT context window,
+    reconciled to the authoritative total. Answers owner request (a): not "how
+    full" but "where are the tokens, and how much is reclaimable".
+
+    Categories (all over the in-context segment analyze() already isolated):
+      base       residual = total - content estimate: system prompt + tool
+                 schemas + any injected summary + estimation error — none of
+                 which appear as transcript text. Labelled "floor" downstream
+                 because it is the irreducible part a compaction cannot shrink.
+      tool       tool_result output, plus the stale fraction (the share old
+                 enough to be the prime reclaim target).
+      assistant  the model's own text/reasoning currently in context.
+      prompts    genuine user turns in context.
+
+    chars/4 is an estimate, so the content categories are scaled to never
+    exceed the true total; `base` absorbs the remainder. Formatted by
+    policy.composition_line()."""
+    total = int(context_tokens if context_tokens >= 0 else st.context_tokens)
+    total = max(total, 0)
+    tool = max(int(st.total_tool_chars), 0) / CHARS_PER_TOKEN
+    asst = max(int(getattr(st, "assistant_text_chars", 0)), 0) / CHARS_PER_TOKEN
+    prompts = max(int(getattr(st, "user_prompt_chars", 0)), 0) / CHARS_PER_TOKEN
+    content = tool + asst + prompts
+    if total and content > total:        # chars/4 over-estimated — scale to fit
+        scale = total / content
+        tool *= scale
+        asst *= scale
+        prompts *= scale
+        content = float(total)
+    base = max(total - content, 0.0) if total else 0.0
+    stale_frac = (st.stale_tool_chars / st.total_tool_chars
+                  if st.total_tool_chars else 0.0)
+    return {
+        "total": total,
+        "base": int(round(base)),
+        "tool": int(round(tool)),
+        "tool_stale_frac": round(stale_frac, 4),
+        "assistant": int(round(asst)),
+        "prompts": int(round(prompts)),
+    }
+
+
 def topic_shift(prompt: str, st: TranscriptStats) -> bool:
     """Current prompt shares little vocabulary with the recent window."""
     pw = _content_words(prompt or "")
@@ -456,9 +510,16 @@ def topic_shift(prompt: str, st: TranscriptStats) -> bool:
 
 def active_signals(st: TranscriptStats, prompt: str = "",
                    window: float = 200_000.0,
-                   stale_frac_thr: float = 0.5) -> list:
+                   stale_frac_thr: float = 0.5,
+                   hard_tokens: float = 0.0) -> list:
     """Single registry of boundary signals (monitor + backtester share it).
-    Returns [(name, human_description)]."""
+    Returns [(name, human_description)].
+
+    hard_tokens, when >0, is the caller's advisory HARD line in tokens; the
+    burn_rate signal projects turns to *that* line. When 0 it falls back to a
+    fraction of `window`. Either way the description says "the compact line",
+    never "autocompact" — burn_rate approaches the advisory recommendation,
+    not Claude's forced native wall (those were conflated; owner feedback)."""
     sigs = []
     if st.recent_commit:
         sigs.append(("commit", "a git commit was just made"))
@@ -482,24 +543,33 @@ def active_signals(st: TranscriptStats, prompt: str = "",
                      f"{stale:.0%} of tool output in context is stale"))
     br = burn_rate(st)
     if br > 0 and st.context_tokens > 0:
-        turns_left = (window * 0.85 - st.context_tokens) / br
+        target = hard_tokens if hard_tokens and hard_tokens > 0 else window * 0.85
+        turns_left = (target - st.context_tokens) / br
         if 0 <= turns_left <= 8:
             sigs.append(("burn_rate",
-                         f"~{turns_left:.0f} turns from autocompact at the "
-                         f"current burn rate ({br:,.0f} tok/turn)"))
+                         f"~{turns_left:.0f} turns to the compact line at the "
+                         f"current burn rate (~{br:,.0f} tok/turn)"))
     if prompt and topic_shift(prompt, st):
         sigs.append(("topic_shift", "the new prompt starts a different topic"))
     return sigs
 
 
-# Signals measured as anti-predictive on BOTH the 14-day backtest and the
-# day-one nightly (precision at or below the signal-agnostic baseline:
-# error_resolved 3%/0.1x, tests_pass 9%/0.4x, idle_gap 0 firings).
-# They stay in the registry so telemetry and the backtester keep
-# measuring them, but neither the monitor nor the backtester's
-# recommendation replay may GATE a recommendation on them. Tunable:
-# AUTOCOMPACTOR_OBSERVE_ONLY (comma-separated signal names).
-OBSERVE_ONLY_DEFAULT = "error_resolved,tests_pass,idle_gap"
+# Observe-only signals: measured but never allowed to GATE a recommendation
+# (they stay in the registry so telemetry and the backtester keep scoring
+# them). The set is re-derived from measured per-signal lift, not fixed.
+#
+# 2026-06-17 recalibration (backtest 2026-06-17, signal-agnostic baseline 8%):
+#   demoted  burn_rate    7%/0.9x  and  subagent_done 6%/0.8x  (now sub-baseline
+#            as GATING signals — they were nagging on noise);
+#   promoted idle_gap    56%/7.5x  and  tests_pass   20%/2.7x  back to gating —
+#            both were genuinely anti-predictive in the smaller 2026-06-10
+#            corpus (idle_gap 0 firings, tests_pass 0.4x) but strongly
+#            predictive now. NOTE: idle_gap (n=16) and tests_pass (n=30) are
+#            thin samples — re-check at the next nightly before trusting them
+#            as load-bearing.
+#   error_resolved stays observe-only (3%/0.5x, still sub-baseline).
+# Tunable: AUTOCOMPACTOR_OBSERVE_ONLY (comma-separated signal names).
+OBSERVE_ONLY_DEFAULT = "error_resolved,burn_rate,subagent_done"
 
 
 def observe_only(harness: str = "claude") -> frozenset:
@@ -609,7 +679,18 @@ def build_context_state(st: TranscriptStats, window: float = 0.0,
     ]
     if window > 0:
         occ = st.context_tokens / window
-        lines.append(f"Occupancy: {occ:.0%}")
+        # Anchor the denominator: a bare "Occupancy: 42%" can't be read without
+        # knowing what it is 42% OF (clamped tier? learned window? reserve-net?).
+        lines.append(f"Occupancy: {occ:.0%} of ~{int(window):,}t effective window")
+    # Composition breakdown — where the tokens actually are (owner request a).
+    try:
+        from autocompactor import policy as _policy
+        comp_line = _policy.composition_line(
+            context_composition(st, st.context_tokens))
+        if comp_line:
+            lines.append("Composition: " + comp_line)
+    except Exception:
+        pass
     stale_frac = (st.stale_tool_chars / st.total_tool_chars
                   if st.total_tool_chars else 0.0)
     lines.append(f"Stale tool output: {stale_frac:.0%}")
