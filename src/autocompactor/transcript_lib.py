@@ -45,6 +45,9 @@ class TranscriptStats:
     total_tool_chars: int = 0
     assistant_text_chars: int = 0    # chars of assistant text+thinking in context
     user_prompt_chars: int = 0       # chars of genuine user turns in context
+    summary_chars: int = 0           # chars of carried compaction summary in context
+    skill_chars: int = 0             # chars of loaded skill injections (isMeta, persist)
+    skill_names: list = field(default_factory=list)  # deduped loaded-skill names
     compaction_count: int = 0        # number of compact_boundary entries seen
     # timing-signal raw material
     usage_series: list = field(default_factory=list)   # context estimate per assistant turn
@@ -300,6 +303,28 @@ def analyze(path: str = "", recent_window: int = 30,
                 and entry.get("subtype") == "compact_boundary"):
             last_boundary = idx
             st.compaction_count += 1
+
+    # Loaded skills / large instruction injections (isMeta) persist in context
+    # across compaction boundaries — the model keeps skill bodies live — so they
+    # are scanned over the FULL transcript (not the post-boundary slice) and
+    # deduped by name (a skill loaded once is counted once, at its largest seen
+    # size). Surfaced separately in the composition because they dominate the
+    # residual yet are reclaimable, unlike the system prompt + tool schemas.
+    _SKILL_MARKER = "Base directory for this skill:"
+    _skills = {}
+    for entry in raw_entries:
+        if not entry.get("isMeta"):
+            continue
+        text = "\n".join(_block_text(b) for b in _content_blocks(entry))
+        i = text.find(_SKILL_MARKER)
+        if i < 0:
+            continue
+        path = text[i + len(_SKILL_MARKER):].split("\n", 1)[0].strip()
+        name = path.rsplit("/", 1)[-1] or path or "skill"
+        _skills[name] = max(_skills.get(name, 0), len(text))
+    st.skill_chars = sum(_skills.values())
+    st.skill_names = list(_skills.keys())
+
     if last_boundary >= 0:
         for entry in raw_entries:
             if len(st.initial_user_prompts) >= INITIAL_PROMPTS_MAX:
@@ -425,7 +450,14 @@ def analyze(path: str = "", recent_window: int = 30,
                 # A genuine human turn. Track the last substantive one.
                 # Harness-injected entries (compaction summaries, meta
                 # caveats) are not the user's voice — never capture them.
-                if entry.get("isCompactSummary") or entry.get("isMeta"):
+                if entry.get("isCompactSummary"):
+                    # Carried compaction summary: real in-context content, but
+                    # not the user's voice — size it (shown separately), skip
+                    # capture.
+                    st.summary_chars += len(
+                        "\n".join(_block_text(b) for b in blocks))
+                    continue
+                if entry.get("isMeta"):
                     continue
                 text = "\n".join(_block_text(b) for b in blocks).strip()
                 if text and not text.startswith("/") and "<command-name>" not in text:
@@ -461,41 +493,62 @@ def context_composition(st: TranscriptStats, context_tokens: int = -1) -> dict:
     reconciled to the authoritative total. Answers owner request (a): not "how
     full" but "where are the tokens, and how much is reclaimable".
 
-    Categories (all over the in-context segment analyze() already isolated):
-      base       residual = total - content estimate: system prompt + tool
-                 schemas + any injected summary + estimation error — none of
-                 which appear as transcript text. Labelled "floor" downstream
-                 because it is the irreducible part a compaction cannot shrink.
-      tool       tool_result output, plus the stale fraction (the share old
-                 enough to be the prime reclaim target).
+    Categories (over the in-context content, plus persistent injections):
+      skills     loaded skill / large instruction injections (isMeta) still in
+                 context — often the single largest item, and RECLAIMABLE (a
+                 loaded skill body, not fixed overhead). Measured exactly from
+                 the transcript, so trusted over the chars/4 estimates.
+      summary    carried compaction summary still in context.
+      base       residual = total - everything measured: system prompt + tool
+                 schemas + estimation error. Labelled "floor"/"system+tools"
+                 downstream — the part a compaction genuinely cannot shrink.
+      tool       tool_result output, plus the stale fraction (prime reclaim).
       assistant  the model's own text/reasoning currently in context.
       prompts    genuine user turns in context.
 
-    chars/4 is an estimate, so the content categories are scaled to never
-    exceed the true total; `base` absorbs the remainder. Formatted by
-    policy.composition_line()."""
+    skills/summary are exact; the chars/4 content categories are scaled to fit
+    whatever they leave, and `base` is the residual, so the parts always sum
+    back to the true total. Formatted by policy.composition_line()."""
     total = int(context_tokens if context_tokens >= 0 else st.context_tokens)
     total = max(total, 0)
+    skills = max(int(getattr(st, "skill_chars", 0)), 0) / CHARS_PER_TOKEN
+    summary = max(int(getattr(st, "summary_chars", 0)), 0) / CHARS_PER_TOKEN
     tool = max(int(st.total_tool_chars), 0) / CHARS_PER_TOKEN
     asst = max(int(getattr(st, "assistant_text_chars", 0)), 0) / CHARS_PER_TOKEN
     prompts = max(int(getattr(st, "user_prompt_chars", 0)), 0) / CHARS_PER_TOKEN
-    content = tool + asst + prompts
-    if total and content > total:        # chars/4 over-estimated — scale to fit
-        scale = total / content
-        tool *= scale
-        asst *= scale
-        prompts *= scale
-        content = float(total)
-    base = max(total - content, 0.0) if total else 0.0
+    if total and (skills + summary) > total:
+        # Pathological: the exact measurements alone exceed the true total.
+        s = total / (skills + summary)
+        skills *= s
+        summary *= s
+        tool = asst = prompts = 0.0
+    elif total:
+        avail = total - skills - summary
+        content = tool + asst + prompts
+        if content > avail:              # chars/4 over-estimated — scale to fit
+            scale = (avail / content) if content else 0.0
+            tool *= scale
+            asst *= scale
+            prompts *= scale
+    r_skills = int(round(skills))
+    r_summary = int(round(summary))
+    r_tool = int(round(tool))
+    r_asst = int(round(asst))
+    r_prompts = int(round(prompts))
+    # base = residual so the parts always sum back to the true total.
+    base = max(total - r_skills - r_summary - r_tool - r_asst - r_prompts, 0)
     stale_frac = (st.stale_tool_chars / st.total_tool_chars
                   if st.total_tool_chars else 0.0)
     return {
         "total": total,
-        "base": int(round(base)),
-        "tool": int(round(tool)),
+        "base": base,
+        "skills": r_skills,
+        "skill_names": list(getattr(st, "skill_names", []) or []),
+        "summary": r_summary,
+        "tool": r_tool,
         "tool_stale_frac": round(stale_frac, 4),
-        "assistant": int(round(asst)),
-        "prompts": int(round(prompts)),
+        "assistant": r_asst,
+        "prompts": r_prompts,
     }
 
 

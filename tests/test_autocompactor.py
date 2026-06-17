@@ -669,6 +669,40 @@ def test_context_composition_scales_when_estimate_overshoots():
     assert comp["tool"] + comp["assistant"] + comp["prompts"] == 50_000
 
 
+def test_context_composition_surfaces_loaded_skills():
+    """Owner finding: a loaded skill body (isMeta injection) can be ~80% of the
+    window and is RECLAIMABLE — it must be surfaced as its own category, not
+    buried in 'floor', and the residual relabelled system+tools."""
+    st = tl.TranscriptStats(context_tokens=200_000,
+                            skill_chars=600_000,        # ~150k tok loaded skill
+                            skill_names=["claude-api"],
+                            summary_chars=16_000,       # ~4k tok carried summary
+                            total_tool_chars=8_000,
+                            stale_tool_chars=4_000,
+                            assistant_text_chars=4_000)
+    comp = tl.context_composition(st, st.context_tokens)
+    assert comp["skills"] == 150_000 and comp["summary"] == 4_000
+    # every part (incl. skills + summary) reconciles exactly to the true total
+    assert (comp["base"] + comp["skills"] + comp["summary"]
+            + comp["tool"] + comp["assistant"] + comp["prompts"]) == 200_000
+    assert comp["base"] < 50_000        # 'floor' no longer absorbs the skill
+    line = policy.composition_line(comp)
+    assert "loaded skills (claude-api — reclaimable)" in line
+    assert "system+tools" in line and "floor" not in line
+    assert "carried summary" in line
+
+
+def test_context_composition_skill_free_session_keeps_floor_label():
+    """No loaded skills -> skills=0, residual still reads 'floor' (unchanged
+    for ordinary sessions; the relabel only kicks in when a skill dominates)."""
+    st = tl.TranscriptStats(context_tokens=120_000, total_tool_chars=40_000,
+                            stale_tool_chars=20_000, assistant_text_chars=8_000)
+    comp = tl.context_composition(st, st.context_tokens)
+    assert comp["skills"] == 0 and comp["summary"] == 0
+    line = policy.composition_line(comp)
+    assert "floor" in line and "loaded skills" not in line
+
+
 def test_preservation_ledger_names_preserved_lossy_and_dropped():
     """Owner request (b): the compaction ledger names what's kept verbatim,
     what's left to the lossy summarizer, and what was trimmed for budget."""

@@ -135,9 +135,21 @@ def composition_line(comp: dict) -> str:
     if not comp or not comp.get("total"):
         return ""
     parts = []
+    skills = int(comp.get("skills", 0) or 0)
+    if skills > 0:
+        names = [n for n in (comp.get("skill_names") or []) if n]
+        label = ", ".join(names[:3]) if names else "loaded"
+        if len(names) > 3:
+            label += f", +{len(names) - 3}"
+        parts.append(f"{_fmt_tokens(skills)} loaded skills ({label} — reclaimable)")
     base = int(comp.get("base", 0) or 0)
     if base > 0:
-        parts.append(f"{_fmt_tokens(base)} floor")
+        # Once big skill injections are pulled out, the residual really is just
+        # the system prompt + tool schemas — don't keep calling that "floor".
+        parts.append(f"{_fmt_tokens(base)} {'system+tools' if skills else 'floor'}")
+    summary = int(comp.get("summary", 0) or 0)
+    if summary > 0:
+        parts.append(f"{_fmt_tokens(summary)} carried summary")
     tool = int(comp.get("tool", 0) or 0)
     if tool > 0:
         sf = float(comp.get("tool_stale_frac", 0.0) or 0.0)

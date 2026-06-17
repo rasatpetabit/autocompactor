@@ -463,3 +463,32 @@ reconcile + overshoot, ledger, burn_rate wording); smoke + Pi smoke (bun TS)
 pass; `install.py --verify` PASS incl. live-transcript probe; `--status` OK.
 Docs reconciled (AGENTS baseline 157->164; CLAUDE.md readout + the two
 displays). WI-1 lateness fix stays owner-gated, untouched.
+
+## 2026-06-17 — composition: surface loaded skills (the real "floor")
+
+Owner pushed back on a ~155k "floor" readout ("seems high, are you sure?").
+Investigated instead of asserting (systematic-debugging): raw usage showed
+cache_read≈185k, and the single dominant transcript item was a 612,930-char
+isMeta injection at line 53 = the `claude-api` skill (~153k tok), ~80% of the
+window — plus `systematic-debugging`. So the "floor" was NOT irreducible
+system+tools; it was loaded skill bodies, which are RECLAIMABLE and which
+`analyze()` silently dropped (isMeta + pre-boundary) into the residual. Exactly
+the shown-vs-reality defect class, reproduced on ourselves.
+
+Fix (owner chose "surface loaded skills" via AUQ): `analyze()` now scans the
+FULL transcript for isMeta skill injections ("Base directory for this skill:"
+marker), deduped by name at max size (they persist across compaction
+boundaries, so the post-boundary slice misses them) -> `skill_chars` /
+`skill_names`; carried compaction-summary -> `summary_chars`.
+`context_composition()` surfaces `skills` + `summary` as exact (trusted)
+measurements, scales the chars/4 content to fit the remainder, and `base` is
+the residual so parts still sum to the true total. `policy.composition_line()`
+renders `loaded skills (names — reclaimable)` and relabels the residual
+`system+tools` (only when skills present; ordinary sessions keep "floor").
+Live: `≈ 156k loaded skills (systematic-debugging, claude-api — reclaimable) ·
+52k system+tools · 4k carried summary · 7k tool output (87% stale) · 2k
+assistant`. Shared brain -> Claude + Pi.
+
+Caveat worth noting: skills persist across /compact, so the 156k is reclaimable
+by NOT loading the skill, not by compacting. Verify: 166 pytest (+2), smoke +
+Pi smoke, install.py --verify PASS incl. live probe.
