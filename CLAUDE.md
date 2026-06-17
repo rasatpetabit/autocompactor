@@ -90,10 +90,18 @@ badly (claimed 400k ceiling / 336k trigger / env thresholds that were never set)
   dropped for budget (keep/drop comes from `artifacts.budget_plan()`, shared
   with `build_digest` so they can't disagree). Both surface on Claude and Pi;
   both are content-free (counts/token-estimates/category-names only).
-- **Recommendation readout is terse** (no fixed advisory trailer — the anchors
-  already convey urgency): prompt-time (`UserPromptSubmit`) and mid-burst
-  (`PostToolUse`) emit `systemMessage: "autocompactor: {readout}"` and a short,
-  non-duplicating `additionalContext` (Claude-only awareness, no numbers).
+- **Recommendation readout rides the relay, not `systemMessage`.** The owner
+  reads Claude's *relayed prose*, not the (transient) `systemMessage` line, so
+  the readout (anchors + composition) is carried in `additionalContext` with an
+  instruction for Claude to surface it to the user ONCE, concisely, at a natural
+  breakpoint — and prompt-time (`UserPromptSubmit`) + mid-burst (`PostToolUse`)
+  emit **no `systemMessage`**, so the numbers are never shown twice. History:
+  numbers in additionalContext-only read as "no useful info" (Claude relayed
+  inconsistently) → numbers in both channels read as "double" → numbers in
+  systemMessage-only read as "stripped/useless" (the user doesn't watch that
+  line). The relay-with-explicit-surface-instruction is the single durable
+  channel. (The compaction-time **PostCompact** notice still uses `systemMessage`
+  — different surface, no competing relay, see above.)
 - **One combined notice at compaction time.** Claude's compaction redraw
   swallows any `PreCompact` `systemMessage`, so PreCompact now emits *only*
   `customInstructions` (plus its telemetry/stash) — **no** user-facing message.

@@ -2,6 +2,36 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-17 — readout to relay (fix "stripped warning") + statusbar buffer bug
+
+Two display bugs the owner hit after the prior de-dup + an acw change.
+
+1. **Recommendation readout was "stripped/useless."** The prior de-dup put the
+   numbers in `systemMessage` and made `additionalContext` a number-free "don't
+   repeat" directive — on the premise that the user reads the systemMessage. They
+   don't; they read Claude's *relayed prose* (driven by additionalContext), which
+   was now number-free. Fix (owner-chosen): carry the readout in
+   `additionalContext` with an explicit "surface to the user ONCE, concisely, at
+   a breakpoint" instruction, and **drop the recommendation `systemMessage`** so
+   there's no double. Both sites (UserPromptSubmit `_run`, PostToolUse
+   `_run_posttooluse`). Monitor output schema is now `{hookSpecificOutput}` only.
+   PostCompact notice is untouched (separate surface, no competing relay).
+   Verified live: the mid-burst relay now shows "306k in context · …".
+
+2. **Statusbar "completely wrong"** — `~/.claude/statusline.js` (owner's harness
+   file, OUTSIDE this repo; not in any git repo; last touched 2026-05-26 so NOT a
+   regression from our commits). Bug: `AUTO_COMPACT_BUFFER_PCT = acw/totalCtx`
+   treats `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (the *usable* budget) as the
+   *reserved* buffer. With acw=900000/1M that's 90%, pinning the ctx meter at
+   100% past ~100k. Correct: `(totalCtx - acw)/totalCtx` = 10%. Verified the
+   corrected meter tracks used/900k exactly (25% at 224k, 100% at the 810k
+   trigger). Note: `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is now **900000** (CLAUDE.md
+   still said 300000 — live env drifted; not changed by us this session).
+
+Tests: rewrote the PostToolUse "user-visible systemMessage" test → asserts the
+readout rides additionalContext + no systemMessage; updated the compat-pin
+monitor schema to `{hookSpecificOutput}`. 180 pytest + smokes + --verify PASS.
+
 ## 2026-06-17 — WI-1 fix: corrected auto-coverage metric + coverage instrumentation
 
 Owner chose "metric fix + instrumentation" for the WI-1 finding (the unwarned

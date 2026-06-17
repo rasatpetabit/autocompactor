@@ -189,25 +189,22 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
     skill_warn = policy.skill_warning(comp)
     if skill_warn:
         reason += "\n  " + skill_warn
+    # The user reads Claude's relayed prose, not the (transient) systemMessage —
+    # so the readout (token anchors + composition) lives in additionalContext and
+    # Claude surfaces it ONCE at a breakpoint. No systemMessage -> no double (the
+    # prior de-dup over-corrected by stripping numbers from the channel the user
+    # actually reads, which read back as "stripped/useless").
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
-            # Terse, non-duplicating (see UserPromptSubmit): the full readout is
-            # in systemMessage below, which the user sees. Don't echo it here.
             "additionalContext": (
                 "[autocompactor] Optional early-compaction suggestion "
-                "(mid-burst): a /compact recommendation (token anchors + "
-                "composition) was just shown to the user via a system message. "
-                "Do NOT repeat those numbers — the user already sees them. "
-                "Suggest /compact only at a natural breakpoint; never interrupt "
-                "mid-tool work.")},
-        # User-visible notice. additionalContext above is injected into the
-        # model context only ("does not appear as a chat message in the
-        # interface" per the hooks docs), so without this the mid-burst
-        # recommendation never reaches the user — matching the prompt-time
-        # path. Gated by dec.recommend + the rising-only cooldown, so it
-        # surfaces at most once per burst, not per tool call.
-        "systemMessage": f"autocompactor: {reason}",
+                "(mid-burst). Surface this to the user ONCE, concisely, at the "
+                "next natural breakpoint — never interrupt mid-tool work to say "
+                "it:\n"
+                + reason +
+                "\nKeeps cached-read cost low; not an imminent limit. Say it a "
+                "single time, then continue.")},
     }))
     return 0
 
@@ -418,24 +415,22 @@ def _run() -> int:
     if skill_warn:
         reason += "\n  " + skill_warn
 
+    # The user reads Claude's relayed prose, not the (transient) systemMessage —
+    # so the readout (token anchors + composition) lives in additionalContext and
+    # Claude surfaces it ONCE in its reply. No systemMessage -> no double (the
+    # prior de-dup stripped numbers from the channel the user reads).
     out = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            # Terse, non-duplicating: the full readout (anchors + composition)
-            # is already in systemMessage below, which IS shown to the user.
-            # Repeating it here makes me relay the same numbers in prose — the
-            # double-output the owner flagged. Keep this to an action directive.
             "additionalContext": (
-                "[autocompactor] Optional early-compaction suggestion: a "
-                "/compact recommendation (token anchors + composition) was just "
-                "shown to the user via a system message. Do NOT repeat those "
-                "numbers in your reply — the user already sees them. If the "
-                "prompt starts a new task or this is a natural breakpoint, you "
-                "may briefly suggest /compact; otherwise continue and never "
-                "interrupt mid-tool work."
+                "[autocompactor] Optional early-compaction suggestion. Surface "
+                "this to the user ONCE, concisely, in your reply (skip if the "
+                "prompt is mid-task and a /compact would interrupt):\n"
+                + reason +
+                "\nKeeps cached-read cost low; not an imminent limit. Say it a "
+                "single time, then address the prompt."
             ),
         },
-        "systemMessage": f"autocompactor: {reason}",
     }
     print(json.dumps(out))
     return 0

@@ -233,8 +233,10 @@ _RICH_PATH = os.path.join(FIX, "rich_transcript.jsonl")
 
 
 def test_monitor_key_schema_when_recommending(tmp_path):
-    """When the monitor fires a recommendation the JSON object's top-level
-    keys must be exactly {'hookSpecificOutput', 'systemMessage'}."""
+    """When the monitor fires a recommendation the JSON object's top-level key
+    must be exactly {'hookSpecificOutput'} — the readout rides additionalContext
+    (Claude's relayed prose is the single durable channel the user reads); there
+    is no systemMessage, so the numbers are never shown twice."""
     payload = json.dumps({
         "session_id": "pin4mon", "cwd": "/tmp",
         "transcript_path": _RICH_PATH,
@@ -245,9 +247,10 @@ def test_monitor_key_schema_when_recommending(tmp_path):
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip(), "expected non-empty stdout (monitor should recommend)"
     obj = json.loads(r.stdout)
-    assert set(obj.keys()) == {"hookSpecificOutput", "systemMessage"}, (
+    assert set(obj.keys()) == {"hookSpecificOutput"}, (
         f"unexpected top-level keys: {set(obj.keys())}"
     )
+    assert "in context" in obj["hookSpecificOutput"]["additionalContext"]
 
 
 def test_monitor_empty_stdout_when_not_recommending(tmp_path):
