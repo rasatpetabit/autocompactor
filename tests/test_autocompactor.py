@@ -1268,6 +1268,67 @@ def test_postcompact_hook_reads_precompact_state(tmp_path):
     assert "in context before compaction" in out["systemMessage"]
 
 
+def test_precompact_probe_arms_sentinel_when_enabled(tmp_path):
+    """customInstructions live-confirm scaffolding: with
+    AUTOCOMPACTOR_CUSTOMINSTR_PROBE=1 the PreCompact emit appends the sentinel to
+    customInstructions and stashes it in session state for PostCompact to verify.
+    Off by default (the other PreCompact tests run without the env and never
+    emit the sentinel)."""
+    env = _hook_env(tmp_path)
+    env["AUTOCOMPACTOR_CUSTOMINSTR_PROBE"] = "1"
+    pre = json.dumps({"session_id": "arm1", "cwd": "/tmp",
+                      "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+                      "hook_event_name": "PreCompact", "trigger": "manual"})
+    r = subprocess.run([sys.executable, os.path.join(REPO, ANALYZER)],
+                       input=pre, capture_output=True, text=True,
+                       env=env, cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    ci = json.loads(r.stdout)["hookSpecificOutput"]["customInstructions"]
+    assert pa.CUSTOMINSTR_PROBE_SENTINEL in ci
+    st = json.loads((tmp_path / ".claude" / "autocompactor"
+                     / "arm1.state.json").read_text())
+    assert st["custominstr_probe"] == pa.CUSTOMINSTR_PROBE_SENTINEL
+
+
+def test_postcompact_probe_reports_honored_when_sentinel_in_summary(
+        tmp_path, monkeypatch, capsys):
+    """The summarizer honored our instructions iff the generated summary
+    (compact_summary input) contains the sentinel. Verdict surfaces to the user
+    and the one-shot stash is cleared."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(pa, "STATE_DIR", str(tmp_path))
+    (tmp_path / "pr1.state.json").write_text(json.dumps({
+        "pre_compact_tokens": 120_000, "pre_comp": {},
+        "custominstr_probe": pa.CUSTOMINSTR_PROBE_SENTINEL}))
+    rc = pa._run_postcompact({
+        "hook_event_name": "PostCompact", "session_id": "pr1",
+        "transcript_path": "/nonexistent/x.jsonl", "trigger": "manual",
+        "compact_summary": pa.CUSTOMINSTR_PROBE_SENTINEL + "\nRest of summary."})
+    assert rc == 0
+    msg = json.loads(capsys.readouterr().out)["systemMessage"]
+    assert "customInstructions probe: HONORED" in msg
+    assert json.loads(
+        (tmp_path / "pr1.state.json").read_text())["custominstr_probe"] is None
+
+
+def test_postcompact_probe_reports_noop_when_sentinel_absent(
+        tmp_path, monkeypatch, capsys):
+    """The expected outcome on Claude Code: the summarizer ignores our
+    customInstructions, so the sentinel never appears -> NO-OP verdict."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(pa, "STATE_DIR", str(tmp_path))
+    (tmp_path / "pr2.state.json").write_text(json.dumps({
+        "pre_compact_tokens": 120_000, "pre_comp": {},
+        "custominstr_probe": pa.CUSTOMINSTR_PROBE_SENTINEL}))
+    rc = pa._run_postcompact({
+        "hook_event_name": "PostCompact", "session_id": "pr2",
+        "transcript_path": "/nonexistent/x.jsonl", "trigger": "manual",
+        "compact_summary": "A normal summary with no marker in it."})
+    assert rc == 0
+    msg = json.loads(capsys.readouterr().out)["systemMessage"]
+    assert "customInstructions probe: NO-OP" in msg
+
+
 def test_analyzer_restates_founding_goal_when_staged_lacks_it(tmp_path):
     """Owner directive: every compaction pass must restate the founding
     goal verbatim. Staged instructions built from a tail-only parse can

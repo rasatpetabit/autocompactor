@@ -47,6 +47,14 @@ from autocompactor.stats import log_event, run_hook  # noqa: E402
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 BACKUP_DIR = os.path.join(STATE_DIR, "backups")
 
+# Falsifiable live probe (owner: "live-confirm before removing") for whether
+# Claude Code's native summarizer honors our PreCompact customInstructions at
+# all — documentary evidence says it's a no-op there, but we don't remove the
+# emit until a real compaction confirms it. Off unless
+# AUTOCOMPACTOR_CUSTOMINSTR_PROBE=1. The sentinel is a fixed constant
+# (content-free: it carries no transcript text), so telemetry stays clean.
+CUSTOMINSTR_PROBE_SENTINEL = "AUTOCOMPACTOR-CUSTOMINSTR-PROBE-7Q2X9K"
+
 
 def _env(name: str, default: str = "") -> str:
     """LLM knobs resolve env-first, then config.local.json (gitignored).
@@ -240,6 +248,15 @@ def _run_precompact(data: dict) -> int:
         # Pi bridge so the two paths can't drift).
         instructions = append_artifact_restatement(instructions, arts)
 
+    # Live probe: when armed, append a unique sentinel directive so PostCompact
+    # can verify (against compact_summary) whether the summarizer honored these
+    # instructions. No effect on normal operation when off.
+    probe_armed = _env("AUTOCOMPACTOR_CUSTOMINSTR_PROBE") == "1"
+    if probe_armed and instructions.strip():
+        instructions += (
+            "\n\nIMPORTANT: Output this exact marker as the very first line of "
+            "your summary, on its own line: " + CUSTOMINSTR_PROBE_SENTINEL)
+
     # mark for one-shot re-injection + leave a stats line for the digest
     state_file = os.path.join(STATE_DIR, f"{session_id}.state.json")
     try:
@@ -249,6 +266,7 @@ def _run_precompact(data: dict) -> int:
         state2 = {}
     state2["pending_reinject"] = True
     state2["compaction_count"] = state2.get("compaction_count", 0) + 1
+    state2["custominstr_probe"] = CUSTOMINSTR_PROBE_SENTINEL if probe_armed else None
 
     # Quick analysis summary: shown to the user before the compaction runs
     # (systemMessage) and reused as the post-compaction digest header.
@@ -360,13 +378,14 @@ def _run_postcompact(data: dict) -> int:
     transcript = data.get("transcript_path") or ""
     trigger = data.get("trigger") or "auto"
 
-    pre_tokens, pre_comp = None, {}
+    pre_tokens, pre_comp, probe_sentinel = None, {}, None
     state_file = os.path.join(STATE_DIR, f"{session_id}.state.json")
     try:
         with open(state_file) as fh:
             s = json.load(fh)
         pre_tokens = s.get("pre_compact_tokens")
         pre_comp = s.get("pre_comp") or {}
+        probe_sentinel = s.get("custominstr_probe")
     except Exception:
         pass
 
@@ -401,10 +420,30 @@ def _run_postcompact(data: dict) -> int:
     if skill_warn:
         lines.append("  " + skill_warn)
 
+    # customInstructions live probe (armed via AUTOCOMPACTOR_CUSTOMINSTR_PROBE):
+    # did the native summarizer honor our PreCompact customInstructions? Check
+    # the generated summary (compact_summary input) for the sentinel.
+    probe_verdict = None
+    if probe_sentinel:
+        honored = probe_sentinel in (data.get("compact_summary") or "")
+        probe_verdict = "honored" if honored else "no-op"
+        lines.append(
+            "  customInstructions probe: "
+            + ("HONORED — summarizer used our instructions"
+               if honored else
+               "NO-OP — sentinel absent; Claude Code ignored customInstructions"))
+        # one-shot: clear so a later compaction doesn't replay a stale verdict
+        try:
+            s["custominstr_probe"] = None
+            with open(state_file, "w") as fh:
+                json.dump(s, fh)
+        except Exception:
+            pass
+
     log_event({
         "type": "postcompact", "session_id": session_id, "trigger": trigger,
         "pre_tokens": pre_tokens, "after_tokens": after_tokens,
-        "composition": comp or None,
+        "composition": comp or None, "custominstr_probe": probe_verdict,
     })
     # Suppress a contentless "compaction complete" with nothing to add.
     if len(lines) > 1 or pre_tokens:

@@ -2,6 +2,26 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-17 — customInstructions live-confirm probe (env-gated, self-reporting)
+
+Owner chose "live-confirm before removing" re: whether Claude Code honors our
+PreCompact customInstructions (documentary evidence says no-op). Built a
+falsifiable, self-reporting sentinel probe — NOTHING removed yet.
+
+- AUTOCOMPACTOR_CUSTOMINSTR_PROBE=1 (off by default): PreCompact appends a unique
+  sentinel directive (CUSTOMINSTR_PROBE_SENTINEL, a fixed content-free constant)
+  to customInstructions and stashes it in session state.
+- PostCompact (receives `compact_summary` per hooks docs:2520) checks the
+  generated summary for the sentinel and reports HONORED / NO-OP in its notice +
+  telemetry; one-shot (clears the stash).
+- To run: arm the env, trigger one /compact, read the PostCompact verdict. The
+  sentinel is unique enough that HONORED can't be a false positive.
+
+Aside, verified while here: `systemMessage` is a UNIVERSAL hook output field
+(hooks docs:708 "work across all events" + table incl. systemMessage), so the
+PostCompact + mid-burst notices use the correct channel. 175 pytest (+3),
+smoke + Pi smoke, --verify PASS.
+
 ## 2026-06-17 — mid-burst recommendation now user-visible (systemMessage)
 
 Owner: "not showing any useful info at all now." Root cause (systematic-
