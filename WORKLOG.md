@@ -2,6 +2,34 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-17 — display: de-dup + shrink readout + combine compaction outputs
+
+Owner feedback on the now-visible readout: (1) "double-outputting" (same numbers
+shown twice), (2) "too long — shrink without removing much data", (3) "combine
+the 2 outputs when the compact is firing".
+
+- **De-dup**: `additionalContext` at both recommendation sites (UserPromptSubmit +
+  PostToolUse) is now terse + "do NOT repeat these numbers" — the user-visible
+  `systemMessage` carries the readout; Claude no longer relays a duplicate.
+- **Shrink**: dropped the fixed advisory trailer from both recommendation
+  `systemMessage`s (anchors already convey urgency); trimmed `composition_line`
+  labels (`loaded skills (… — reclaimable)`→`skills (…)`, `carried summary`→
+  `summary`, `tool output (… stale, reclaimable)`→`tool (… stale)`, `assistant`→
+  `asst`). Reproduced owner's example: **472→290 chars (~38% shorter)**, no data
+  lost (it even gained the `model window` anchor). The dropped "— reclaimable" on
+  skills also fixes a contradiction with `skill_warning` ("/compact won't reclaim
+  these").
+- **Combine**: Claude's compaction redraw swallows any PreCompact `systemMessage`,
+  so PreCompact now emits *only* `customInstructions` (+telemetry/stash) — no
+  user-facing message. The single compaction notice is **PostCompact**, which
+  renders in the fresh view: `compaction #N complete — before→after (reclaimed
+  ~Z)` + composition (a) + **preservation ledger (b)** + probe verdict. PreCompact
+  stashes `pre_ledger`/`pre_comp`/`compaction_count` so the post notice survives a
+  failed re-parse. Owner's overarching "(b) what we compressed vs didn't" is thus
+  preserved on the single notice, not dropped.
+- CLAUDE.md reconciled (composition labels, terse-recommendation, single-notice).
+- 175 pytest, smoke + Pi smoke, `--verify` PASS.
+
 ## 2026-06-17 — customInstructions live-confirm probe (env-gated, self-reporting)
 
 Owner chose "live-confirm before removing" re: whether Claude Code honors our

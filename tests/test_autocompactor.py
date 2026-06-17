@@ -654,7 +654,7 @@ def test_context_composition_reconciles_to_true_total():
         == comp["total"] == 209_000
     assert 0.90 <= comp["tool_stale_frac"] <= 0.92
     line = policy.composition_line(comp)
-    assert "floor" in line and "tool output" in line and "stale" in line
+    assert "floor" in line and "tool" in line and "stale" in line
 
 
 def test_context_composition_scales_when_estimate_overshoots():
@@ -687,9 +687,9 @@ def test_context_composition_surfaces_loaded_skills():
             + comp["tool"] + comp["assistant"] + comp["prompts"]) == 200_000
     assert comp["base"] < 50_000        # 'floor' no longer absorbs the skill
     line = policy.composition_line(comp)
-    assert "loaded skills (claude-api — reclaimable)" in line
+    assert "skills (claude-api)" in line
     assert "system+tools" in line and "floor" not in line
-    assert "carried summary" in line
+    assert "summary" in line
 
 
 def test_context_composition_skill_free_session_keeps_floor_label():
@@ -1157,10 +1157,11 @@ def test_analyzer_emits_instructions_and_artifacts(tmp_path):
 
 
 def test_analyzer_systemmessage_summary(tmp_path):
-    """Every compaction (manual or auto) must surface a quick analysis
-    summary to the user via systemMessage — trigger, context, phase,
-    artifact accounting, instruction source. Content-free: no transcript
-    text beyond signal descriptions."""
+    """PreCompact emits NO user-facing systemMessage now (combined into the single
+    PostCompact notice). It still emits customInstructions and stashes a
+    content-free analysis summary — trigger, context, phase, artifact accounting,
+    instruction source — for telemetry / the PostCompact notice. Content-free:
+    no transcript text beyond signal descriptions."""
     payload = json.dumps({
         "session_id": "sum1", "cwd": "/tmp",
         "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
@@ -1170,22 +1171,23 @@ def test_analyzer_systemmessage_summary(tmp_path):
     assert r.returncode == 0
     out = json.loads(r.stdout)
     assert "hookSpecificOutput" in out          # instructions still emitted
-    msg = out["systemMessage"]
-    assert msg.startswith("autocompactor: compaction #1 (auto)")
+    assert "systemMessage" not in out           # combined into PostCompact
+    stashed = json.loads((tmp_path / ".claude" / "autocompactor"
+                          / "sum1.state.json").read_text())["last_compaction_stats"]
+    assert stashed.startswith("compaction #1 (auto)")
     # Absolute-anchor readout (WI-2): "<used> in context · compact advised
     # ~<soft>–<hard> · forced auto-compact ~<auto> (~<headroom> away)" replaced
-    # the old bare "context ~Xt (Y% of Zk)" occupancy string. The advisory/forced
-    # split + headroom prevents the "one turn from auto-compacting" misread.
-    assert "in context" in msg
-    assert "compact advised ~" in msg
-    assert "phase: " in msg
-    assert "artifacts to disk: " in msg
-    assert "instructions: fresh analysis" in msg
-    assert "user notes kept" in msg
+    # the old bare "context ~Xt (Y% of Zk)" occupancy string.
+    assert "in context" in stashed
+    assert "compact advised ~" in stashed
+    assert "phase: " in stashed
+    assert "artifacts to disk: " in stashed
+    assert "instructions: fresh analysis" in stashed
+    assert "user notes kept" in stashed
 
 
 def test_analyzer_summary_reports_staged_instructions(tmp_path):
-    """When the monitor staged instructions moments earlier, the summary
+    """When the monitor staged instructions moments earlier, the stashed summary
     must say so (and the count must increment across compactions)."""
     state_dir = tmp_path / ".claude" / "autocompactor"
     state_dir.mkdir(parents=True)
@@ -1197,9 +1199,10 @@ def test_analyzer_summary_reports_staged_instructions(tmp_path):
         "hook_event_name": "PreCompact", "trigger": "manual"})
     r = _run_hook(ANALYZER, payload, tmp_path)
     assert r.returncode == 0
-    out = json.loads(r.stdout)
-    assert "compaction #3 (manual)" in out["systemMessage"]
-    assert "instructions: staged by monitor" in out["systemMessage"]
+    stashed = json.loads(
+        (state_dir / "sum2.state.json").read_text())["last_compaction_stats"]
+    assert "compaction #3 (manual)" in stashed
+    assert "instructions: staged by monitor" in stashed
 
 
 def test_postcompact_notice_surfaces_skills_from_pre_state(tmp_path, monkeypatch,
@@ -1224,7 +1227,7 @@ def test_postcompact_notice_surfaces_skills_from_pre_state(tmp_path, monkeypatch
     msg = json.loads(capsys.readouterr().out)["systemMessage"]
     assert msg.startswith("autocompactor: compaction complete")
     assert "244k in context before compaction" in msg
-    assert "loaded skills (claude-api — reclaimable)" in msg
+    assert "skills (claude-api)" in msg
     assert "won't reclaim" in msg          # skill warning rendered
 
 
@@ -1264,8 +1267,12 @@ def test_postcompact_hook_reads_precompact_state(tmp_path):
     assert r.returncode == 0
     out = json.loads(r.stdout)
     assert "hookSpecificOutput" not in out        # PostCompact: notice only
-    assert out["systemMessage"].startswith("autocompactor: compaction complete")
+    # PreCompact stashed compaction_count=1 -> single combined notice carries it
+    assert out["systemMessage"].startswith("autocompactor: compaction #1 complete")
     assert "in context before compaction" in out["systemMessage"]
+    # Combined notice carries the preservation ledger (owner request (b)): the two
+    # compaction-time outputs are merged into this single PostCompact notice.
+    assert "preserved verbatim" in out["systemMessage"]
 
 
 def test_precompact_probe_arms_sentinel_when_enabled(tmp_path):

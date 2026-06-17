@@ -327,12 +327,16 @@ def _run_precompact(data: dict) -> int:
             arts, art_sizes, lossy_tokens=comp.get("assistant", 0))
         if ledger:
             summary += "\n" + ledger
+        # Stash the ledger (owner request (b): preserved-vs-summarized-vs-dropped)
+        # so the single combined PostCompact notice can render it after the redraw.
+        state2["pre_ledger"] = ledger or None
         # Stash for the PostCompact notice (fires after the redraw that
         # swallows the PreCompact systemMessage): the pre-compaction total +
         # the content-free composition dict, so the post notice can render
         # even if a fresh re-parse of the compacted transcript fails.
         state2["pre_compact_tokens"] = st.context_tokens
         state2["pre_comp"] = comp
+    state2["pre_trigger"] = trigger
     state2["last_compaction_stats"] = summary
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -354,14 +358,17 @@ def _run_precompact(data: dict) -> int:
         "artifacts_dropped": art_dropped,
         **(resolution.event_fields() if resolution else {}),
     })
+    # PreCompact emits NO user-facing systemMessage: it would be swallowed by the
+    # compaction redraw anyway, and the owner asked to combine the two
+    # compaction-time notices into one — the single notice is PostCompact's,
+    # which renders in the fresh post-compaction view. The summary built above is
+    # stashed (last_compaction_stats) + logged; customInstructions still emit.
     out = {}
     if instructions.strip():
         out["hookSpecificOutput"] = {
             "hookEventName": "PreCompact",
             "customInstructions": instructions,
         }
-    if summary:
-        out["systemMessage"] = "autocompactor: " + summary
     if not out:
         return 0
     print(json.dumps(out))
@@ -378,7 +385,8 @@ def _run_postcompact(data: dict) -> int:
     transcript = data.get("transcript_path") or ""
     trigger = data.get("trigger") or "auto"
 
-    pre_tokens, pre_comp, probe_sentinel = None, {}, None
+    pre_tokens, pre_comp, probe_sentinel, count, pre_ledger = (
+        None, {}, None, None, None)
     state_file = os.path.join(STATE_DIR, f"{session_id}.state.json")
     try:
         with open(state_file) as fh:
@@ -386,6 +394,8 @@ def _run_postcompact(data: dict) -> int:
         pre_tokens = s.get("pre_compact_tokens")
         pre_comp = s.get("pre_comp") or {}
         probe_sentinel = s.get("custominstr_probe")
+        count = s.get("compaction_count")
+        pre_ledger = s.get("pre_ledger")
     except Exception:
         pass
 
@@ -404,7 +414,7 @@ def _run_postcompact(data: dict) -> int:
     except Exception:
         pass
 
-    head = "compaction complete"
+    head = f"compaction #{count} complete" if count else "compaction complete"
     if pre_tokens and after_tokens and after_tokens < pre_tokens:
         head += (f" — context {policy._fmt_tokens(pre_tokens)} → "
                  f"{policy._fmt_tokens(after_tokens)} (reclaimed "
@@ -419,6 +429,11 @@ def _run_postcompact(data: dict) -> int:
     skill_warn = policy.skill_warning(comp) if comp else ""
     if skill_warn:
         lines.append("  " + skill_warn)
+    # Preservation ledger (owner request (b)): what this compaction kept verbatim
+    # on disk vs handed to the lossy summarizer vs dropped for budget. Stashed by
+    # PreCompact (content-free: counts / category names / token estimates only).
+    if pre_ledger:
+        lines.append(pre_ledger)
 
     # customInstructions live probe (armed via AUTOCOMPACTOR_CUSTOMINSTR_PROBE):
     # did the native summarizer honor our PreCompact customInstructions? Check

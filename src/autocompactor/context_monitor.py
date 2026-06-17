@@ -172,25 +172,22 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
+            # Terse, non-duplicating (see UserPromptSubmit): the full readout is
+            # in systemMessage below, which the user sees. Don't echo it here.
             "additionalContext": (
-                "[autocompactor] Optional early-compaction suggestion (" + reason
-                + "). Autocompactor advises compacting before the forced "
-                "auto-compact wall to keep cached-read cost low; the forced "
-                "limit is only imminent if the headroom above is small. Suggest "
-                "/compact only at a natural breakpoint; never interrupt mid-tool "
-                "work. When relaying this, use the token anchors above — do not "
-                "cite a single occupancy % or imply auto-compaction is about to "
-                "happen.")},
+                "[autocompactor] Optional early-compaction suggestion "
+                "(mid-burst): a /compact recommendation (token anchors + "
+                "composition) was just shown to the user via a system message. "
+                "Do NOT repeat those numbers — the user already sees them. "
+                "Suggest /compact only at a natural breakpoint; never interrupt "
+                "mid-tool work.")},
         # User-visible notice. additionalContext above is injected into the
         # model context only ("does not appear as a chat message in the
         # interface" per the hooks docs), so without this the mid-burst
         # recommendation never reaches the user — matching the prompt-time
         # path. Gated by dec.recommend + the rising-only cooldown, so it
         # surfaces at most once per burst, not per tool call.
-        "systemMessage": (
-            f"autocompactor: {reason}. Early, optional suggestion to keep "
-            "context lean — not an imminent limit. Tailored preservation "
-            "instructions are staged for whenever you compact."),
+        "systemMessage": f"autocompactor: {reason}",
     }))
     return 0
 
@@ -403,23 +400,21 @@ def _run() -> int:
     out = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
+            # Terse, non-duplicating: the full readout (anchors + composition)
+            # is already in systemMessage below, which IS shown to the user.
+            # Repeating it here makes me relay the same numbers in prose — the
+            # double-output the owner flagged. Keep this to an action directive.
             "additionalContext": (
-                "[autocompactor] Optional early-compaction suggestion (" + reason
-                + "). Autocompactor advises compacting well before Claude's "
-                "forced auto-compact to keep cached-read cost low; the forced "
-                "limit is NOT imminent unless the headroom above is small. If "
-                "the user's request starts a new task or this is a natural "
-                "breakpoint, briefly suggest they run /compact; otherwise do "
-                "not interrupt. When relaying this, use the token anchors above "
-                "— do not cite a single occupancy % or imply auto-compaction is "
-                "about to happen."
+                "[autocompactor] Optional early-compaction suggestion: a "
+                "/compact recommendation (token anchors + composition) was just "
+                "shown to the user via a system message. Do NOT repeat those "
+                "numbers in your reply — the user already sees them. If the "
+                "prompt starts a new task or this is a natural breakpoint, you "
+                "may briefly suggest /compact; otherwise continue and never "
+                "interrupt mid-tool work."
             ),
         },
-        "systemMessage": (
-            f"autocompactor: {reason}. Early, optional suggestion to keep "
-            "context lean — not an imminent limit. Tailored preservation "
-            "instructions are staged for whenever you compact."
-        ),
+        "systemMessage": f"autocompactor: {reason}",
     }
     print(json.dumps(out))
     return 0

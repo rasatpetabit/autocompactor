@@ -81,15 +81,28 @@ badly (claimed 400k ceiling / 336k trigger / env thresholds that were never set)
   wall are shown as *distinct* anchors with headroom, so "near the soft limit"
   can't be misread as "one turn from auto-compacting".
 - Two intelligence sub-displays ride under the readout / on the compaction
-  summary: **(a) composition** — `policy.composition_line(transcript_lib.`
-  `context_composition(st))` renders *≈ floor · tool output (stale%) ·
-  assistant · prompts*, per-category token estimates (chars/4) reconciled so
-  the parts always sum to the true total (residual `base`/"floor" absorbs
-  error); **(b) preservation ledger** — `artifacts.preservation_ledger()`
+  notice: **(a) composition** — `policy.composition_line(transcript_lib.`
+  `context_composition(st))` renders *≈ skills (names) · floor · summary ·
+  tool (stale%) · asst · prompts*, per-category token estimates (chars/4)
+  reconciled so the parts always sum to the true total (residual `base`/"floor"
+  absorbs error); **(b) preservation ledger** — `artifacts.preservation_ledger()`
   names what was extracted verbatim to disk vs left to the lossy summarizer vs
   dropped for budget (keep/drop comes from `artifacts.budget_plan()`, shared
   with `build_digest` so they can't disagree). Both surface on Claude and Pi;
   both are content-free (counts/token-estimates/category-names only).
+- **Recommendation readout is terse** (no fixed advisory trailer — the anchors
+  already convey urgency): prompt-time (`UserPromptSubmit`) and mid-burst
+  (`PostToolUse`) emit `systemMessage: "autocompactor: {readout}"` and a short,
+  non-duplicating `additionalContext` (Claude-only awareness, no numbers).
+- **One combined notice at compaction time.** Claude's compaction redraw
+  swallows any `PreCompact` `systemMessage`, so PreCompact now emits *only*
+  `customInstructions` (plus its telemetry/stash) — **no** user-facing message.
+  The single user-visible compaction notice is **`PostCompact`** (renders in the
+  fresh post-compaction view): `compaction #N complete — before→after (reclaimed
+  ~Z)` + composition (a) + preservation ledger (b) + (when armed) the
+  customInstructions probe verdict. PreCompact stashes `pre_ledger`/`pre_comp`/
+  `compaction_count`/`pre_tokens` so the post notice renders even if a fresh
+  re-parse of the compacted transcript fails.
 
 ### Runtime state + nightly
 

@@ -141,7 +141,7 @@ def composition_line(comp: dict) -> str:
         label = ", ".join(names[:3]) if names else "loaded"
         if len(names) > 3:
             label += f", +{len(names) - 3}"
-        parts.append(f"{_fmt_tokens(skills)} loaded skills ({label} — reclaimable)")
+        parts.append(f"{_fmt_tokens(skills)} skills ({label})")
     base = int(comp.get("base", 0) or 0)
     if base > 0:
         # Once big skill injections are pulled out, the residual really is just
@@ -149,19 +149,17 @@ def composition_line(comp: dict) -> str:
         parts.append(f"{_fmt_tokens(base)} {'system+tools' if skills else 'floor'}")
     summary = int(comp.get("summary", 0) or 0)
     if summary > 0:
-        parts.append(f"{_fmt_tokens(summary)} carried summary")
+        parts.append(f"{_fmt_tokens(summary)} summary")
     tool = int(comp.get("tool", 0) or 0)
     if tool > 0:
         sf = float(comp.get("tool_stale_frac", 0.0) or 0.0)
-        seg = f"{_fmt_tokens(tool)} tool output"
-        if sf >= 0.5:
-            seg += f" ({sf:.0%} stale, reclaimable)"
-        elif sf > 0:
+        seg = f"{_fmt_tokens(tool)} tool"
+        if sf > 0:
             seg += f" ({sf:.0%} stale)"
         parts.append(seg)
     asst = int(comp.get("assistant", 0) or 0)
     if asst > 0:
-        parts.append(f"{_fmt_tokens(asst)} assistant")
+        parts.append(f"{_fmt_tokens(asst)} asst")
     prompts = int(comp.get("prompts", 0) or 0)
     if prompts > 0:
         parts.append(f"{_fmt_tokens(prompts)} prompts")
