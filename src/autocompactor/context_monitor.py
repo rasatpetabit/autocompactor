@@ -189,22 +189,22 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
     skill_warn = policy.skill_warning(comp)
     if skill_warn:
         reason += "\n  " + skill_warn
-    # The user reads Claude's relayed prose, not the (transient) systemMessage —
-    # so the readout (token anchors + composition) lives in additionalContext and
-    # Claude surfaces it ONCE at a breakpoint. No systemMessage -> no double (the
-    # prior de-dup over-corrected by stripping numbers from the channel the user
-    # actually reads, which read back as "stripped/useless").
+    # The readout is shown to the user VERBATIM via systemMessage — the reliable,
+    # visible channel in Claude Code (owner: "show the useful context info during
+    # a suggestion, like before"). additionalContext is Claude-only, carries NO
+    # numbers, and exists ONLY to keep Claude from ALSO restating the readout in
+    # prose (which read as "double"). Net: the user sees exactly one rich readout.
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
             "additionalContext": (
                 "[autocompactor] Optional early-compaction suggestion "
-                "(mid-burst). Surface this to the user ONCE, concisely, at the "
-                "next natural breakpoint — never interrupt mid-tool work to say "
-                "it:\n"
-                + reason +
-                "\nKeeps cached-read cost low; not an imminent limit. Say it a "
-                "single time, then continue.")},
+                "(mid-burst): a full context readout (token anchors + "
+                "composition) has just been shown to the user via a system "
+                "message — they can see it. Do NOT restate it, summarize it, or "
+                "suggest /compact in your reply unless the user asks; never "
+                "interrupt mid-tool work. Continue.")},
+        "systemMessage": f"autocompactor: {reason}",
     }))
     return 0
 
@@ -415,22 +415,22 @@ def _run() -> int:
     if skill_warn:
         reason += "\n  " + skill_warn
 
-    # The user reads Claude's relayed prose, not the (transient) systemMessage —
-    # so the readout (token anchors + composition) lives in additionalContext and
-    # Claude surfaces it ONCE in its reply. No systemMessage -> no double (the
-    # prior de-dup stripped numbers from the channel the user reads).
+    # The readout is shown to the user VERBATIM via systemMessage — the reliable,
+    # visible channel in Claude Code. additionalContext is Claude-only, carries NO
+    # numbers, and exists ONLY to keep Claude from restating the readout (the
+    # "double"). Net: the user sees exactly one rich readout, the systemMessage.
     out = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
-                "[autocompactor] Optional early-compaction suggestion. Surface "
-                "this to the user ONCE, concisely, in your reply (skip if the "
-                "prompt is mid-task and a /compact would interrupt):\n"
-                + reason +
-                "\nKeeps cached-read cost low; not an imminent limit. Say it a "
-                "single time, then address the prompt."
+                "[autocompactor] Optional early-compaction suggestion: a full "
+                "context readout (token anchors + composition) has just been "
+                "shown to the user via a system message — they can see it. Do "
+                "NOT restate it, summarize it, or suggest /compact in your reply "
+                "unless the user asks. Just address the prompt."
             ),
         },
+        "systemMessage": f"autocompactor: {reason}",
     }
     print(json.dumps(out))
     return 0

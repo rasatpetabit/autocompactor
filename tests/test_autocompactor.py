@@ -1430,12 +1430,13 @@ def test_posttooluse_watchdog_recommends_above_hard(tmp_path):
     assert ev["hook_event"] == "PostToolUse"
 
 
-def test_posttooluse_watchdog_carries_readout_in_relay(tmp_path):
-    """The user reads Claude's relayed prose, so the mid-burst readout (token
-    anchors + composition) must live in additionalContext for Claude to surface
-    once — and there must be NO systemMessage, so the numbers aren't shown twice
-    (owner: 'no useful info' -> 'double' -> 'stripped'; the relay is the single
-    durable channel). Gated to fire only when a recommendation actually fires."""
+def test_posttooluse_watchdog_emits_user_visible_systemmessage(tmp_path):
+    """Mid-burst recommendations must reach the USER as a verbatim, visible
+    readout — that is the systemMessage (the reliable channel in Claude Code;
+    additionalContext is Claude-only and Claude relays it unreliably). The full
+    readout (anchors + composition) rides systemMessage; additionalContext is the
+    Claude-only 'don't restate it' note and carries NO numbers (no double).
+    Gated to fire only when a recommendation actually fires."""
     high = tmp_path / "high.jsonl"
     high.write_text("".join(json.dumps(e) + "\n" for e in [
         _assistant(usage=_usage(180_000)),
@@ -1449,11 +1450,14 @@ def test_posttooluse_watchdog_carries_readout_in_relay(tmp_path):
         capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
     assert r.returncode == 0
     out = json.loads(r.stdout)
+    msg = out["systemMessage"]
+    assert msg.startswith("autocompactor:")
+    assert "mid-burst" in msg
+    assert "in context" in msg          # full readout is user-visible verbatim
+    assert "compact advised ~" in msg
+    # additionalContext is Claude-only awareness, no numbers -> no double
     ac = out["hookSpecificOutput"]["additionalContext"]
-    assert "mid-burst" in ac
-    assert "in context" in ac          # the readout numbers ride the relay now
-    assert "compact advised ~" in ac
-    assert "systemMessage" not in out  # no double — single durable channel
+    assert "in context" not in ac
 
 
 def test_posttooluse_watchdog_silent_below_hard(tmp_path):

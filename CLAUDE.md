@@ -96,18 +96,20 @@ badly (claimed 400k ceiling / 336k trigger / env thresholds that were never set)
   dropped for budget (keep/drop comes from `artifacts.budget_plan()`, shared
   with `build_digest` so they can't disagree). Both surface on Claude and Pi;
   both are content-free (counts/token-estimates/category-names only).
-- **Recommendation readout rides the relay, not `systemMessage`.** The owner
-  reads Claude's *relayed prose*, not the (transient) `systemMessage` line, so
-  the readout (anchors + composition) is carried in `additionalContext` with an
-  instruction for Claude to surface it to the user ONCE, concisely, at a natural
-  breakpoint — and prompt-time (`UserPromptSubmit`) + mid-burst (`PostToolUse`)
-  emit **no `systemMessage`**, so the numbers are never shown twice. History:
-  numbers in additionalContext-only read as "no useful info" (Claude relayed
-  inconsistently) → numbers in both channels read as "double" → numbers in
-  systemMessage-only read as "stripped/useless" (the user doesn't watch that
-  line). The relay-with-explicit-surface-instruction is the single durable
-  channel. (The compaction-time **PostCompact** notice still uses `systemMessage`
-  — different surface, no competing relay, see above.)
+- **Recommendation readout rides `systemMessage` (verbatim); `additionalContext`
+  stays silent.** Claude Code renders a hook's `systemMessage` to the user
+  verbatim — it is the reliable, visible channel — so the full readout (anchors
+  + composition + skill warning) is emitted there by both `UserPromptSubmit` and
+  `PostToolUse`. `additionalContext` is Claude-only, carries **no numbers**, and
+  exists only to tell Claude the readout is already shown to the user and NOT to
+  restate it — so the user sees exactly one rich readout, never a duplicate.
+  History (each over-correction caused the next complaint): additionalContext-
+  only → "no useful info" (Claude relayed inconsistently); both channels with
+  numbers → "double"; systemMessage dropped, numbers in additionalContext-relay
+  → "stripped/useless" (the relay is unreliable — Claude paraphrases/omits). The
+  landing point: numbers in `systemMessage` (reliable + verbatim), Claude told to
+  stay quiet. Do NOT move the readout back into `additionalContext`. (The
+  compaction-time **PostCompact** notice also uses `systemMessage`, below.)
 - **One combined notice at compaction time.** Claude's compaction redraw
   swallows any `PreCompact` `systemMessage`, so PreCompact now emits *only*
   `customInstructions` (plus its telemetry/stash) — **no** user-facing message.

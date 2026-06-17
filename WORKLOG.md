@@ -2,6 +2,27 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-17 — REVERT: restore systemMessage readout for compact suggestions
+
+The previous entry's "move readout to additionalContext, drop systemMessage" was
+WRONG and the owner caught it: they still didn't see the useful readout during a
+compact suggestion. Root cause of the misfire: `additionalContext` is Claude-only
+and Claude relays it unreliably (paraphrases/omits), so the rich readout vanished
+from the user's view. The reliable, visible channel in Claude Code is the hook's
+`systemMessage` (rendered verbatim) — which is exactly what the owner saw "before".
+
+Fix: both recommendation sites (`UserPromptSubmit` `_run`, `PostToolUse`
+`_run_posttooluse`) again emit the full readout in `systemMessage`;
+`additionalContext` is now a numbers-free Claude-only note that says "the readout
+is already shown to the user — do NOT restate it" (prevents the earlier "double").
+Net: exactly one rich, verbatim readout the user reliably sees.
+
+Decision rule for future edits: readout → systemMessage (verbatim, reliable);
+additionalContext → silent awareness only, never the data channel. Do not "de-dup"
+by moving numbers out of systemMessage again. Tests reverted to match (monitor
+schema {hookSpecificOutput, systemMessage}; readout asserted in systemMessage).
+180 pytest + smokes + --verify PASS.
+
 ## 2026-06-17 — readout to relay (fix "stripped warning") + statusbar buffer bug
 
 Two display bugs the owner hit after the prior de-dup + an acw change.
