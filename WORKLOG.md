@@ -2,6 +2,26 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-17 — mid-burst recommendation now user-visible (systemMessage)
+
+Owner: "not showing any useful info at all now." Root cause (systematic-
+debugging, code-confirmed): the live monitor's rich readout (anchors +
+composition + skill warning) was emitted via `additionalContext`, which the
+hooks docs say "does not appear as a chat message in the interface" — it reaches
+the MODEL, not the user. The user only ever saw it via my prose relay; terse
+prose → nothing. Asymmetry found: the prompt-time path (UserPromptSubmit) ALREADY
+emits a user-visible `systemMessage` (context_monitor ~405); the mid-burst
+watchdog (PostToolUse) emitted `additionalContext` only. On tool-burst stretches
+(few prompts) the user saw nothing.
+
+Fix (owner: "on /compact recommendation", "prompt-time + mid-burst"): the
+PostToolUse emit now also carries a top-level `systemMessage` mirroring the
+prompt-time wording. Already `dec.recommend`-gated (returns early below the hard
+line / on cooldown) and rising-only-cooldown gated, so it surfaces at most once
+per burst, not per tool call — no every-turn noise, respects "quiet below
+~100k". additionalContext retained (Claude still gets the relay framing).
+172 pytest (+1), smoke + Pi smoke, --verify PASS.
+
 ## 2026-06-17 — skeptical regression re-eval + targeted remediation
 
 - Trigger: owner reported 4 regressions (mistimed fires, useless display, "not

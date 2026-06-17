@@ -169,16 +169,29 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
     skill_warn = policy.skill_warning(comp)
     if skill_warn:
         reason += "\n  " + skill_warn
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PostToolUse",
-        "additionalContext": (
-            "[autocompactor] Optional early-compaction suggestion (" + reason
-            + "). Autocompactor advises compacting before the forced "
-            "auto-compact wall to keep cached-read cost low; the forced limit "
-            "is only imminent if the headroom above is small. Suggest /compact "
-            "only at a natural breakpoint; never interrupt mid-tool work. When "
-            "relaying this, use the token anchors above — do not cite a single "
-            "occupancy % or imply auto-compaction is about to happen.")}}))
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": (
+                "[autocompactor] Optional early-compaction suggestion (" + reason
+                + "). Autocompactor advises compacting before the forced "
+                "auto-compact wall to keep cached-read cost low; the forced "
+                "limit is only imminent if the headroom above is small. Suggest "
+                "/compact only at a natural breakpoint; never interrupt mid-tool "
+                "work. When relaying this, use the token anchors above — do not "
+                "cite a single occupancy % or imply auto-compaction is about to "
+                "happen.")},
+        # User-visible notice. additionalContext above is injected into the
+        # model context only ("does not appear as a chat message in the
+        # interface" per the hooks docs), so without this the mid-burst
+        # recommendation never reaches the user — matching the prompt-time
+        # path. Gated by dec.recommend + the rising-only cooldown, so it
+        # surfaces at most once per burst, not per tool call.
+        "systemMessage": (
+            f"autocompactor: {reason}. Early, optional suggestion to keep "
+            "context lean — not an imminent limit. Tailored preservation "
+            "instructions are staged for whenever you compact."),
+    }))
     return 0
 
 

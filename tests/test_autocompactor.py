@@ -1362,6 +1362,32 @@ def test_posttooluse_watchdog_recommends_above_hard(tmp_path):
     assert ev["hook_event"] == "PostToolUse"
 
 
+def test_posttooluse_watchdog_emits_user_visible_systemmessage(tmp_path):
+    """Mid-burst recommendations must reach the USER, not just Claude.
+    additionalContext is injected into the model context only (per the hooks
+    docs it 'does not appear as a chat message in the interface'); a
+    user-visible notice requires systemMessage. The prompt-time path already
+    emits one — the mid-burst watchdog must too (owner: 'not showing any useful
+    info'). Gated to fire only when a recommendation actually fires."""
+    high = tmp_path / "high.jsonl"
+    high.write_text("".join(json.dumps(e) + "\n" for e in [
+        _assistant(usage=_usage(180_000)),
+        _tool_result("x"),
+    ]))
+    env = _hook_env(tmp_path)
+    env["AUTOCOMPACTOR_WINDOW"] = "200000"  # hard line = 130k; 180k > it
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=_ptu_payload("ptu-sm", str(high)),
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert out.get("systemMessage", "").startswith("autocompactor:")
+    assert "mid-burst" in out["systemMessage"]
+    # The Claude-only additionalContext channel must remain too.
+    assert "additionalContext" in out["hookSpecificOutput"]
+
+
 def test_posttooluse_watchdog_silent_below_hard(tmp_path):
     """Below the hard line the watchdog must be cheap AND quiet: no output,
     and no per-tool telemetry spam (no monitor_eval row written)."""
