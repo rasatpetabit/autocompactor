@@ -56,20 +56,26 @@ badly (claimed 400k ceiling / 336k trigger / env thresholds that were never set)
 - Claude native ceiling uses `CLAUDE_CODE_AUTO_COMPACT_WINDOW`; the resolver
   treats it as a **cap** (`effective = min(configured WINDOW, native_ceiling)`,
   Claude-only — see `window_resolver.resolve_window`), never a source. Live
-  `settings.json` env: `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000`,
-  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=90` (native auto fires near 90% × 300k ≈ 270k).
+  `settings.json` env (verified 2026-06-17): `CLAUDE_CODE_AUTO_COMPACT_WINDOW=900000`,
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=90` (native auto fires near 90% × 900k ≈ 810k).
+  This is owner-intended (was 300k in earlier revisions of this doc). Because the
+  resolver caps `effective = min(WINDOW 200000, 900000) = 200000`, the autocompactor's
+  advisory behavior is UNCHANGED by the larger ceiling — only the "forced
+  auto-compact" readout anchor (~810k) and `~/.claude/statusline.js` budget move.
 - **No `AUTOCOMPACTOR_*` env keys are set** on this host — `config.json` + code
   defaults govern. Live tuning (`config.json` `claude` section + top-level):
   `WINDOW=200000`, `HARD_PCT=0.55` (claude; hard line ≈ 110k), `COOLDOWN=15000`,
   `STALE_FRAC=0.90`, `POST_FLOOR=70000`, `MIN_SAVINGS=30000`, `PROFILE=economy`.
   Top-level `SOFT_PCT` is retired — the window-aware `target(W)` curve governs
   the soft line (≈100k at a 200k window).
-- The 200k configured target is **deliberately aggressive** (well below the
-  ~270k native trigger): compact early, keep context low. This is intended, not
+- The 200k configured target is **deliberately aggressive** (far below the
+  ~810k native trigger): compact early, keep context low. This is intended, not
   a misconfiguration — do not "fix" the effective window up to the ceiling.
-- Measured native auto-trigger (nightly 2026-06-17, 300k ceiling): **median
-  ~254k, max ~280k**. If you tighten toward native, keep `HARD_PCT` comfortably
-  ahead of the measured trigger, not the ceiling.
+- Measured native auto-trigger **under the old 300k ceiling** (nightly 2026-06-17):
+  median ~254k, max ~280k — now historical; at the live 900k ceiling native auto
+  is expected ~810k (90%), not yet re-measured. Either way the 200k-capped target
+  fires far earlier, so this only matters if you tighten `HARD_PCT` toward native
+  — and then track the *measured* trigger for the current ceiling, not the ceiling.
 - Tuning lives in `config.json` (+ gitignored `config.local.json`); runtime
   env (`AUTOCOMPACTOR_*`) overrides if present. The installer never seeds
   `AUTOCOMPACTOR_*` tuning as env.
