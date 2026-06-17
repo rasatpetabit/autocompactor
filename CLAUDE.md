@@ -111,6 +111,21 @@ badly (claimed 400k ceiling / 336k trigger / env thresholds that were never set)
 - Nightly reports under `~/.claude/autocompactor/reports/`; the watches line
   reports trigger drift, rapid-refill breaker suspects, and native
   microcompaction markers. Cron: `03:30`, marker `# autocompactor-nightly`.
+- **Auto warning-coverage metric (WI-1 corrected).** nightly's "auto-compactions
+  arrived unwarned" check is epoch-filtered (only the current `native_ceiling`
+  config — old-config autos at e.g. ~133k are excluded), cold-start-separated (a
+  native auto that fires before any `monitor_eval` ran in the session is
+  *unwarnable*, reported as a note, not a miss), and session-level (warned if ANY
+  prior recommended eval, not just within the last precompact interval). It only
+  alarms with ≥4 measurable autos. Live current-epoch coverage is ~86% warned;
+  the old metric's "6/10 unwarned" was an artifact of mixing epochs + the
+  per-interval window. See `nightly_eval.auto_warning_coverage()` + WORKLOG.
+- **`LOG_WATCHDOG_SKIPS` (off by default).** PostToolUse logs a `monitor_eval`
+  only on the recommend branch, so its non-recommends are invisible. Set
+  `AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS=1` (env or `config.json`) to log cheap
+  `watchdog_skip` evals (no full `analyze()`) for at/above-soft non-recommends, so
+  PostToolUse coverage becomes measurable for a day. Leave off in steady state —
+  it logs per qualifying tool call.
 - Claude floor cuts are owner-approval gated and audited in `HANDOFF.md`; each
   `10k` off the `~53k` interactive floor is roughly `~10%` of all cache-read
   volume.

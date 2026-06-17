@@ -94,6 +94,44 @@ def day_events(hours: float = 26.0) -> list:
     return out
 
 
+def auto_warning_coverage(pre: list, mon: list, live_ceiling=None) -> dict:
+    """Of the CURRENT-config native autos the hooks saw, how many got an advance
+    recommendation? Returns counts dict.
+
+    WI-1 corrections vs the naive metric (which over-reported "unwarned"):
+      * epoch filter — count only autos from the current native_ceiling config.
+        Old-config autos (e.g. native auto at ~133k under a former ~150k window)
+        and pre-instrumentation events (native_ceiling=None) are excluded; an
+        auto recorded at ~133k is not a native auto at a 300k ceiling.
+      * cold-start separation — a native auto that fires before ANY monitor_eval
+        ran in the session (resumed/cold-start) is unwarnable, not a miss.
+      * session-level warned — warned if ANY prior recommended eval exists in the
+        session, not just within the immediately-preceding precompact interval
+        (which marked repeat/rapid-refill autos unwarned even when warned earlier).
+    """
+    autos = [e for e in pre if e.get("trigger") == "auto"]
+    epoch = live_ceiling
+    if epoch is None:                      # fall back to the modal observed ceiling
+        ceilings = [e.get("native_ceiling") for e in autos if e.get("native_ceiling")]
+        epoch = max(set(ceilings), key=ceilings.count) if ceilings else None
+    cur = [e for e in autos
+           if epoch is None or e.get("native_ceiling") == epoch]
+    warned = unwarned = cold_start = 0
+    for ev in cur:
+        sid, ts = ev.get("session_id"), ev.get("ts", "")
+        prior = [m for m in mon
+                 if m.get("session_id") == sid and m.get("ts", "") < ts]
+        if not prior:
+            cold_start += 1
+        elif any(m.get("recommended") for m in prior):
+            warned += 1
+        else:
+            unwarned += 1
+    return {"warned": warned, "unwarned": unwarned, "cold_start": cold_start,
+            "off_epoch": len(autos) - len(cur), "epoch": epoch,
+            "auto_seen": len(autos)}
+
+
 def prune(directory: str, days: int = RETENTION_DAYS) -> int:
     cutoff = time.time() - days * 86400
     removed = 0
@@ -273,25 +311,28 @@ def main() -> int:
             "are under-firing (upgrade regression? ensure the PostToolUse "
             "watchdog is installed: python3 src/install.py)")
 
-    # The purpose metric: of the auto-compactions the hooks saw, how many
-    # got an advance recommendation in the same session beforehand?
-    auto_events = [e for e in pre if e.get("trigger") == "auto"]
-    unwarned = 0
-    for ev in auto_events:
-        sid, ts = ev.get("session_id"), ev.get("ts", "")
-        prior_pre = [p.get("ts", "") for p in pre
-                     if p.get("session_id") == sid and p.get("ts", "") < ts]
-        floor = max(prior_pre) if prior_pre else ""
-        warned = any(m.get("session_id") == sid and m.get("recommended")
-                     and floor < m.get("ts", "") < ts for m in mon)
-        if not warned:
-            unwarned += 1
-    if auto_events and unwarned > len(auto_events) * 0.5:
+    # The purpose metric (WI-1 corrected): of the CURRENT-config native autos the
+    # hooks saw, how many got an advance recommendation earlier in the session?
+    # Epoch-filtered, cold-start-separated, session-level — see
+    # auto_warning_coverage(). The naive per-interval metric over-reported
+    # "unwarned" by mixing config epochs and counting unwarnable cold-starts.
+    cov = auto_warning_coverage(
+        pre, mon, window_resolver.native_ceiling_from_settings())
+    unwarned = cov["unwarned"]
+    measurable = cov["warned"] + unwarned        # cold-starts are unwarnable
+    # Min sample of 4 avoids alarming on tiny n (one cold/odd auto = "100%").
+    if measurable >= 4 and unwarned > measurable * 0.5:
         issues.append(
-            f"{unwarned}/{len(auto_events)} auto-compactions arrived with "
-            "no advance recommendation — thresholds/signals are not "
-            "engaging before the trigger; inspect occupancy_seen in "
-            "--events and per-signal precision")
+            f"{unwarned}/{measurable} current-config auto-compactions arrived "
+            "with no advance recommendation — thresholds/signals are not "
+            "engaging before the trigger; inspect --events and per-signal "
+            "precision")
+    if cov["cold_start"] or cov["off_epoch"]:
+        notes.append(
+            f"auto coverage: {cov['warned']} warned / {unwarned} unwarned"
+            f" (epoch ceiling {cov['epoch']}); {cov['cold_start']} cold-start"
+            " (fired before any hook eval — unwarnable),"
+            f" {cov['off_epoch']} off-epoch auto(s) excluded")
 
     # 4. native-microcompaction rollout watch. The cleared-content marker
     # is statsig-gated upstream (off for this account as of 2026-06); if
@@ -336,7 +377,9 @@ def main() -> int:
         "manual_n": manual_n,
         "monitor_evals": len(mon), "recommendations": recos,
         "precompact_events": len(pre), "reinjects": len(rei),
-        "auto_seen_by_hooks": len(auto_events), "auto_unwarned": unwarned,
+        "auto_seen_by_hooks": cov["auto_seen"], "auto_unwarned": unwarned,
+        "auto_warned": cov["warned"], "auto_cold_start": cov["cold_start"],
+        "auto_off_epoch": cov["off_epoch"], "auto_epoch_ceiling": cov["epoch"],
         "hook_coverage": (round(hook_coverage, 3)
                           if hook_coverage is not None else None),
         "hard_tokens": hard_tokens, "ceiling": ceiling,
@@ -364,6 +407,11 @@ def main() -> int:
               + (f"  (hook coverage {hook_coverage:.0%} of "
                   f"{compactions_n} compactions)" if hook_coverage is not None
                   else ""))
+    if cov["auto_seen"]:
+        md.append(
+            f"- auto warning coverage (epoch {cov['epoch']}): "
+            f"{cov['warned']} warned, {unwarned} unwarned, "
+            f"{cov['cold_start']} cold-start, {cov['off_epoch']} off-epoch")
     if expected_trigger:
         md.append(f"- watches: expected trigger ~{expected_trigger:,.0f}t, "
                   f"breaker suspects {breaker_suspects}, "

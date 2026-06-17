@@ -2,6 +2,35 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-17 — WI-1 fix: corrected auto-coverage metric + coverage instrumentation
+
+Owner chose "metric fix + instrumentation" for the WI-1 finding (the unwarned
+alarm was a measurement artifact, not late thresholds).
+
+Metric (nightly_eval.py) — new `auto_warning_coverage(pre, mon, live_ceiling)`:
+(i) epoch-filter autos to the current `native_ceiling` (drops old-config ~133k
+autos + None pre-instrumentation events); (ii) cold-start separation — a native
+auto with zero prior monitor_evals (resumed/cold-start) is unwarnable, reported
+as a note not a miss; (iii) session-level warned (any prior recommended eval),
+replacing the per-interval window that marked repeat autos unwarned. Alarm now
+needs ≥4 measurable autos (kills the n=1→100% false alarm). Record gains
+auto_warned/auto_cold_start/auto_off_epoch/auto_epoch_ceiling; md adds a coverage
+line.
+
+Instrumentation (context_monitor.py): UserPromptSubmit monitor_eval now carries
+`hook_event="UserPromptSubmit"` (was absent → "?" in telemetry). New gated flag
+`AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS` (off by default): logs cheap `watchdog_skip`
+evals for PostToolUse at/above-soft non-recommends (no full analyze()), so
+PostToolUse coverage becomes measurable without per-tool spam.
+
+Tests +5 (180 total): 3 unit tests for auto_warning_coverage (epoch/cold-start/
+session-level), hook_event tag, gated skip-log on/off. Note for test authors:
+`_hook_env` is hermetic (AUTOCOMPACTOR_CONFIG="") → balanced defaults, band
+soft=110k/hard=130k at a 200k window (NOT the economy/target-curve 100k/110k).
+smoke + Pi smoke + --verify PASS. AGENTS.md baseline 164→180.
+
+No monitor/threshold behavior change — advise-only timing is unchanged.
+
 ## 2026-06-17 — WI-1 root cause: "mid-burst lateness" is mostly a metric artifact
 
 Diagnostic only (systematic-debugging Phase 1; NO fix this turn). Investigated the

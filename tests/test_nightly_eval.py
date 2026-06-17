@@ -102,3 +102,65 @@ def test_nightly_reports_learned_tiers_and_native_cap_blocks(tmp_path, monkeypat
     md = (reports / f"nightly-{datetime.date.today().isoformat()}.md").read_text()
     assert "512k: sessions 1, compactions 1" in md
     assert "native ceiling blocks learned window: 1 session(s)" in md
+
+
+def _auto(sid, ts, ceiling):
+    return {"type": "precompact", "trigger": "auto", "session_id": sid,
+            "ts": ts, "native_ceiling": ceiling}
+
+
+def _eval(sid, ts, recommended):
+    return {"type": "monitor_eval", "session_id": sid, "ts": ts,
+            "recommended": recommended}
+
+
+def test_auto_warning_coverage_epoch_filter_and_classification():
+    """WI-1: epoch filter (old-config/None autos excluded), cold-start separated
+    (unwarnable), session-level warned, genuine miss = unwarned."""
+    pre = [
+        _auto("s1", "2026-06-17T10:00:00", 300000),   # warned
+        _auto("s2", "2026-06-17T11:00:00", 300000),   # cold-start (no eval)
+        _auto("s3", "2026-06-17T12:00:00", 300000),   # unwarned (eval, no rec)
+        _auto("s4", "2026-06-17T09:00:00", None),      # off-epoch (old config)
+        _auto("s5", "2026-06-17T09:30:00", 150000),    # off-epoch (old ceiling)
+    ]
+    mon = [
+        _eval("s1", "2026-06-17T09:55:00", True),
+        _eval("s3", "2026-06-17T11:55:00", False),
+    ]
+    cov = nightly_eval.auto_warning_coverage(pre, mon, live_ceiling=300000)
+    assert cov["epoch"] == 300000
+    assert cov["warned"] == 1            # s1
+    assert cov["unwarned"] == 1          # s3
+    assert cov["cold_start"] == 1        # s2
+    assert cov["off_epoch"] == 2         # s4, s5
+    assert cov["auto_seen"] == 5
+
+
+def test_auto_warning_coverage_is_session_level():
+    """The naive per-interval metric marked the 2nd auto unwarned because the
+    only recommendation fell before the 1st precompact. Session-level counts
+    both autos warned."""
+    pre = [
+        _auto("s1", "2026-06-17T10:00:00", 300000),
+        _auto("s1", "2026-06-17T12:00:00", 300000),
+    ]
+    mon = [_eval("s1", "2026-06-17T09:30:00", True)]
+    cov = nightly_eval.auto_warning_coverage(pre, mon, live_ceiling=300000)
+    assert cov["warned"] == 2
+    assert cov["unwarned"] == 0
+    assert cov["cold_start"] == 0
+
+
+def test_auto_warning_coverage_epoch_falls_back_to_modal():
+    """With no live ceiling, the epoch is the modal observed native_ceiling;
+    minority-ceiling autos are treated as off-epoch."""
+    pre = [
+        _auto("a", "t1", 300000),
+        _auto("b", "t2", 300000),
+        _auto("c", "t3", 150000),       # minority -> off-epoch
+    ]
+    cov = nightly_eval.auto_warning_coverage(pre, [], live_ceiling=None)
+    assert cov["epoch"] == 300000
+    assert cov["off_epoch"] == 1
+    assert cov["cold_start"] == 2       # the two 300k autos, no evals

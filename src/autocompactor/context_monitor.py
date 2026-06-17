@@ -115,6 +115,26 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
                            last_reco_tokens=state.get("last_reco_tokens", -10**9)),
         pcfg)
     if not dec.recommend:
+        # Gated (off by default) coverage telemetry. PostToolUse otherwise logs
+        # a monitor_eval ONLY on the recommend branch below, so non-recommends
+        # are invisible and PostToolUse warning-coverage can't be measured (WI-1
+        # measurement gap). When AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS is set, log a
+        # CHEAP skip eval (no full analyze()) for evals at/above the soft line —
+        # enough for nightly to compute true coverage without per-tool spam.
+        if config_lib.cfg.str("LOG_WATCHDOG_SKIPS", default="0") not in (
+                "", "0", "false", "False", "no", "off"):
+            soft_t, _ = policy.advisory_band(pcfg)
+            if ctx >= soft_t:
+                log_event({
+                    "type": "monitor_eval", "session_id": session_id,
+                    "context_tokens": ctx, "occupancy": round(occupancy, 4),
+                    "signals": [], "phase": None,
+                    "est_reclaim": dec.est_reclaim, "tail_parse": True,
+                    "recommended": False,
+                    "suppressed_by_cooldown": dec.suppressed_by_cooldown,
+                    "hook_event": "PostToolUse", "watchdog_skip": True,
+                    **resolution.event_fields(),
+                })
         return 0   # below the hard line / nothing worth reclaiming / on cooldown
 
     # At/above the hard line mid-burst: do ONE bounded full analyze for the
@@ -369,6 +389,7 @@ def _run() -> int:
         "tail_parse": bool(offset),
         "recommended": recommend and not suppressed,
         "suppressed_by_cooldown": recommend and suppressed,
+        "hook_event": "UserPromptSubmit",
         **resolution.event_fields(),
     })
     if not recommend or suppressed:

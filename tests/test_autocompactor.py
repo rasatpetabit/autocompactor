@@ -1497,3 +1497,64 @@ def test_posttooluse_watchdog_defers_when_reinject_pending(tmp_path):
         capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
     assert r.returncode == 0
     assert r.stdout == ""   # quiet: reinject owns the next prompt
+
+
+def test_userpromptsubmit_eval_tagged_hook_event(tmp_path):
+    """WI-1 instrumentation: UserPromptSubmit monitor_eval rows must carry
+    hook_event=UserPromptSubmit so coverage metrics can tell them apart from
+    PostToolUse (previously this field was absent -> '?' in telemetry)."""
+    high = tmp_path / "ups.jsonl"
+    high.write_text("".join(json.dumps(e) + "\n" for e in [
+        _assistant(usage=_usage(180_000)),
+        _tool_result("x"),
+    ]))
+    env = _hook_env(tmp_path)
+    env["AUTOCOMPACTOR_WINDOW"] = "200000"
+    payload = json.dumps({
+        "session_id": "ups1", "cwd": "/tmp", "transcript_path": str(high),
+        "hook_event_name": "UserPromptSubmit", "prompt": "carry on"})
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=payload, capture_output=True, text=True,
+        env=env, cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
+                     / "events.jsonl").read_text().splitlines()[-1])
+    assert ev["hook_event"] == "UserPromptSubmit"
+
+
+def test_posttooluse_skip_log_gated(tmp_path):
+    """WI-1 instrumentation: PostToolUse otherwise logs a monitor_eval ONLY on
+    the recommend branch, so non-recommends are invisible and coverage can't be
+    measured. With AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS set, an at/above-soft
+    non-recommend logs a cheap skip eval; off by default it stays silent."""
+    # 120k: in the hermetic-env band (soft 110k, hard 130k) -> above soft so the
+    # skip-log is eligible, below hard so PostToolUse does NOT recommend.
+    mid = tmp_path / "mid.jsonl"
+    mid.write_text("".join(json.dumps(e) + "\n" for e in [
+        _assistant(usage=_usage(120_000)),
+        _tool_result("x"),
+    ]))
+    statsf = (tmp_path / ".claude" / "autocompactor" / "stats" / "events.jsonl")
+
+    # OFF (default): no watchdog_skip telemetry
+    env = _hook_env(tmp_path)
+    env["AUTOCOMPACTOR_WINDOW"] = "200000"
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=_ptu_payload("sk1", str(mid)),
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    assert (not statsf.exists()) or "watchdog_skip" not in statsf.read_text()
+
+    # ON: a cheap skip eval is logged, tagged + recommended False
+    env["AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS"] = "1"
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=_ptu_payload("sk2", str(mid)),
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    ev = json.loads(statsf.read_text().splitlines()[-1])
+    assert ev["watchdog_skip"] is True
+    assert ev["hook_event"] == "PostToolUse"
+    assert ev["recommended"] is False
