@@ -61,7 +61,13 @@ badly (claimed 400k ceiling / 336k trigger / env thresholds that were never set)
   This is owner-intended (was 300k in earlier revisions of this doc). Because the
   resolver caps `effective = min(WINDOW 200000, 900000) = 200000`, the autocompactor's
   advisory behavior is UNCHANGED by the larger ceiling — only the "forced
-  auto-compact" readout anchor (~810k) and `~/.claude/statusline.js` budget move.
+  auto-compact" native-wall anchor (~810k) moves. The `~/.claude/statusline.js`
+  ctx meter is now anchored to that same `effective` target (`min(CTX_TARGET
+  200000, acw) = 200000`), so it is INVARIANT to the ceiling (fixed 2026-06-18;
+  previously it rescaled `remaining_percentage` against the raw `acw`, so the
+  same 150k context swung 50%→17% when the ceiling went 300k→900k — the
+  "statusbar context calculation is completely wrong now" report). Override the
+  target with `CLAUDE_STATUSLINE_CTX_TARGET` if `config.json` `WINDOW` changes.
 - **No `AUTOCOMPACTOR_*` env keys are set** on this host — `config.json` + code
   defaults govern. Live tuning (`config.json` `claude` section + top-level):
   `WINDOW=200000`, `HARD_PCT=0.55` (claude; hard line ≈ 110k), `COOLDOWN=15000`,

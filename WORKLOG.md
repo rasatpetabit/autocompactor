@@ -782,3 +782,26 @@ probe path removed this session.
 Verify: 189 pytest (+6: epoch_auto_trigger x2, session-anchored breaker,
 realized_reductions x3), smoke_test.sh green, install --verify/--status OK,
 nightly dry-run PASS (epoch coverage + realized-reduction lines present).
+
+## 2026-06-18 — statusline ctx meter fixed + canonical repo reconciled & moved
+
+Closes the carry-forward item "~/.claude/statusline.js context calc completely
+wrong now". Root cause (confirmed via reproduction, not guessed): the ctx meter
+rescaled context_window.remaining_percentage against the raw
+CLAUDE_CODE_AUTO_COMPACT_WINDOW, so identical context swung ~50%->~17% when the
+native wall moved 300k->900k; it also read a non-existent
+context_window.total_tokens field (masked only because its 1M fallback equalled
+the true window). Fix: anchor occupancy to the effective target =
+min(CLAUDE_STATUSLINE_CTX_TARGET 200000, acw) and read absolute usage from
+used_percentage x context_window_size (fallback total_input_tokens) — the same
+"effective = min(WINDOW, ceiling)" anchor as window_resolver, so the meter is now
+invariant to the native wall. 8/8 regression cases.
+
+This CLAUDE.md edit documents the meter<->effective-target coupling. The fix
+itself ships in the separate claude-statusline repo, which I reconciled (the
+deployed ~/.claude/statusline.js had drifted ~6 weeks ahead: tmux machinery +
+buffer-math-v2 + this fix) and relocated /srv/dev/claude-statusline ->
+/srv/dev/ras/claude-statusline (commit f8b70c1 there; tests/statusline_ctx_test.sh
+added; README reconciled). The stale handbook inventory.yaml local_clones entry
+is left to self-heal on the next bin/scan.sh (generated file in a separate repo
+that also has a user-owned dirty WORKLOG). Nothing pushed in either repo.
