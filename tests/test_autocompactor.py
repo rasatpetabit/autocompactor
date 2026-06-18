@@ -872,6 +872,47 @@ def test_monitor_cooldown_deadlock_breaks_on_shrink(tmp_path):
     assert healed["last_reco_tokens"] != 494339
 
 
+def test_burst_recommend_does_not_starve_prompt_readout(tmp_path):
+    """Regression for the 'literally nothing' report: a PostToolUse burst
+    recommend must NOT suppress the very next UserPromptSubmit readout.
+
+    Pre-fix the burst path wrote the shared last_reco_tokens=ctx, so the prompt
+    eval at the same ctx fell inside the token-distance cooldown window and went
+    mute — starving the one moment the user reliably looks. The burst path now
+    gates on its own last_milestone_tokens and leaves last_reco_tokens to the
+    prompt path."""
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    state_dir.mkdir(parents=True)
+    env = _hook_env(tmp_path)
+    env["AUTOCOMPACTOR_WINDOW"] = "100000"   # fixture ctx -> high occupancy
+    env["AUTOCOMPACTOR_HARD_PCT"] = "0.5"
+    env["AUTOCOMPACTOR_POST_FLOOR"] = "0"
+    env["AUTOCOMPACTOR_MIN_SAVINGS"] = "0"
+    env["AUTOCOMPACTOR_COOLDOWN"] = "20000"
+    common = {"session_id": "starve", "cwd": "/tmp",
+              "transcript_path": os.path.join(FIX, "rich_transcript.jsonl")}
+
+    # 1) a burst eval at high occupancy stages a recommendation.
+    b = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=json.dumps({**common, "hook_event_name": "PostToolUse",
+                          "tool_name": "Bash"}),
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
+    assert b.returncode == 0
+    burst_state = json.loads((state_dir / "starve.state.json").read_text())
+    # The burst path advanced its OWN ladder but never claimed the prompt anchor.
+    assert "last_reco_tokens" not in burst_state
+
+    # 2) the user's next prompt at the same ctx must still surface a readout.
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=json.dumps({**common, "hook_event_name": "UserPromptSubmit",
+                          "prompt": "now plan the website redesign"}),
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    assert "early-compaction suggestion" in r.stdout  # not starved by the burst
+
+
 def test_observe_only_signals_never_gate(tmp_path):
     """Anti-predictive signals (error_resolved et al.) keep flowing into
     telemetry but must not appear in — or justify — a recommendation."""

@@ -209,8 +209,13 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
     observe = observe_only()
     gating = [desc for name, desc in sig_pairs if name not in observe]
 
-    state.update({"last_reco_tokens": ctx,
-                  "last_milestone_tokens": milestone,
+    # Do NOT write last_reco_tokens here. That key is the UserPromptSubmit
+    # token-distance cooldown anchor; the burst path has its own gate
+    # (last_milestone_tokens). Writing it from the burst path bumped the shared
+    # anchor to ~current ctx, so every prompt-time eval landed inside the 15k
+    # cooldown window and the user's prompt-time readout was starved — the
+    # "literally nothing" report. Burst and prompt cadences are now decoupled.
+    state.update({"last_milestone_tokens": milestone,
                   "staged_instructions":
                       build_preservation_instructions(st, data.get("cwd") or "")})
     try:

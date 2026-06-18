@@ -2,6 +2,35 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-18 — FIX: "literally nothing" visible output (cooldown starvation)
+
+Root cause of the recurring "autocompactor shows no output across several Claude
+invocations" report: the PostToolUse burst path wrote the SHARED
+`last_reco_tokens`, which is the UserPromptSubmit token-distance cooldown anchor
+(`suppressed = 0 ≤ ctx − last_reco_tokens < COOLDOWN`, 15k). Burst recommends kept
+bumping it to ~current ctx, so every prompt-time eval landed inside the 15k window
+and was suppressed — measured live: 3/3 prompt evals at 126k/160k/162k all
+`suppressed_by_cooldown`. The prompt-time `systemMessage` (the one channel the user
+reliably sees) thus never fired; only mid-burst PostToolUse readouts emitted, which
+the user isn't watching. A 2.1.181 binary audit (claude-code-guide) confirmed the
+`systemMessage` channel renders fine — dedicated `hook_system_message` path for
+UserPromptSubmit/PostToolUse, persisted in `hook_success` attachments — so it was
+gated away, not broken.
+
+Fix (one line): the burst path no longer writes `last_reco_tokens`; it gates on its
+own `last_milestone_tokens`. Burst and prompt cadences are now decoupled, so the
+prompt-time readout fires whenever ctx is over the line. Owner confirmed live (saw
+`autocompactor: 253k in context · compact advised…` at prompt submit). 196 pytest +
+smoke green; regression `test_burst_recommend_does_not_starve_prompt_readout` added.
+
+Rejected mid-session: a statusline-verdict indicator (prototyped, rendered, owner-
+approved, then pulled). It edits the separately-versioned `~/.claude/statusline.js`
+(a copy of /srv/dev/ras/claude-statusline, already drifted) and leaked a
+contradictory `⚡ compact 234k` token into OTHER agents' status lines while their ctx
+meter read 0%. Owner: "use something else which doesn't step on statusline."
+statusline.js fully reverted to its prior state (no autocompactor traces; the
+pre-existing deployed-vs-repo divergence is untouched and owner-managed).
+
 ## 2026-06-18 — FIX: burst watchdog silent across the danger band + spike guard
 
 Report: "autocompactor doesn't appear to be running" in a live session in

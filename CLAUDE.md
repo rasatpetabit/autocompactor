@@ -144,6 +144,27 @@ badly (claimed 400k ceiling / 336k trigger / env thresholds that were never set)
   `spike_suspected`. Set `AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS=1` to log cheap
   `watchdog_skip` evals on at/above-soft non-recommends so PostToolUse coverage is
   measurable for a day.
+- **Prompt-time readout decoupled from the burst cooldown (2026-06-18, the "I see
+  literally nothing across several invocations" report).** `last_reco_tokens` is the
+  `UserPromptSubmit` token-distance cooldown anchor (`suppressed = 0 ≤ ctx −
+  last_reco_tokens < COOLDOWN`, 15k). The `PostToolUse` burst path used to **also**
+  write it (`state.update(last_reco_tokens=ctx, …)`) even though the burst already
+  gates on its own `last_milestone_tokens`. So every mid-burst recommend bumped the
+  shared anchor to ~current ctx, and the user's next `UserPromptSubmit` — the one
+  moment they reliably look — landed inside the 15k window and was suppressed *every
+  time* (measured live: 3/3 prompt evals at 126k/160k/162k all
+  `suppressed_by_cooldown`). Combined with mid-burst readouts the user isn't watching,
+  the net was zero visible output. **The `systemMessage` channel itself was never
+  broken** — a 2.1.181-binary audit confirmed a dedicated `hook_system_message` render
+  path for UserPromptSubmit/PostToolUse, and the readout persists in `hook_success`
+  attachments — it was simply being *gated away* at the only moment the user looks.
+  Fix: the burst path no longer writes `last_reco_tokens`, so burst and prompt cadences
+  are independent and the prompt-time readout fires whenever ctx is over the line.
+  Confirmed live (owner saw `autocompactor: 253k in context · compact advised…` at
+  prompt submit). Regression: `test_burst_recommend_does_not_starve_prompt_readout`.
+  (A statusline-indicator variant was prototyped and rejected — it stepped on the
+  separately-versioned `~/.claude/statusline.js` and leaked a contradictory token into
+  other agents' status lines.)
 - **Single compaction notice — first-of-either, one-shot (owner Q1).** Neither
   `PreCompact` nor `PostCompact` can carry a user-visible message: **CC 2.1.x
   rejects a `PreCompact` `hookSpecificOutput` outright** (PreCompact/PostCompact
