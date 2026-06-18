@@ -109,16 +109,35 @@ badly (claimed 400k ceiling / 336k trigger / env thresholds that were never set)
   → "stripped/useless" (the relay is unreliable — Claude paraphrases/omits). The
   landing point: numbers in `systemMessage` (reliable + verbatim), Claude told to
   stay quiet. Do NOT move the readout back into `additionalContext`. (The
-  compaction-time **PostCompact** notice also uses `systemMessage`, below.)
-- **One combined notice at compaction time.** Claude's compaction redraw
-  swallows any `PreCompact` `systemMessage`, so PreCompact now emits *only*
-  `customInstructions` (plus its telemetry/stash) — **no** user-facing message.
-  The single user-visible compaction notice is **`PostCompact`** (renders in the
-  fresh post-compaction view): `compaction #N complete — before→after (reclaimed
-  ~Z)` + composition (a) + preservation ledger (b) + (when armed) the
-  customInstructions probe verdict. PreCompact stashes `pre_ledger`/`pre_comp`/
-  `compaction_count`/`pre_tokens` so the post notice renders even if a fresh
-  re-parse of the compacted transcript fails.
+  compaction notice rides the same `systemMessage` channel, below.)
+- **Escalating-milestone mid-burst readout (owner Q2: "escalating thresholds
+  only").** During an autonomous burst that produces no `UserPromptSubmit`, the
+  `PostToolUse` watchdog is the only chance to surface a readout — but emitting one
+  per qualifying tool call reads as spam. So `_run_posttooluse` emits the readout
+  only on the **first cross of the soft line**, the **first cross of the hard
+  line**, and each further **+`BURST_MILESTONE_STEP`** (default `100k`) above hard.
+  `last_milestone_tokens` is the highest milestone already announced this burst; it
+  resets to `0` when context drops back below soft (a fresh burst can re-announce).
+  Set `AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS=1` to log cheap `watchdog_skip` evals on
+  at/above-soft non-recommends so PostToolUse coverage is measurable for a day.
+- **Single compaction notice — first-of-either, one-shot (owner Q1).** Neither
+  `PreCompact` nor `PostCompact` can carry a user-visible message: **CC 2.1.x
+  rejects a `PreCompact` `hookSpecificOutput` outright** (PreCompact/PostCompact
+  are not in the hook-output union — emitting one fails JSON-output validation and
+  the user sees an "Invalid input" error), and a `PostCompact` `systemMessage` is
+  **swallowed by the compaction redraw**. So `PreCompact` now does its work
+  *silently* (backup + `customInstructions` *stash in state*, never emitted —
+  Claude does not act on the field anyway — + artifact extraction) and `PostCompact`
+  is **telemetry-only**. PreCompact instead **arms `pending_notice`** (alongside
+  `pending_reinject`) and stashes `pre_ledger`/`pre_comp`/`compaction_count`/
+  `pre_compact_tokens`. The single user-visible notice — `compaction #N complete —
+  before→after (reclaimed ~Z)` + composition (a) + preservation ledger (b) —
+  rides whichever fires first of the **next `UserPromptSubmit` or next
+  `PostToolUse`** (via `policy.compaction_notice()` on `systemMessage`, which
+  self-prefixes `autocompactor: `), then disarms. The `UserPromptSubmit` arm also
+  carries the reinject digest in `additionalContext`; the `PostToolUse` arm matters
+  during bursts that produce no prompt (G2/G3). (`customInstructions` is still a
+  legitimate, acted-on channel on **Pi**, via `pi_bridge.py` — Claude-only no-op.)
 
 ### Runtime state + nightly
 

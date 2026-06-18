@@ -47,14 +47,6 @@ from autocompactor.stats import log_event, run_hook  # noqa: E402
 STATE_DIR = os.path.expanduser("~/.claude/autocompactor")
 BACKUP_DIR = os.path.join(STATE_DIR, "backups")
 
-# Falsifiable live probe (owner: "live-confirm before removing") for whether
-# Claude Code's native summarizer honors our PreCompact customInstructions at
-# all — documentary evidence says it's a no-op there, but we don't remove the
-# emit until a real compaction confirms it. Off unless
-# AUTOCOMPACTOR_CUSTOMINSTR_PROBE=1. The sentinel is a fixed constant
-# (content-free: it carries no transcript text), so telemetry stays clean.
-CUSTOMINSTR_PROBE_SENTINEL = "AUTOCOMPACTOR-CUSTOMINSTR-PROBE-7Q2X9K"
-
 
 def _env(name: str, default: str = "") -> str:
     """LLM knobs resolve env-first, then config.local.json (gitignored).
@@ -248,16 +240,12 @@ def _run_precompact(data: dict) -> int:
         # Pi bridge so the two paths can't drift).
         instructions = append_artifact_restatement(instructions, arts)
 
-    # Live probe: when armed, append a unique sentinel directive so PostCompact
-    # can verify (against compact_summary) whether the summarizer honored these
-    # instructions. No effect on normal operation when off.
-    probe_armed = _env("AUTOCOMPACTOR_CUSTOMINSTR_PROBE") == "1"
-    if probe_armed and instructions.strip():
-        instructions += (
-            "\n\nIMPORTANT: Output this exact marker as the very first line of "
-            "your summary, on its own line: " + CUSTOMINSTR_PROBE_SENTINEL)
-
-    # mark for one-shot re-injection + leave a stats line for the digest
+    # mark for one-shot re-injection + the one-shot combined notice, and leave a
+    # stats line for the digest. pending_notice arms BOTH the next
+    # UserPromptSubmit and the next PostToolUse (whichever fires first renders the
+    # single compaction notice via systemMessage, then disarms — owner: "first of
+    # either, one-shot"). pending_reinject separately arms the digest re-injection
+    # on the next UserPromptSubmit.
     state_file = os.path.join(STATE_DIR, f"{session_id}.state.json")
     try:
         with open(state_file) as fh:
@@ -265,8 +253,8 @@ def _run_precompact(data: dict) -> int:
     except Exception:
         state2 = {}
     state2["pending_reinject"] = True
+    state2["pending_notice"] = True
     state2["compaction_count"] = state2.get("compaction_count", 0) + 1
-    state2["custominstr_probe"] = CUSTOMINSTR_PROBE_SENTINEL if probe_armed else None
 
     # Quick analysis summary: shown to the user before the compaction runs
     # (systemMessage) and reused as the post-compaction digest header.
@@ -358,44 +346,41 @@ def _run_precompact(data: dict) -> int:
         "artifacts_dropped": art_dropped,
         **(resolution.event_fields() if resolution else {}),
     })
-    # PreCompact emits NO user-facing systemMessage: it would be swallowed by the
-    # compaction redraw anyway, and the owner asked to combine the two
-    # compaction-time notices into one — the single notice is PostCompact's,
-    # which renders in the fresh post-compaction view. The summary built above is
-    # stashed (last_compaction_stats) + logged; customInstructions still emit.
-    out = {}
-    if instructions.strip():
-        out["hookSpecificOutput"] = {
-            "hookEventName": "PreCompact",
-            "customInstructions": instructions,
-        }
-    if not out:
-        return 0
-    print(json.dumps(out))
+    # PreCompact emits NOTHING on Claude Code (G1): the CC 2.1.x hook-output schema
+    # has no "PreCompact" hookSpecificOutput member and no customInstructions field
+    # — emitting either makes CC reject the WHOLE output ("Hook JSON output
+    # validation failed — Invalid input"), so there is no usable user-facing or
+    # instruction channel here. The phase-aware `instructions` are therefore a
+    # no-op on Claude; the founding goal + preservation survive via mechanical
+    # artifact extraction (saved above) and the one-shot reinject DIGEST on the
+    # next UserPromptSubmit. The single user-visible compaction notice rides the
+    # next UserPromptSubmit / PostToolUse via the pending_notice flag stashed above.
+    # (Pi actuates differently and legitimately uses customInstructions via
+    # pi_bridge.py — this no-op is Claude-only.) `instructions` is still built,
+    # logged (instr_chars), and reused by Pi; it just isn't emitted here.
     return 0
 
 
 def _run_postcompact(data: dict) -> int:
-    """Post-compaction, user-visible notice. The PreCompact systemMessage is
-    swallowed by the compaction redraw; PostCompact renders in the fresh view.
-    Shows before->after context + the composition + skill warning so the user
-    sees what compaction did — and what it could NOT reclaim (loaded skills).
-    Content-free (token counts / category names only), never raises."""
+    """Post-compaction TELEMETRY ONLY — no user-facing output.
+
+    Claude's compaction redraw swallows any systemMessage emitted here too (G2),
+    so the single user-visible notice is deferred to the next UserPromptSubmit /
+    PostToolUse (via the pending_notice flag PreCompact stashed). This hook just
+    records the realized post-compaction size when the freshly-compacted
+    transcript is parseable, closing the reclaim telemetry gap (WI-B). Content-
+    free (token counts / category names only), never raises."""
     session_id = data.get("session_id") or "unknown"
     transcript = data.get("transcript_path") or ""
     trigger = data.get("trigger") or "auto"
 
-    pre_tokens, pre_comp, probe_sentinel, count, pre_ledger = (
-        None, {}, None, None, None)
+    pre_tokens, pre_comp = None, {}
     state_file = os.path.join(STATE_DIR, f"{session_id}.state.json")
     try:
         with open(state_file) as fh:
             s = json.load(fh)
         pre_tokens = s.get("pre_compact_tokens")
         pre_comp = s.get("pre_comp") or {}
-        probe_sentinel = s.get("custominstr_probe")
-        count = s.get("compaction_count")
-        pre_ledger = s.get("pre_ledger")
     except Exception:
         pass
 
@@ -414,55 +399,11 @@ def _run_postcompact(data: dict) -> int:
     except Exception:
         pass
 
-    head = f"compaction #{count} complete" if count else "compaction complete"
-    if pre_tokens and after_tokens and after_tokens < pre_tokens:
-        head += (f" — context {policy._fmt_tokens(pre_tokens)} → "
-                 f"{policy._fmt_tokens(after_tokens)} (reclaimed "
-                 f"~{policy._fmt_tokens(pre_tokens - after_tokens)})")
-    elif pre_tokens:
-        head += (f" — {policy._fmt_tokens(pre_tokens)} in context "
-                 "before compaction")
-    lines = ["autocompactor: " + head]
-    comp_line = policy.composition_line(comp) if comp else ""
-    if comp_line:
-        lines.append("  └ " + comp_line)
-    skill_warn = policy.skill_warning(comp) if comp else ""
-    if skill_warn:
-        lines.append("  " + skill_warn)
-    # Preservation ledger (owner request (b)): what this compaction kept verbatim
-    # on disk vs handed to the lossy summarizer vs dropped for budget. Stashed by
-    # PreCompact (content-free: counts / category names / token estimates only).
-    if pre_ledger:
-        lines.append(pre_ledger)
-
-    # customInstructions live probe (armed via AUTOCOMPACTOR_CUSTOMINSTR_PROBE):
-    # did the native summarizer honor our PreCompact customInstructions? Check
-    # the generated summary (compact_summary input) for the sentinel.
-    probe_verdict = None
-    if probe_sentinel:
-        honored = probe_sentinel in (data.get("compact_summary") or "")
-        probe_verdict = "honored" if honored else "no-op"
-        lines.append(
-            "  customInstructions probe: "
-            + ("HONORED — summarizer used our instructions"
-               if honored else
-               "NO-OP — sentinel absent; Claude Code ignored customInstructions"))
-        # one-shot: clear so a later compaction doesn't replay a stale verdict
-        try:
-            s["custominstr_probe"] = None
-            with open(state_file, "w") as fh:
-                json.dump(s, fh)
-        except Exception:
-            pass
-
     log_event({
         "type": "postcompact", "session_id": session_id, "trigger": trigger,
         "pre_tokens": pre_tokens, "after_tokens": after_tokens,
-        "composition": comp or None, "custominstr_probe": probe_verdict,
+        "composition": comp or None,
     })
-    # Suppress a contentless "compaction complete" with nothing to add.
-    if len(lines) > 1 or pre_tokens:
-        print(json.dumps({"systemMessage": "\n".join(lines)}))
     return 0
 
 

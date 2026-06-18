@@ -84,6 +84,29 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
             state = json.load(fh)
     except Exception:
         pass
+    # First-of-either one-shot compaction notice (owner Q1: "first of either,
+    # one-shot"): after a compaction, BOTH the next UserPromptSubmit and the next
+    # PostToolUse are armed; whichever fires first renders the single notice via
+    # systemMessage, then disarms. This is the PostToolUse arm — it matters during
+    # autonomous bursts that produce no UserPromptSubmit, where the compaction
+    # would otherwise leave no visible trace at all (G2/G3).
+    if state.get("pending_notice"):
+        notice = policy.compaction_notice(
+            count=state.get("compaction_count"),
+            pre_tokens=state.get("pre_compact_tokens"),
+            after_tokens=ctx,
+            comp=state.get("pre_comp") or {},
+            pre_ledger=state.get("pre_ledger"))
+        state["pending_notice"] = False
+        state["last_milestone_tokens"] = 0   # fresh context -> reset burst ladder
+        try:
+            with open(state_file, "w") as fh:
+                json.dump(state, fh)
+        except OSError:
+            pass
+        if notice:                            # already prefixed "autocompactor: "
+            print(json.dumps({"systemMessage": notice}))
+        return 0
     # A compaction just happened -> let the next UserPromptSubmit own the
     # reinject; don't speak on the first post-compaction tool result.
     if state.get("pending_reinject"):
@@ -105,37 +128,49 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
     window = resolution.effective_window
     occupancy = ctx / window
 
-    # Unified decision rule (docs/masterplan/simplify-compaction-model/spec.md).
-    # gating=False here: mid-burst, only the hard line should speak — the
-    # soft+signal path waits for a human UserPromptSubmit boundary so we
-    # don't nag on every tool result.
+    # Escalating-milestone readout (owner Q2: "escalating thresholds only"): emit
+    # the mid-burst readout on the FIRST cross of the soft line, the FIRST cross of
+    # the hard line, and each further +BURST_MILESTONE_STEP above hard — NOT once
+    # per qualifying tool call (which read as spam). `last_milestone_tokens` is the
+    # highest milestone already announced this burst; it resets to 0 when context
+    # drops back below soft (a fresh burst can re-announce).
     pcfg = policy.resolve_policy_config("claude", int(window))
-    dec = policy.decide(
-        policy.PolicyInput(ctx, int(window), gating=False,
-                           last_reco_tokens=state.get("last_reco_tokens", -10**9)),
-        pcfg)
-    if not dec.recommend:
-        # Gated (off by default) coverage telemetry. PostToolUse otherwise logs
-        # a monitor_eval ONLY on the recommend branch below, so non-recommends
-        # are invisible and PostToolUse warning-coverage can't be measured (WI-1
-        # measurement gap). When AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS is set, log a
-        # CHEAP skip eval (no full analyze()) for evals at/above the soft line —
-        # enough for nightly to compute true coverage without per-tool spam.
+    soft_t, hard_t = policy.advisory_band(pcfg)
+    step = int(config_lib.cfg.float("BURST_MILESTONE_STEP",
+                                    default=100_000)) or 100_000
+    last_milestone = int(state.get("last_milestone_tokens", 0) or 0)
+    est_reclaim = int(ctx - pcfg.post_floor)
+    if ctx < soft_t:
+        if last_milestone:                    # dropped below soft -> reset ladder
+            state["last_milestone_tokens"] = 0
+            try:
+                with open(state_file, "w") as fh:
+                    json.dump(state, fh)
+            except OSError:
+                pass
+        return 0
+    milestone = soft_t if ctx < hard_t else hard_t + ((ctx - hard_t) // step) * step
+    crossed = milestone > last_milestone and est_reclaim >= pcfg.min_savings
+    if not crossed:
+        # Gated (off by default) coverage telemetry. PostToolUse otherwise logs a
+        # monitor_eval ONLY on the recommend branch below, so non-recommends are
+        # invisible and PostToolUse warning-coverage can't be measured (WI-1 gap).
+        # When AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS is set, log a CHEAP skip eval (no
+        # full analyze()) at/above the soft line — enough for nightly to compute
+        # true coverage without per-tool spam. (We are already >= soft_t here.)
         if config_lib.cfg.str("LOG_WATCHDOG_SKIPS", default="0") not in (
                 "", "0", "false", "False", "no", "off"):
-            soft_t, _ = policy.advisory_band(pcfg)
-            if ctx >= soft_t:
-                log_event({
-                    "type": "monitor_eval", "session_id": session_id,
-                    "context_tokens": ctx, "occupancy": round(occupancy, 4),
-                    "signals": [], "phase": None,
-                    "est_reclaim": dec.est_reclaim, "tail_parse": True,
-                    "recommended": False,
-                    "suppressed_by_cooldown": dec.suppressed_by_cooldown,
-                    "hook_event": "PostToolUse", "watchdog_skip": True,
-                    **resolution.event_fields(),
-                })
-        return 0   # below the hard line / nothing worth reclaiming / on cooldown
+            log_event({
+                "type": "monitor_eval", "session_id": session_id,
+                "context_tokens": ctx, "occupancy": round(occupancy, 4),
+                "signals": [], "phase": None,
+                "est_reclaim": est_reclaim, "tail_parse": True,
+                "recommended": False,
+                "suppressed_by_cooldown": milestone <= last_milestone,
+                "hook_event": "PostToolUse", "watchdog_skip": True,
+                **resolution.event_fields(),
+            })
+        return 0   # below soft / milestone already announced / nothing to reclaim
 
     # At/above the hard line mid-burst: do ONE bounded full analyze for the
     # reason + signals, stage instructions, and surface a recommendation.
@@ -149,7 +184,6 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
         pass
     st = analyze(transcript, start_offset=offset)
     stale_frac_thr = config_lib.cfg.float("STALE_FRAC", default=0.50)
-    soft_t, hard_t = policy.advisory_band(pcfg)
     sig_pairs = active_signals(st, prompt="", window=window,
                                stale_frac_thr=stale_frac_thr,
                                hard_tokens=hard_t)
@@ -158,6 +192,7 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
     gating = [desc for name, desc in sig_pairs if name not in observe]
 
     state.update({"last_reco_tokens": ctx,
+                  "last_milestone_tokens": milestone,
                   "staged_instructions":
                       build_preservation_instructions(st, data.get("cwd") or "")})
     try:
@@ -172,7 +207,7 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
         "type": "monitor_eval", "session_id": session_id,
         "context_tokens": ctx, "occupancy": round(occupancy, 4),
         "signals": signals, "stale_frac": round(stale_frac, 4),
-        "phase": detect_phase(st), "est_reclaim": dec.est_reclaim,
+        "phase": detect_phase(st), "est_reclaim": est_reclaim,
         "tail_parse": bool(offset), "recommended": True,
         "suppressed_by_cooldown": False, "hook_event": "PostToolUse",
         **resolution.event_fields(),
@@ -226,7 +261,6 @@ def _run() -> int:
 
     configured_window = config_lib.cfg.float("WINDOW", default=200_000)
     window = configured_window
-    hard = config_lib.cfg.float("HARD_PCT", default=0.65)
     cooldown = config_lib.cfg.float("COOLDOWN", default=25_000)
     stale_frac_thr = config_lib.cfg.float("STALE_FRAC", default=0.50)
     post_floor = config_lib.cfg.float("POST_FLOOR", default=70_000)
@@ -313,24 +347,56 @@ def _run() -> int:
     pcfg = policy.resolve_policy_config("claude", int(window))
     soft = pcfg.soft
 
-    # One-shot artifact re-injection on the first prompt after a compaction.
-    if state.get("pending_reinject"):
-        arts = artifacts.load(session_id)
-        budget = int(config_lib.cfg.float("ARTIFACT_BUDGET", default=1500))
-        digest = artifacts.build_digest(
-            arts, budget_tokens=budget,
-            stats_line=state.get("last_compaction_stats", ""))
-        state["pending_reinject"] = False
-        state["last_reco_tokens"] = -10**9   # fresh context, reset cooldown
-        state_dirty = True
+    # First post-compaction prompt: two one-shots may both be armed here — the
+    # single combined notice (pending_notice, owner Q1 "first of either") rendered
+    # via systemMessage, and the artifact-digest re-injection (pending_reinject)
+    # via additionalContext. Render whichever are armed in ONE output, then return.
+    if state.get("pending_notice") or state.get("pending_reinject"):
+        out_obj = {}
+        if state.get("pending_notice"):
+            notice = policy.compaction_notice(
+                count=state.get("compaction_count"),
+                pre_tokens=state.get("pre_compact_tokens"),
+                after_tokens=st.context_tokens,
+                comp=state.get("pre_comp") or {},
+                pre_ledger=state.get("pre_ledger"))
+            state["pending_notice"] = False
+            state["last_milestone_tokens"] = 0   # fresh context -> reset ladder
+            state_dirty = True
+            if notice:                           # already "autocompactor: "-prefixed
+                out_obj["systemMessage"] = notice
+        if state.get("pending_reinject"):
+            arts = artifacts.load(session_id)
+            budget = int(config_lib.cfg.float("ARTIFACT_BUDGET", default=1500))
+            digest = artifacts.build_digest(
+                arts, budget_tokens=budget,
+                stats_line=state.get("last_compaction_stats", ""))
+            state["pending_reinject"] = False
+            state["last_reco_tokens"] = -10**9   # fresh context, reset cooldown
+            state_dirty = True
+            if digest:
+                ev = {"type": "reinject", "session_id": session_id,
+                      "digest_tokens": len(digest) // 4,
+                      "artifact_keys": list(arts.keys())}
+                # Realized post-compaction floor: this is the first prompt after a
+                # compaction, so st.context_tokens is the compacted size. Stamp it
+                # (and the pre-compaction size PreCompact stashed) ONLY when it is
+                # genuinely a reduction — if the transcript reads stale here, omit
+                # the fields and let the nightly precompact→eval join reconstruct
+                # it rather than log a wrong number. Content-free; never raises.
+                pre_ct = state.get("pre_compact_tokens")
+                after_ct = st.context_tokens
+                if (isinstance(pre_ct, (int, float)) and after_ct
+                        and after_ct < pre_ct):
+                    ev["pre_tokens"] = int(pre_ct)
+                    ev["after_tokens"] = int(after_ct)
+                log_event(ev)
+                out_obj["hookSpecificOutput"] = {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": digest}
         _save_state()
-        if digest:
-            log_event({"type": "reinject", "session_id": session_id,
-                       "digest_tokens": len(digest) // 4,
-                       "artifact_keys": list(arts.keys())})
-            print(json.dumps({"hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": digest}}))
+        if out_obj:
+            print(json.dumps(out_obj))
         return 0
     # Continuous artifact extraction: merge-persist so mechanically extracted
     # facts survive compactions that arrive with no warning (autocompact,
@@ -368,7 +434,7 @@ def _run() -> int:
     observe = observe_only()
     gating = [desc for name, desc in sig_pairs if name not in observe]
 
-    recommend = (occupancy >= hard or (occupancy >= soft and bool(gating)))
+    recommend = (occupancy >= pcfg.hard or (occupancy >= soft and bool(gating)))
     # Min-savings guard: a compaction can only reclaim what sits above the
     # post-compaction floor (system prompt + tools + CLAUDE.md + summary —
     # measured ~69k median on this machine). Below that margin a compaction

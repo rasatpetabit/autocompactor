@@ -15,8 +15,11 @@ Each run:
   3. Aggregates live hook telemetry (--events equivalent).
   4. Health checks: hooks firing at all, forced compactions beating the
      hard nag, ceiling violations, dead signals, CLI version changes,
-     auto-trigger drift vs. the ~0.675*ceiling estimate, rapid-refill-
-     breaker symptoms, native-microcompaction rollout markers.
+     auto-trigger drift vs. the native_auto_estimate (ceiling × pct) —
+     epoch-sourced from precompact events and deferred when <3 current-epoch
+     autos are in the window — session-anchored rapid-refill-breaker symptoms,
+     realized post-compaction reduction, native-microcompaction rollout
+     markers.
   5. Appends one summary line to reports/nightly_history.jsonl and writes
      a human-readable reports/nightly-YYYY-MM-DD.md.
   6. Prunes artifacts/backups/reports older than RETENTION_DAYS.
@@ -47,12 +50,15 @@ SETTINGS = os.path.expanduser("~/.claude/settings.json")
 RETENTION_DAYS = 30
 CEILING_SLACK = 40_000   # auto-compact may overshoot the ceiling mid-turn
 # Where native autocompact actually fires = native_ceiling ×
-# CLAUDE_AUTOCOMPACT_PCT_OVERRIDE% (default 90%). On this host: 300k × 90% =
-# 270k, matching the measured median (~254k / max ~280k, 2026-06-17). The old
-# `0.675 × min(ceiling, 200k)` model hard-predicted 135k regardless of the
-# real ceiling and so phantom-flagged every session as "drifted"; it is
-# retired in favour of window_resolver.native_auto_estimate().
-TRIGGER_DEVIATION = 25_000   # |auto-pre median - estimate| worth a note
+# CLAUDE_AUTOCOMPACT_PCT_OVERRIDE% (default 90%), via
+# window_resolver.native_auto_estimate(). The host ceiling moved 300k→900k on
+# 2026-06-17, so the estimate moved ~270k→~810k; the old `0.675 × min(ceiling,
+# 200k)` model hard-predicted 135k regardless of the real ceiling and
+# phantom-flagged every session as "drifted" — retired. The drift watch is
+# sourced from the EPOCH-STAMPED precompact events (epoch_auto_trigger()) and
+# defers when <3 current-epoch autos are in the 1-day window (a fresh ceiling
+# change leaves the window holding mostly old-epoch transcripts).
+TRIGGER_DEVIATION = 25_000   # |current-epoch auto median - estimate| worth a note
 MICRO_MARKER = "[Old tool result content cleared]"   # native microcompaction
 
 
@@ -130,6 +136,56 @@ def auto_warning_coverage(pre: list, mon: list, live_ceiling=None) -> dict:
     return {"warned": warned, "unwarned": unwarned, "cold_start": cold_start,
             "off_epoch": len(autos) - len(cur), "epoch": epoch,
             "auto_seen": len(autos)}
+
+
+def epoch_auto_trigger(pre: list, epoch) -> tuple:
+    """Median pre-compaction size of CURRENT-epoch native autos, sourced from
+    the epoch-stamped `precompact` events (each carries `trigger` +
+    `native_ceiling`). Returns (median_or_None, n).
+
+    The drift watch must read from events, not backtest sessions: backtest
+    `before` values can't epoch-stamp, so a 1-day window that still contains
+    old-epoch transcripts mixes ceiling regimes and would phantom-flag a
+    "drift" on every ceiling change. Mirrors the epoch selection in
+    auto_warning_coverage().
+    """
+    cur = [e.get("context_tokens") for e in pre
+           if e.get("trigger") == "auto" and e.get("context_tokens")
+           and (epoch is None or e.get("native_ceiling") == epoch)]
+    if not cur:
+        return None, 0
+    return statistics.median(cur), len(cur)
+
+
+def realized_reductions(pre: list, mon: list) -> dict:
+    """Realized post-compaction floor, reconstructed from existing telemetry.
+
+    PostCompact can't log `after_tokens` — at hook time the freshly compacted
+    transcript has no post-compaction usage figure yet. The floor only becomes
+    observable on the first post-compaction model turn. So pair each
+    `precompact` event with the first later same-session `monitor_eval` whose
+    `context_tokens` is smaller; that smaller figure is the realized after-size
+    and `before - after` is the reclaim. Content-free (token counts only)."""
+    by_sess = {}
+    for m in mon:
+        if m.get("context_tokens"):
+            by_sess.setdefault(m.get("session_id"), []).append(m)
+    for lst in by_sess.values():
+        lst.sort(key=lambda m: m.get("ts", ""))
+    reclaims = []
+    for ev in pre:
+        before = ev.get("context_tokens")
+        if not before:
+            continue
+        sid, ts = ev.get("session_id"), ev.get("ts", "")
+        after = next((m["context_tokens"] for m in by_sess.get(sid, [])
+                      if m.get("ts", "") > ts
+                      and m["context_tokens"] < before), None)
+        if after:
+            reclaims.append(before - after)
+    return {"reclaim_n": len(reclaims),
+            "reclaim_median": (round(statistics.median(reclaims))
+                               if reclaims else None)}
 
 
 def prune(directory: str, days: int = RETENTION_DAYS) -> int:
@@ -227,6 +283,7 @@ def main() -> int:
             if s.get("native_ceiling_blocks_learned_window"):
                 native_ceiling_blocked_sessions += 1
             autos_n = 0
+            sess_autos = []
             for c in s.get("compactions", []):
                 compactions_n += 1
                 td["compactions"] += 1
@@ -235,16 +292,22 @@ def main() -> int:
                 if c.get("trigger") == "auto":
                     auto_pre.append(c["before"])
                     td["auto_pre"].append(c["before"])
+                    sess_autos.append(c["before"])
                     autos_n += 1
                 elif c.get("trigger") == "manual":
                     manual_n += 1
             # breaker symptom: repeated auto-compactions, then context
             # climbing well past the trigger with no further compaction —
             # the upstream rapid-refill breaker may have disabled
-            # autocompact for the rest of the session
+            # autocompact for the rest of the session. Anchored to the
+            # session's OWN observed auto-trigger (max auto-pre this session),
+            # not the global ceiling estimate — so it stays valid across a
+            # ceiling change and never phantom-flags an old-epoch session whose
+            # real trigger sat far below the current ~ceiling×pct estimate.
             post_peak = s.get("post_last_compaction_peak")
-            if (expected_trigger and autos_n >= 2 and post_peak
-                    and post_peak > expected_trigger + CEILING_SLACK):
+            sess_auto = max(sess_autos) if sess_autos else None
+            if (autos_n >= 2 and post_peak and sess_auto
+                    and post_peak > sess_auto + CEILING_SLACK):
                 breaker_suspects += 1
         # health check: ceiling enforcement
         if ceiling:
@@ -254,22 +317,17 @@ def main() -> int:
                     f"{len(over)} auto-compaction(s) exceeded the "
                     f"{ceiling:,.0f}t ceiling (max {max(over):,.0f}t) — "
                     "CLAUDE_CODE_AUTO_COMPACT_WINDOW may not be applying")
-        # health check: auto-trigger drift vs. the model estimate
-        if expected_trigger and len(auto_pre) >= 3:
-            med = statistics.median(auto_pre)
-            if abs(med - expected_trigger) > TRIGGER_DEVIATION:
-                notes.append(
-                    f"auto-trigger median {med:,.0f}t is >"
-                    f"{TRIGGER_DEVIATION / 1000:.0f}k from the "
-                    f"~{expected_trigger:,.0f}t estimate (ceiling×pct) — "
-                    "retune HARD_PCT (config.json claude section) to stay "
-                    "ahead of the real trigger")
+        # (auto-trigger drift watch runs below, after the epoch-stamped
+        # precompact events are loaded — backtest `auto_pre` mixes ceiling
+        # epochs and would phantom-flag a drift on every ceiling change, so it
+        # cannot be the source. See epoch_auto_trigger().)
         if breaker_suspects:
             issues.append(
                 f"{breaker_suspects} session(s) show rapid-refill-breaker "
-                "symptoms: repeated auto-compactions, then context past "
-                f"~{expected_trigger:,.0f}t with no further compaction — "
-                "autocompact may have been disabled mid-session")
+                "symptoms: repeated auto-compactions, then context climbing "
+                f">{CEILING_SLACK / 1000:.0f}k past the session's own observed "
+                "auto-trigger with no further compaction — autocompact may "
+                "have been disabled mid-session")
     except Exception as exc:
         if bt_rc != 0:
             issues.append(f"backtest failed: {bt_out[-300:]}")
@@ -334,6 +392,34 @@ def main() -> int:
             " (fired before any hook eval — unwarnable),"
             f" {cov['off_epoch']} off-epoch auto(s) excluded")
 
+    # Auto-trigger drift watch (relocated here, epoch-sourced). Compares the
+    # CURRENT-epoch auto-trigger median — taken from the epoch-stamped
+    # precompact events — against the ~ceiling×pct estimate. Require >=3
+    # current-epoch autos; with fewer (the ceiling changed recently and the
+    # window still holds mostly old-epoch transcripts) defer with a note
+    # rather than emit a phantom "retune" issue.
+    trig_med, trig_n = epoch_auto_trigger(
+        pre, window_resolver.native_ceiling_from_settings())
+    if expected_trigger and trig_n >= 3:
+        if abs(trig_med - expected_trigger) > TRIGGER_DEVIATION:
+            notes.append(
+                f"auto-trigger median {trig_med:,.0f}t (current epoch, "
+                f"n={trig_n}) is >{TRIGGER_DEVIATION / 1000:.0f}k from the "
+                f"~{expected_trigger:,.0f}t estimate (ceiling×pct) — retune "
+                "HARD_PCT (config.json claude section) to stay ahead of the "
+                "real trigger")
+    elif expected_trigger and ceiling:
+        notes.append(
+            f"auto-trigger drift check deferred: <3 current-epoch (ceiling "
+            f"{ceiling:,.0f}t) autos in the window (n={trig_n}) — ceiling "
+            "recently changed; re-measure next nightly")
+
+    # Realized post-compaction reduction (WI-B): reconstruct the after-size
+    # PostCompact can't log, by joining each precompact event to the first
+    # later smaller monitor_eval in the same session. This is the verified
+    # reclaim figure; "reclaimed ~Z" was previously unverifiable.
+    reduc = realized_reductions(pre, mon)
+
     # 4. native-microcompaction rollout watch. The cleared-content marker
     # is statsig-gated upstream (off for this account as of 2026-06); if
     # it starts appearing, per-turn tool-result clearing changes the
@@ -384,6 +470,9 @@ def main() -> int:
                           if hook_coverage is not None else None),
         "hard_tokens": hard_tokens, "ceiling": ceiling,
         "expected_trigger": expected_trigger,
+        "auto_trigger_epoch_median": (round(trig_med) if trig_med else None),
+        "auto_trigger_epoch_n": trig_n,
+        "reclaim_n": reduc["reclaim_n"], "reclaim_median": reduc["reclaim_median"],
         "breaker_suspects": breaker_suspects,
         "micro_marker_sessions": micro_n,
         "learned_tiers": learned_tiers,
@@ -412,6 +501,11 @@ def main() -> int:
             f"- auto warning coverage (epoch {cov['epoch']}): "
             f"{cov['warned']} warned, {unwarned} unwarned, "
             f"{cov['cold_start']} cold-start, {cov['off_epoch']} off-epoch")
+    if reduc["reclaim_n"]:
+        md.append(
+            f"- realized reduction: median {reduc['reclaim_median']:,.0f}t "
+            f"reclaimed over {reduc['reclaim_n']} compaction(s) "
+            "(precompact → first smaller eval)")
     if expected_trigger:
         md.append(f"- watches: expected trigger ~{expected_trigger:,.0f}t, "
                   f"breaker suspects {breaker_suspects}, "

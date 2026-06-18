@@ -32,11 +32,14 @@ OUT2=$(echo '{"session_id":"smoke","transcript_path":"'$FIX'/rich_transcript.jso
   | python3 src/context_monitor.py)
 [ -z "$OUT2" ] || fail "cooldown did not suppress"
 
-echo "3) precompact: instructions + artifacts + backup"
+echo "3) precompact: silent stdout + artifacts + backup (CC schema-safe)"
+# PreCompact must emit NOTHING on stdout — CC 2.1.x rejects a PreCompact
+# hookSpecificOutput outright. The analyzer works silently (backup +
+# customInstructions stash + artifact extraction + pending_notice arm); the
+# single user-visible notice rides the next UserPromptSubmit / PostToolUse.
 OUT3=$(echo '{"session_id":"smoke","transcript_path":"'$FIX'/rich_transcript.jsonl","cwd":"/tmp","hook_event_name":"PreCompact","trigger":"manual","custom_instructions":"user note"}' \
   | python3 src/precompact_analyzer.py)
-echo "$OUT3" | grep -q "structured handoff" || fail "schema instructions missing"
-echo "$OUT3" | grep -q "user note" || fail "user instructions not preserved"
+[ -z "$OUT3" ] || fail "precompact must be silent on stdout (CC schema rejects PreCompact output)"
 [ -f "$HOME/.claude/autocompactor/artifacts/smoke.json" ] || fail "artifacts not written"
 ls "$HOME"/.claude/autocompactor/backups/smoke-*.jsonl >/dev/null || fail "backup missing"
 grep -q "can1" "$HOME/.claude/autocompactor/artifacts/smoke.json" || fail "correction not captured"

@@ -37,7 +37,7 @@ evaluation and prioritized open items.
 ## Operating notes (harness-agnostic)
 
 - Before changing behavior, run `python3 -m pytest tests/ -q` and
-  `bash tests/smoke_test.sh` when safe. Current baseline is 180 pytest cases.
+  `bash tests/smoke_test.sh` when safe. Current baseline is 189 pytest cases.
 - Owner directive: `>80%` of spend is cached reads. Compact often and keep
   context low.
 - Every-turn cheapness relies on the min-savings guard: no recommendation when

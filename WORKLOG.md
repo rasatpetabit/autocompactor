@@ -735,3 +735,50 @@ extraction + post-compaction re-injection (which works). On Pi the bridge passes
 customInstructions into ctx.compact(), which IS honored — so the feature is
 Pi-only. DECISION PENDING with owner (stop emitting dead field / keep as
 harmless / re-document). 171 pytest (+3), smoke + Pi smoke, --verify PASS.
+
+## 2026-06-17 — Claude visibility defect fixed + reclaim telemetry (G1/G2 + WI-A/B/C)
+
+Owner: "no output from autocompactor even when it eventually DID compact" (Claude
+skynet session at 620k). Root-caused (systematic-debugging) to three layered
+visibility defects, all now fixed:
+
+ROOT CAUSE. G1 — PreCompact emitted a `hookSpecificOutput` whose `hookEventName`
+isn't in CC 2.1.x's accepted union (PreCompact/PostCompact aren't members), so
+the WHOLE hook output was rejected ("Invalid input") — silent. G2 — the
+PostCompact `systemMessage` notice is swallowed by the compaction redraw. G3 —
+Claude only ADVISES; a long tool burst produces no UserPromptSubmit, so nothing
+fires between prompts and native auto won't rescue until ~810k.
+
+DECISIONS (owner via AUQ). Q1 compaction-notice channel = "first of either,
+one-shot": precompact arms `pending_notice`; whichever of the next
+UserPromptSubmit / PostToolUse fires first renders the notice via `systemMessage`
+then disarms. Q2 burst readout = "escalating thresholds only": PostToolUse emits
+the mid-burst readout only on first soft cross, first hard cross, and each further
++`BURST_MILESTONE_STEP` (100k) — not per tool call. PreCompact is now SILENT on
+stdout (builds instructions + stash only); PostCompact is telemetry-only. This
+fixes the "absolutely no output" path — the readout now rides the reliable,
+verbatim PostToolUse/UPS `systemMessage` channel mid-burst, independent of any
+prompt or native trigger.
+
+WI-A (nightly epoch-correctness). Deviation watch re-sourced from epoch-stamped
+`precompact` events (`epoch_auto_trigger`), not mixed-epoch backtest `auto_pre`;
+<3 current-epoch autos -> deferral note, not a phantom "retune HARD_PCT" issue.
+Breaker re-anchored to each session's OWN max auto-pre (+CEILING_SLACK), so a
+ceiling change can't phantom-flag old-epoch sessions. WI-B: realized reduction
+reconstructed by joining each precompact to its first later smaller same-session
+monitor_eval (PostCompact can't observe the floor at hook time) — the verified
+"reclaim ~Z" now lands in the nightly md + history. WI-C: doc reconciliation
+(pytest baseline -> 189; CLAUDE.md notice/milestone bullets match shipped code).
+
+CARRY-FORWARD (next turn, owner-deferred — NOT this scope). (1) Current-epoch
+(ceiling 900k) native autos are firing at ~162k median, far below the ~810k
+ceiling×pct estimate — likely learned-cap sessions or the 900k setting not
+producing 810k native autos; the nightly deviation note correctly reflects this
+real gap. Our 110k nag stays correctly ahead of the real 162k trigger. (2)
+`~/.claude/statusline.js` context calc "completely wrong" — still unaddressed,
+separate thread. (3) PreCompact `customInstructions` is Pi-only (Claude no-op);
+probe path removed this session.
+
+Verify: 189 pytest (+6: epoch_auto_trigger x2, session-anchored breaker,
+realized_reductions x3), smoke_test.sh green, install --verify/--status OK,
+nightly dry-run PASS (epoch coverage + realized-reduction lines present).

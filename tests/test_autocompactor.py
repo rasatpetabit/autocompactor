@@ -1144,24 +1144,29 @@ def test_analyzer_emits_instructions_and_artifacts(tmp_path):
         "custom_instructions": "user note"})
     r = _run_hook(ANALYZER, payload, tmp_path)
     assert r.returncode == 0
-    assert "structured handoff" in r.stdout
-    assert "user note" in r.stdout
+    # PreCompact emits NOTHING to stdout now: customInstructions is a no-op on
+    # Claude Code (PreCompact is not in the hook-output schema union; emitting
+    # hookEventName="PreCompact" fails JSON-output validation and the whole
+    # object is discarded). Extraction + epoch-stamped telemetry still happen.
+    assert r.stdout == ""
     assert (tmp_path / ".claude" / "autocompactor" / "artifacts"
             / "py2.json").exists()
     ev = json.loads((tmp_path / ".claude" / "autocompactor" / "stats"
                      / "events.jsonl").read_text().splitlines()[-1])
     assert ev["type"] == "precompact"
+    assert ev["instr_chars"] > 0                # instructions still built
     for key in ("effective_window", "configured_window", "learned_window",
                 "learned_tier", "window_source"):
         assert key in ev
 
 
 def test_analyzer_systemmessage_summary(tmp_path):
-    """PreCompact emits NO user-facing systemMessage now (combined into the single
-    PostCompact notice). It still emits customInstructions and stashes a
-    content-free analysis summary — trigger, context, phase, artifact accounting,
-    instruction source — for telemetry / the PostCompact notice. Content-free:
-    no transcript text beyond signal descriptions."""
+    """PreCompact emits NOTHING to stdout (customInstructions is a no-op on Claude
+    Code and the user-facing notice is deferred to the next prompt/tool result). It
+    still stashes a content-free analysis summary — trigger, context, phase,
+    artifact accounting, instruction source — for the digest / combined notice, and
+    arms pending_notice so the single notice fires first-of-either next.
+    Content-free: no transcript text beyond signal descriptions."""
     payload = json.dumps({
         "session_id": "sum1", "cwd": "/tmp",
         "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
@@ -1169,11 +1174,11 @@ def test_analyzer_systemmessage_summary(tmp_path):
         "custom_instructions": "user note"})
     r = _run_hook(ANALYZER, payload, tmp_path)
     assert r.returncode == 0
-    out = json.loads(r.stdout)
-    assert "hookSpecificOutput" in out          # instructions still emitted
-    assert "systemMessage" not in out           # combined into PostCompact
-    stashed = json.loads((tmp_path / ".claude" / "autocompactor"
-                          / "sum1.state.json").read_text())["last_compaction_stats"]
+    assert r.stdout == ""                        # PreCompact is silent
+    state = json.loads((tmp_path / ".claude" / "autocompactor"
+                        / "sum1.state.json").read_text())
+    assert state.get("pending_notice") is True   # notice armed for next surface
+    stashed = state["last_compaction_stats"]
     assert stashed.startswith("compaction #1 (auto)")
     # Absolute-anchor readout (WI-2): "<used> in context · compact advised
     # ~<soft>–<hard> · forced auto-compact ~<auto> (~<headroom> away)" replaced
@@ -1205,157 +1210,96 @@ def test_analyzer_summary_reports_staged_instructions(tmp_path):
     assert "instructions: staged by monitor" in stashed
 
 
-def test_postcompact_notice_surfaces_skills_from_pre_state(tmp_path, monkeypatch,
-                                                           capsys):
-    """PostCompact (new surface): a PreCompact systemMessage is swallowed by the
-    compaction redraw, so the user-visible notice fires here. With no parseable
-    new transcript it renders from the stashed pre-compaction composition —
-    including the loaded-skill warning."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(pa, "STATE_DIR", str(tmp_path))
-    (tmp_path / "s1.state.json").write_text(json.dumps({
-        "pre_compact_tokens": 244_000,
-        "pre_comp": {"total": 244_000, "base": 52_000, "skills": 156_000,
-                     "skill_names": ["claude-api"], "summary": 4_000,
-                     "tool": 7_000, "tool_stale_frac": 0.8,
-                     "assistant": 2_000, "prompts": 12}}))
-    rc = pa._run_postcompact({"hook_event_name": "PostCompact",
-                              "session_id": "s1",
-                              "transcript_path": "/nonexistent/x.jsonl",
-                              "trigger": "auto"})
-    assert rc == 0
-    msg = json.loads(capsys.readouterr().out)["systemMessage"]
+def test_postcompact_notice_surfaces_skills_from_pre_state():
+    """The single combined notice (policy.compaction_notice) renders from the
+    stashed pre-compaction composition when no after-size is known — including the
+    loaded-skill warning. (PreCompact stashes pre_comp; the notice now fires on the
+    first-of-either next UserPromptSubmit / PostToolUse, not at PostCompact, which
+    the compaction redraw swallows.)"""
+    msg = policy.compaction_notice(
+        count=None, pre_tokens=244_000, after_tokens=None,
+        comp={"total": 244_000, "base": 52_000, "skills": 156_000,
+              "skill_names": ["claude-api"], "summary": 4_000,
+              "tool": 7_000, "tool_stale_frac": 0.8,
+              "assistant": 2_000, "prompts": 12},
+        pre_ledger=None)
     assert msg.startswith("autocompactor: compaction complete")
     assert "244k in context before compaction" in msg
     assert "skills (claude-api)" in msg
     assert "won't reclaim" in msg          # skill warning rendered
 
 
-def test_postcompact_shows_before_after_delta(tmp_path, monkeypatch, capsys):
-    """When the compacted transcript parses to a smaller total, show the
-    before -> after delta the user just gained."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(pa, "STATE_DIR", str(tmp_path))
-    (tmp_path / "d1.state.json").write_text(json.dumps({
-        "pre_compact_tokens": 244_000,
-        "pre_comp": {"total": 244_000, "base": 80_000, "tool": 150_000,
-                     "tool_stale_frac": 0.9, "assistant": 14_000,
-                     "prompts": 5, "skills": 0, "summary": 0}}))
-    t = tmp_path / "compacted.jsonl"
-    t.write_text("\n".join(json.dumps(e) for e in [
-        _human("resume"), _assistant(text="ok", usage=_usage(8000))]))
-    rc = pa._run_postcompact({"hook_event_name": "PostCompact",
-                              "session_id": "d1", "transcript_path": str(t),
-                              "trigger": "auto"})
-    assert rc == 0
-    msg = json.loads(capsys.readouterr().out)["systemMessage"]
+def test_postcompact_shows_before_after_delta():
+    """When the after-size is known (the first post-compaction turn), the notice
+    shows the before -> after delta the user just gained."""
+    msg = policy.compaction_notice(
+        count=2, pre_tokens=244_000, after_tokens=8_000,
+        comp={"total": 244_000, "base": 80_000, "tool": 150_000,
+              "tool_stale_frac": 0.9, "assistant": 14_000,
+              "prompts": 5, "skills": 0, "summary": 0},
+        pre_ledger=None)
+    assert msg.startswith("autocompactor: compaction #2 complete")
     assert "→" in msg and "reclaimed" in msg and "244k" in msg
 
 
 def test_postcompact_hook_reads_precompact_state(tmp_path):
-    """End-to-end: the real entrypoint branches on hook_event_name. PreCompact
-    stashes pre_compact_tokens; PostCompact reads it and emits a notice-only
-    systemMessage (no hookSpecificOutput/customInstructions)."""
+    """End-to-end of the G1/G2 fix: PreCompact is silent (CC rejects PreCompact
+    hookSpecificOutput) and only arms the notice; PostCompact is silent telemetry;
+    the single combined notice renders on the next UserPromptSubmit via
+    systemMessage, carrying the stashed compaction_count + preservation ledger."""
     pre = json.dumps({"session_id": "pc1", "cwd": "/tmp",
                       "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
                       "hook_event_name": "PreCompact", "trigger": "manual"})
-    assert _run_hook(ANALYZER, pre, tmp_path).returncode == 0
+    rp = _run_hook(ANALYZER, pre, tmp_path)
+    assert rp.returncode == 0
+    assert rp.stdout == ""                         # PreCompact: silent (G1)
     post = json.dumps({"session_id": "pc1", "cwd": "/tmp",
                        "transcript_path": "/nonexistent/none.jsonl",
                        "hook_event_name": "PostCompact", "trigger": "auto"})
-    r = _run_hook(ANALYZER, post, tmp_path)
+    rpost = _run_hook(ANALYZER, post, tmp_path)
+    assert rpost.returncode == 0
+    assert rpost.stdout == ""                       # PostCompact: telemetry only (G2)
+    # The combined notice fires on the next UserPromptSubmit, via systemMessage.
+    ups = json.dumps({"session_id": "pc1", "cwd": "/tmp",
+                      "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+                      "hook_event_name": "UserPromptSubmit", "prompt": "continue"})
+    r = _run_hook(MONITOR, ups, tmp_path)
     assert r.returncode == 0
     out = json.loads(r.stdout)
-    assert "hookSpecificOutput" not in out        # PostCompact: notice only
     # PreCompact stashed compaction_count=1 -> single combined notice carries it
     assert out["systemMessage"].startswith("autocompactor: compaction #1 complete")
     assert "in context before compaction" in out["systemMessage"]
-    # Combined notice carries the preservation ledger (owner request (b)): the two
-    # compaction-time outputs are merged into this single PostCompact notice.
+    # Combined notice carries the preservation ledger (owner request (b)).
     assert "preserved verbatim" in out["systemMessage"]
-
-
-def test_precompact_probe_arms_sentinel_when_enabled(tmp_path):
-    """customInstructions live-confirm scaffolding: with
-    AUTOCOMPACTOR_CUSTOMINSTR_PROBE=1 the PreCompact emit appends the sentinel to
-    customInstructions and stashes it in session state for PostCompact to verify.
-    Off by default (the other PreCompact tests run without the env and never
-    emit the sentinel)."""
-    env = _hook_env(tmp_path)
-    env["AUTOCOMPACTOR_CUSTOMINSTR_PROBE"] = "1"
-    pre = json.dumps({"session_id": "arm1", "cwd": "/tmp",
-                      "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
-                      "hook_event_name": "PreCompact", "trigger": "manual"})
-    r = subprocess.run([sys.executable, os.path.join(REPO, ANALYZER)],
-                       input=pre, capture_output=True, text=True,
-                       env=env, cwd=REPO, timeout=60)
-    assert r.returncode == 0
-    ci = json.loads(r.stdout)["hookSpecificOutput"]["customInstructions"]
-    assert pa.CUSTOMINSTR_PROBE_SENTINEL in ci
-    st = json.loads((tmp_path / ".claude" / "autocompactor"
-                     / "arm1.state.json").read_text())
-    assert st["custominstr_probe"] == pa.CUSTOMINSTR_PROBE_SENTINEL
-
-
-def test_postcompact_probe_reports_honored_when_sentinel_in_summary(
-        tmp_path, monkeypatch, capsys):
-    """The summarizer honored our instructions iff the generated summary
-    (compact_summary input) contains the sentinel. Verdict surfaces to the user
-    and the one-shot stash is cleared."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(pa, "STATE_DIR", str(tmp_path))
-    (tmp_path / "pr1.state.json").write_text(json.dumps({
-        "pre_compact_tokens": 120_000, "pre_comp": {},
-        "custominstr_probe": pa.CUSTOMINSTR_PROBE_SENTINEL}))
-    rc = pa._run_postcompact({
-        "hook_event_name": "PostCompact", "session_id": "pr1",
-        "transcript_path": "/nonexistent/x.jsonl", "trigger": "manual",
-        "compact_summary": pa.CUSTOMINSTR_PROBE_SENTINEL + "\nRest of summary."})
-    assert rc == 0
-    msg = json.loads(capsys.readouterr().out)["systemMessage"]
-    assert "customInstructions probe: HONORED" in msg
-    assert json.loads(
-        (tmp_path / "pr1.state.json").read_text())["custominstr_probe"] is None
-
-
-def test_postcompact_probe_reports_noop_when_sentinel_absent(
-        tmp_path, monkeypatch, capsys):
-    """The expected outcome on Claude Code: the summarizer ignores our
-    customInstructions, so the sentinel never appears -> NO-OP verdict."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(pa, "STATE_DIR", str(tmp_path))
-    (tmp_path / "pr2.state.json").write_text(json.dumps({
-        "pre_compact_tokens": 120_000, "pre_comp": {},
-        "custominstr_probe": pa.CUSTOMINSTR_PROBE_SENTINEL}))
-    rc = pa._run_postcompact({
-        "hook_event_name": "PostCompact", "session_id": "pr2",
-        "transcript_path": "/nonexistent/x.jsonl", "trigger": "manual",
-        "compact_summary": "A normal summary with no marker in it."})
-    assert rc == 0
-    msg = json.loads(capsys.readouterr().out)["systemMessage"]
-    assert "customInstructions probe: NO-OP" in msg
+    # The reinject digest may also ride this same prompt (pending_reinject armed).
 
 
 def test_analyzer_restates_founding_goal_when_staged_lacks_it(tmp_path):
-    """Owner directive: every compaction pass must restate the founding
-    goal verbatim. Staged instructions built from a tail-only parse can
-    miss the original prompts; the analyzer must append them from the
-    merged artifacts (old-wins) so they cannot decay across passes."""
+    """Owner directive: every compaction pass must restate the founding goal
+    verbatim. customInstructions is a no-op on Claude (G1), so the founding goal
+    now survives via mechanical artifact extraction -> the one-shot reinject
+    digest. The merged artifacts (old-wins) carry the original prompts so they
+    cannot decay across passes."""
     state_dir = tmp_path / ".claude" / "autocompactor"
     (state_dir / "artifacts").mkdir(parents=True)
     (state_dir / "sum4.state.json").write_text(json.dumps(
         {"staged_instructions": "STAGED (tail-parsed, no founding goal)"}))
     (state_dir / "artifacts" / "sum4.json").write_text(json.dumps(
         {"initial_prompts": ["build the frobnicator with 100% compat"]}))
-    payload = json.dumps({
+    pre = json.dumps({
         "session_id": "sum4", "cwd": "/tmp",
         "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
         "hook_event_name": "PreCompact", "trigger": "auto"})
-    r = _run_hook(ANALYZER, payload, tmp_path)
+    assert _run_hook(ANALYZER, pre, tmp_path).returncode == 0
+    ups = json.dumps({
+        "session_id": "sum4", "cwd": "/tmp",
+        "transcript_path": os.path.join(FIX, "rich_transcript.jsonl"),
+        "hook_event_name": "UserPromptSubmit", "prompt": "continue"})
+    r = _run_hook(MONITOR, ups, tmp_path)
     assert r.returncode == 0
-    instr = json.loads(r.stdout)["hookSpecificOutput"]["customInstructions"]
-    assert "build the frobnicator with 100% compat" in instr
-    assert "ORIGINAL user request" in instr
+    digest = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "build the frobnicator with 100% compat" in digest
+    assert "FOUNDING GOAL" in digest
 
 
 def test_analyzer_summary_feeds_digest_header(tmp_path):
@@ -1532,14 +1476,22 @@ def test_posttooluse_skip_log_gated(tmp_path):
     the recommend branch, so non-recommends are invisible and coverage can't be
     measured. With AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS set, an at/above-soft
     non-recommend logs a cheap skip eval; off by default it stays silent."""
-    # 120k: in the hermetic-env band (soft 110k, hard 130k) -> above soft so the
-    # skip-log is eligible, below hard so PostToolUse does NOT recommend.
+    # 120k: in the hermetic-env band (soft 110k, hard 130k) -> milestone is the
+    # soft line (110k). Seed last_milestone_tokens=110000 so that soft milestone
+    # is NOT newly crossed (Q2 escalating ladder) -> the skip branch fires instead
+    # of a recommendation. Above soft so the skip-log is eligible.
     mid = tmp_path / "mid.jsonl"
     mid.write_text("".join(json.dumps(e) + "\n" for e in [
         _assistant(usage=_usage(120_000)),
         _tool_result("x"),
     ]))
-    statsf = (tmp_path / ".claude" / "autocompactor" / "stats" / "events.jsonl")
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    state_dir.mkdir(parents=True)
+    (state_dir / "sk1.state.json").write_text(json.dumps(
+        {"last_milestone_tokens": 110000}))
+    (state_dir / "sk2.state.json").write_text(json.dumps(
+        {"last_milestone_tokens": 110000}))
+    statsf = (state_dir / "stats" / "events.jsonl")
 
     # OFF (default): no watchdog_skip telemetry
     env = _hook_env(tmp_path)
@@ -1549,6 +1501,7 @@ def test_posttooluse_skip_log_gated(tmp_path):
         input=_ptu_payload("sk1", str(mid)),
         capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
     assert r.returncode == 0
+    assert r.stdout == ""    # same milestone -> no recommendation
     assert (not statsf.exists()) or "watchdog_skip" not in statsf.read_text()
 
     # ON: a cheap skip eval is logged, tagged + recommended False
@@ -1562,3 +1515,108 @@ def test_posttooluse_skip_log_gated(tmp_path):
     assert ev["watchdog_skip"] is True
     assert ev["hook_event"] == "PostToolUse"
     assert ev["recommended"] is False
+
+
+# ---------- Q2 escalating-milestone ladder (owner: "escalating thresholds only")
+
+def _milestone_state(tmp_path, session, last_milestone):
+    """Seed a PostToolUse session state with a prior milestone so the ladder
+    starts above 0 (simulates an earlier announcement in the same burst)."""
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / f"{session}.state.json").write_text(json.dumps(
+        {"last_milestone_tokens": last_milestone}))
+    return state_dir
+
+
+def _read_state(tmp_path, session):
+    return json.loads((tmp_path / ".claude" / "autocompactor"
+                       / f"{session}.state.json").read_text())
+
+
+def _run_ptu(tmp_path, session, ctx_tokens):
+    t = tmp_path / f"{session}.jsonl"
+    t.write_text("".join(json.dumps(e) + "\n" for e in [
+        _assistant(usage=_usage(ctx_tokens)),
+        _tool_result("x"),
+    ]))
+    env = _hook_env(tmp_path)
+    env["AUTOCOMPACTOR_WINDOW"] = "200000"   # soft 110k, hard 130k, step 100k
+    return subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=_ptu_payload(session, str(t)),
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=60)
+
+
+def test_posttooluse_first_soft_cross_recommends(tmp_path):
+    """First cross of the soft line (no prior milestone) emits the mid-burst
+    readout and records the soft milestone."""
+    r = _run_ptu(tmp_path, "soft1", 120_000)   # 120k -> soft milestone 110k
+    assert r.returncode == 0
+    assert "mid-burst" in r.stdout
+    assert _read_state(tmp_path, "soft1")["last_milestone_tokens"] == 110_000
+
+
+def test_posttooluse_recross_same_milestone_silent(tmp_path):
+    """Still inside the same (soft) band after announcing it -> silent; the
+    ladder does not re-fire once per tool call."""
+    _milestone_state(tmp_path, "soft2", 110_000)
+    r = _run_ptu(tmp_path, "soft2", 125_000)   # still < hard -> milestone 110k
+    assert r.returncode == 0
+    assert r.stdout == ""
+
+
+def test_posttooluse_first_hard_cross_recommends(tmp_path):
+    """Crossing from the soft band into the hard band re-announces (new, higher
+    milestone) and records the hard milestone."""
+    _milestone_state(tmp_path, "hard1", 110_000)
+    r = _run_ptu(tmp_path, "hard1", 135_000)   # >= hard -> milestone 130k
+    assert r.returncode == 0
+    assert "mid-burst" in r.stdout
+    assert _read_state(tmp_path, "hard1")["last_milestone_tokens"] == 130_000
+
+
+def test_posttooluse_step_milestone_then_silent(tmp_path):
+    """Above the hard line each further +BURST_MILESTONE_STEP (100k) re-announces
+    once, then stays silent until the next step."""
+    # 235k -> hard 130k + 1*100k = 230k milestone; prior milestone was the hard
+    # line, so this is a new step -> emits.
+    _milestone_state(tmp_path, "stepd", 130_000)
+    r1 = _run_ptu(tmp_path, "stepd", 235_000)
+    assert r1.returncode == 0
+    assert "mid-burst" in r1.stdout
+    assert _read_state(tmp_path, "stepd")["last_milestone_tokens"] == 230_000
+    # same step band again -> silent (state now carries 230k from the recommend)
+    r2 = _run_ptu(tmp_path, "stepd", 235_000)
+    assert r2.returncode == 0
+    assert r2.stdout == ""
+
+
+def test_posttooluse_below_soft_resets_ladder(tmp_path):
+    """Dropping back below the soft line resets the ladder so a fresh burst can
+    re-announce the soft line, and the hook stays silent on the reset."""
+    _milestone_state(tmp_path, "reset1", 130_000)
+    r = _run_ptu(tmp_path, "reset1", 50_000)   # < soft -> reset, silent
+    assert r.returncode == 0
+    assert r.stdout == ""
+    assert _read_state(tmp_path, "reset1")["last_milestone_tokens"] == 0
+
+
+def test_posttooluse_renders_pending_notice(tmp_path):
+    """First-of-either one-shot (Q1): when pending_notice is armed, the next
+    PostToolUse renders the single compaction notice via systemMessage and
+    disarms (clears pending_notice, resets the ladder)."""
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    state_dir.mkdir(parents=True)
+    (state_dir / "note1.state.json").write_text(json.dumps({
+        "pending_notice": True, "compaction_count": 1,
+        "pre_compact_tokens": 244_000}))
+    r = _run_ptu(tmp_path, "note1", 80_000)
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert out["systemMessage"].startswith(
+        "autocompactor: compaction #1 complete")
+    assert "reclaimed" in out["systemMessage"]    # 244k -> 80k
+    st = _read_state(tmp_path, "note1")
+    assert st["pending_notice"] is False
+    assert st["last_milestone_tokens"] == 0

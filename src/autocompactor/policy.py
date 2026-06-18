@@ -194,6 +194,48 @@ def skill_warning(comp: dict, threshold: float = SKILL_DOMINANCE_FRAC) -> str:
             f"drop them")
 
 
+def compaction_notice(count, pre_tokens, after_tokens, comp,
+                      pre_ledger) -> str:
+    """The single user-visible compaction notice (Q1: rendered exactly once, on
+    the first of the next UserPromptSubmit / PostToolUse after a compaction, via
+    systemMessage — the two channels Claude Code actually renders to the user).
+
+    Why here and not in the PreCompact/PostCompact hooks: CC 2.1.x rejects a
+    PreCompact `hookSpecificOutput` outright (PreCompact/PostCompact are not in
+    the hook-output union; emitting one fails JSON-output validation and the
+    user sees an error), and a PostCompact `systemMessage` is swallowed by the
+    compaction redraw (never surfaced). The monitor's UserPromptSubmit /
+    PostToolUse outputs DO render, so the notice rides those.
+
+    `comp` is the BEFORE-compaction composition (stashed by PreCompact): its
+    category breakdown sums to `pre_tokens` and shows WHERE the reclaim came
+    from (typically stale tool output), pairing with the before→after head.
+
+    Returns "" when there is nothing meaningful to say. Content-free: token
+    counts / category names only, never transcript text."""
+    pre = int(pre_tokens or 0)
+    after = int(after_tokens or 0)
+    head = f"compaction #{count} complete" if count else "compaction complete"
+    if pre and after and after < pre:
+        head += (f" — context {_fmt_tokens(pre)} → {_fmt_tokens(after)} "
+                 f"(reclaimed ~{_fmt_tokens(pre - after)})")
+    elif pre:
+        head += f" — {_fmt_tokens(pre)} in context before compaction"
+    lines = ["autocompactor: " + head]
+    comp_line = composition_line(comp) if comp else ""
+    if comp_line:
+        lines.append("  └ " + comp_line)
+    warn = skill_warning(comp) if comp else ""
+    if warn:
+        lines.append("  " + warn)
+    if pre_ledger:
+        lines.append(pre_ledger)
+    # Suppress a contentless "compaction complete" with nothing to add.
+    if len(lines) > 1 or pre:
+        return "\n".join(lines)
+    return ""
+
+
 def advisory_band(cfg: "PolicyConfig") -> tuple[int, int]:
     """(soft, hard) advisory thresholds in tokens, for readout_line(). soft is
     the window-aware target (or soft fraction × window if an explicit SOFT_PCT

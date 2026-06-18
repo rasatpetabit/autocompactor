@@ -296,10 +296,14 @@ def test_monitor_empty_stdout_when_not_recommending(tmp_path):
     )
 
 
-def test_analyzer_key_schema(tmp_path):
-    """The analyzer's JSON object top-level keys must be a subset of
-    {'hookSpecificOutput', 'systemMessage'}, and hookSpecificOutput must
-    carry hookEventName == 'PreCompact'."""
+def test_analyzer_emits_no_stdout(tmp_path):
+    """PreCompact must emit NOTHING on stdout. CC 2.1.x rejects a PreCompact
+    `hookSpecificOutput` outright (PreCompact/PostCompact are not in the
+    hook-output union — emitting one fails JSON-output validation and the user
+    sees an 'Invalid input' error). The analyzer therefore does its work
+    silently (backup + customInstructions stash + artifact extraction + the
+    pending_notice arm) and prints no JSON; the single user-visible notice rides
+    the next UserPromptSubmit / PostToolUse instead."""
     payload = json.dumps({
         "session_id": "pin4ana", "cwd": "/tmp",
         "transcript_path": _RICH_PATH,
@@ -309,15 +313,6 @@ def test_analyzer_key_schema(tmp_path):
     })
     r = _run_hook(ANALYZER, payload, tmp_path)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip(), "analyzer should emit output for a real transcript"
-    obj = json.loads(r.stdout)
-    allowed = {"hookSpecificOutput", "systemMessage"}
-    assert set(obj.keys()) <= allowed, (
-        f"unexpected top-level keys: {set(obj.keys()) - allowed}"
-    )
-    assert "hookSpecificOutput" in obj, (
-        "analyzer must include hookSpecificOutput when a transcript is present"
-    )
-    assert obj["hookSpecificOutput"]["hookEventName"] == "PreCompact", (
-        f"hookEventName: {obj['hookSpecificOutput'].get('hookEventName')!r}"
+    assert r.stdout.strip() == "", (
+        f"PreCompact must be silent on stdout; got: {r.stdout!r}"
     )
