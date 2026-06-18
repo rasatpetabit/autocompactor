@@ -113,8 +113,18 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
         return 0
 
     configured_window = config_lib.cfg.float("WINDOW", default=200_000)
-    peak = max(ctx, int(state.get("peak_ctx", 0)))
-    if peak != state.get("peak_ctx"):
+    # Spike guard: a single tail-parse read can momentarily double-count
+    # (observed: 303k for one eval, back to 155k 4s later). A spike must not
+    # advance the burst ladder (it would mute the watchdog for the rest of the
+    # burst — the "appears dead" report) nor poison peak_ctx (it inflates the
+    # learned-window tier). last_ctx is recorded every eval so a genuine
+    # sustained jump is corroborated and let through on the next eval.
+    prev_ctx = int(state.get("last_ctx", 0) or 0)
+    spike = policy.is_ctx_spike(ctx, prev_ctx, configured_window)
+    peak = (int(state.get("peak_ctx", 0)) if spike
+            else max(ctx, int(state.get("peak_ctx", 0))))
+    if state.get("last_ctx") != ctx or peak != state.get("peak_ctx"):
+        state["last_ctx"] = ctx
         state["peak_ctx"] = peak
         try:
             with open(state_file, "w") as fh:
@@ -128,16 +138,22 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
     window = resolution.effective_window
     occupancy = ctx / window
 
-    # Escalating-milestone readout (owner Q2: "escalating thresholds only"): emit
-    # the mid-burst readout on the FIRST cross of the soft line, the FIRST cross of
-    # the hard line, and each further +BURST_MILESTONE_STEP above hard — NOT once
-    # per qualifying tool call (which read as spam). `last_milestone_tokens` is the
-    # highest milestone already announced this burst; it resets to 0 when context
-    # drops back below soft (a fresh burst can re-announce).
+    # Window-INVARIANT milestone ladder (owner: "occupancy milestones"). Emits the
+    # mid-burst readout on the FIRST cross of the soft line, the hard line, and
+    # each occupancy rung above hard (then +tail steps past the window) — NOT once
+    # per tool call (spam). Replaces the old fixed +100k step, which was wider than
+    # the [hard, window] danger band and so left the watchdog silent across the
+    # whole zone (see policy.burst_milestone). `last_milestone_tokens` is the
+    # highest rung announced this burst; it resets to 0 when context drops below
+    # soft (a fresh burst can re-announce).
     pcfg = policy.resolve_policy_config("claude", int(window))
     soft_t, hard_t = policy.advisory_band(pcfg)
-    step = int(config_lib.cfg.float("BURST_MILESTONE_STEP",
-                                    default=100_000)) or 100_000
+    occ_str = config_lib.cfg.str("BURST_MILESTONE_OCCUPANCY", default="")
+    try:
+        occ_pcts = tuple(float(x) for x in occ_str.replace(",", " ").split()) \
+            or None
+    except ValueError:
+        occ_pcts = None
     last_milestone = int(state.get("last_milestone_tokens", 0) or 0)
     est_reclaim = int(ctx - pcfg.post_floor)
     if ctx < soft_t:
@@ -149,8 +165,9 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
             except OSError:
                 pass
         return 0
-    milestone = soft_t if ctx < hard_t else hard_t + ((ctx - hard_t) // step) * step
-    crossed = milestone > last_milestone and est_reclaim >= pcfg.min_savings
+    milestone = policy.burst_milestone(pcfg, ctx, occ_pcts=occ_pcts)
+    crossed = (not spike and milestone > last_milestone
+               and est_reclaim >= pcfg.min_savings)
     if not crossed:
         # Gated (off by default) coverage telemetry. PostToolUse otherwise logs a
         # monitor_eval ONLY on the recommend branch below, so non-recommends are
@@ -167,6 +184,7 @@ def _run_posttooluse(data: dict, transcript: str, session_id: str) -> int:
                 "est_reclaim": est_reclaim, "tail_parse": True,
                 "recommended": False,
                 "suppressed_by_cooldown": milestone <= last_milestone,
+                "spike_suspected": spike,
                 "hook_event": "PostToolUse", "watchdog_skip": True,
                 **resolution.event_fields(),
             })
@@ -317,11 +335,20 @@ def _run() -> int:
     # estimate: until a session's observed context exceeds what a 200k
     # model could reach, assume the tighter ceiling. The peak is carried in
     # state so tail-only parses and post-compaction shrinkage don't forget.
-    peak = max(st.usage_series) if st.usage_series else st.context_tokens
-    peak = max(peak, int(state.get("peak_ctx", 0)))
-    if peak != state.get("peak_ctx"):
+    # Spike guard, symmetric with the PostToolUse path: a single anomalous
+    # reading must not advance peak_ctx (it inflates the learned-window tier —
+    # the 303k tail-spike bumped a session to the 512k tier). Corroboration via
+    # last_ctx lets a genuine sustained jump through on the next eval.
+    cur = int(st.context_tokens)
+    prev_ctx = int(state.get("last_ctx", 0) or 0)
+    spike = policy.is_ctx_spike(cur, prev_ctx, configured_window)
+    series_peak = max(st.usage_series) if st.usage_series else cur
+    prior_peak = int(state.get("peak_ctx", 0))
+    peak = prior_peak if spike else max(series_peak, cur, prior_peak)
+    if state.get("last_ctx") != cur or peak != prior_peak:
+        state["last_ctx"] = cur
         state["peak_ctx"] = peak
-        # Persist the peak IMMEDIATELY, not via the batched flush: it is the
+        # Persist IMMEDIATELY, not via the batched flush: peak_ctx is the
         # durability anchor for tail-only parses (a later mid-prompt exception
         # would otherwise lose it, since run_hook swallows the raise). The
         # other state writes (cooldown reset, staged instructions) are not

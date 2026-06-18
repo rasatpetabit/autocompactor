@@ -247,6 +247,52 @@ def advisory_band(cfg: "PolicyConfig") -> tuple[int, int]:
     return soft, hard
 
 
+def burst_milestone(cfg: "PolicyConfig", ctx: int,
+                    occ_pcts: "tuple[float, ...] | None" = None,
+                    tail_pct: float = 0.10) -> int:
+    """Highest burst-watchdog milestone (a token threshold) that ``ctx`` has
+    crossed, or 0 below the soft line.
+
+    Window-INVARIANT cadence. The old ladder advanced by a fixed +100k token
+    step above the hard line; with hard ~= 0.55*W and the effective window at
+    W, the danger band [hard, W] is only ~0.45*W wide -- narrower than one 100k
+    step at a 200k window -- so after the single hard-line announce the next
+    step (hard+100k) landed past W and the watchdog went silent across the whole
+    danger zone (observed: a skynet session climbed 114k->203k unwarned).
+
+    The rungs are now fractions of the effective window: soft, hard, then each
+    ``occ_pcts`` fraction that lies above hard, then +``tail_pct``*W steps above
+    the top rung so an over-window burst keeps being nagged toward the native
+    wall. Because the rungs scale with W, no rung-to-rung gap can exceed the
+    spacing of ``occ_pcts``, whatever the window."""
+    eff = max(int(cfg.effective_limit), 1)
+    soft, hard = advisory_band(cfg)
+    if ctx < soft:
+        return 0
+    if occ_pcts is None:
+        occ_pcts = (0.70, 0.80, 0.90, 0.97)
+    rungs = sorted({soft, hard,
+                    *(int(p * eff) for p in occ_pcts if int(p * eff) > hard)})
+    top = rungs[-1]
+    if ctx <= top:
+        return max(r for r in rungs if r <= ctx)
+    tail = max(int(tail_pct * eff), 1)
+    return top + ((ctx - top) // tail) * tail
+
+
+def is_ctx_spike(ctx: int, prev_ctx: int, window: int) -> bool:
+    """True when ``ctx`` is an implausible single-sample jump above the previous
+    reading. Tail-parse can momentarily double-count (observed: 303k for one
+    eval, back to 155k 4s later). Such a spike must not advance the burst ladder
+    (it would mute the watchdog for the rest of the burst) nor update peak_ctx
+    (it inflates the learned-window tier). Requires BOTH a >1.5x ratio and a
+    >0.5*window absolute jump, so steady growth and a genuine large jump
+    (corroborated on the next eval, once prev catches up) pass through."""
+    if prev_ctx <= 0:
+        return False
+    return ctx > prev_ctx * 1.5 and (ctx - prev_ctx) > 0.5 * max(int(window), 1)
+
+
 @dataclass
 class PolicyConfig:
     profile: str

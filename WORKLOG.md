@@ -2,6 +2,29 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-18 — FIX: burst watchdog silent across the danger band + spike guard
+
+Report: "autocompactor doesn't appear to be running" in a live session in
+`/srv/dev/petabit/skynet` (NOT the skynet *hosts* — wasted a detour SSHing to
+skynet1/3 before the owner corrected me). It WAS running and logging; it warned at
+107k/110k then went silent as ctx climbed 114k→203k.
+
+Root cause (confirmed from events.jsonl, advisor-corrected): the `PostToolUse`
+burst ladder used a fixed `+100k` step above the hard line, but `hard≈110k` and
+`effective window=200k` make the danger band only 90k wide — narrower than one
+step. After the hard-line announce the next milestone (210k) is past the window,
+so zero announcements across the whole 110k→200k zone, *by design, on every
+burst*. A transient 303k tail-parse spike was a red herring for the silence (it
+already silenced at 114k, 8s earlier) but DID poison `peak_ctx`→303331 (inflated
+learned window to 512k tier).
+
+Fix (TDD, +5 tests, 194 pass): `policy.burst_milestone` — window-invariant
+occupancy rungs (0.70/0.80/0.90/0.97×W, `BURST_MILESTONE_OCCUPANCY` override) + tail
+steps past W, replacing the fixed step. `policy.is_ctx_spike` (>1.5× AND >0.5×W vs
+prior `last_ctx`) gates both the ladder and the `peak_ctx` write; `last_ctx` is
+tracked per eval so a genuine sustained jump corroborates on the next eval. Skip
+events carry `spike_suspected`. Doc: CLAUDE.md cadence paragraph rewritten.
+
 ## 2026-06-17 — REVERT: restore systemMessage readout for compact suggestions
 
 The previous entry's "move readout to additionalContext, drop systemMessage" was

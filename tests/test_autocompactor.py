@@ -1576,18 +1576,18 @@ def test_posttooluse_first_hard_cross_recommends(tmp_path):
     assert _read_state(tmp_path, "hard1")["last_milestone_tokens"] == 130_000
 
 
-def test_posttooluse_step_milestone_then_silent(tmp_path):
-    """Above the hard line each further +BURST_MILESTONE_STEP (100k) re-announces
-    once, then stays silent until the next step."""
-    # 235k -> hard 130k + 1*100k = 230k milestone; prior milestone was the hard
-    # line, so this is a new step -> emits.
-    _milestone_state(tmp_path, "stepd", 130_000)
-    r1 = _run_ptu(tmp_path, "stepd", 235_000)
+def test_posttooluse_occupancy_rung_then_silent(tmp_path):
+    """Above the hard line each occupancy rung re-announces once, then stays
+    silent until the next rung. Window-invariant cadence (replaces the old fixed
+    +100k step, which was wider than the [hard, window] band)."""
+    # prior milestone was the 0.70 rung (140k); 165k crosses the 0.80 rung (160k).
+    _milestone_state(tmp_path, "rungd", 140_000)
+    r1 = _run_ptu(tmp_path, "rungd", 165_000)
     assert r1.returncode == 0
     assert "mid-burst" in r1.stdout
-    assert _read_state(tmp_path, "stepd")["last_milestone_tokens"] == 230_000
-    # same step band again -> silent (state now carries 230k from the recommend)
-    r2 = _run_ptu(tmp_path, "stepd", 235_000)
+    assert _read_state(tmp_path, "rungd")["last_milestone_tokens"] == 160_000
+    # same rung band again (still below the 0.90 rung at 180k) -> silent
+    r2 = _run_ptu(tmp_path, "rungd", 168_000)
     assert r2.returncode == 0
     assert r2.stdout == ""
 
@@ -1620,3 +1620,95 @@ def test_posttooluse_renders_pending_notice(tmp_path):
     st = _read_state(tmp_path, "note1")
     assert st["pending_notice"] is False
     assert st["last_milestone_tokens"] == 0
+
+
+# ---------- danger-band cadence + spike hardening (skynet "appears dead" report)
+
+def test_posttooluse_danger_band_reannounces_between_hard_and_window(tmp_path):
+    """REGRESSION: between the hard line and the window the watchdog must keep
+    announcing on each occupancy rung. The old fixed +100k step was wider than
+    the [hard, window] band, so it announced once at the hard line then went
+    silent the whole way to the window (a skynet session climbed 114k->203k
+    unwarned -> "autocompactor doesn't appear to be running")."""
+    _milestone_state(tmp_path, "band1", 130_000)    # hard already announced
+    r = _run_ptu(tmp_path, "band1", 165_000)         # 0.80 * 200k = 160k rung
+    assert r.returncode == 0
+    assert "mid-burst" in r.stdout
+    assert _read_state(tmp_path, "band1")["last_milestone_tokens"] == 160_000
+
+
+def test_posttooluse_spike_does_not_advance_ladder_or_peak(tmp_path):
+    """A single-sample context spike (tail-parse double-count) must NOT advance
+    the milestone ladder (which would mute the watchdog for the rest of the
+    burst) nor poison peak_ctx (which inflates the learned-window tier). The
+    spike value is still recorded as last_ctx so the next eval can corroborate."""
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "spk1.state.json").write_text(json.dumps(
+        {"last_milestone_tokens": 130_000, "last_ctx": 145_000,
+         "peak_ctx": 145_000}))
+    r = _run_ptu(tmp_path, "spk1", 303_000)          # 303k vs prev 145k = spike
+    assert r.returncode == 0
+    assert r.stdout == ""                            # spike does not announce
+    st = _read_state(tmp_path, "spk1")
+    assert st["last_milestone_tokens"] == 130_000    # ladder NOT advanced
+    assert st["peak_ctx"] == 145_000                 # peak NOT poisoned
+    assert st["last_ctx"] == 303_000                 # recorded for next eval
+
+
+def test_posttooluse_corroborated_high_reading_announces(tmp_path):
+    """A high reading that the previous eval already corroborates is NOT a spike
+    and announces normally (so a genuine large jump is only delayed one eval)."""
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "cor1.state.json").write_text(json.dumps(
+        {"last_milestone_tokens": 130_000, "last_ctx": 190_000,
+         "peak_ctx": 190_000}))
+    r = _run_ptu(tmp_path, "cor1", 192_000)          # ~prev -> not a spike; 0.90 rung
+    assert r.returncode == 0
+    assert "mid-burst" in r.stdout
+    assert _read_state(tmp_path, "cor1")["last_milestone_tokens"] == 180_000
+
+
+def test_is_ctx_spike_detects_transient_jump():
+    assert policy.is_ctx_spike(303_000, 114_000, 200_000) is True   # the report
+    assert policy.is_ctx_spike(186_000, 184_000, 200_000) is False  # steady growth
+    assert policy.is_ctx_spike(160_000, 0, 200_000) is False        # first eval
+    assert policy.is_ctx_spike(303_000, 303_000, 200_000) is False  # corroborated
+
+
+def test_burst_milestone_fills_danger_band():
+    """Every occupancy rung between the hard line and the window is reachable —
+    no rung-to-rung gap leaves a silent zone (the old 100k-step bug)."""
+    cfg = policy.resolve_policy_config("claude", 200_000)
+    _, hard = policy.advisory_band(cfg)
+    reached = {policy.burst_milestone(cfg, c)
+               for c in range(hard, 200_001, 2_000)}
+    for pct in (0.70, 0.80, 0.90, 0.97):
+        assert int(pct * 200_000) in reached
+    # below the soft line -> no milestone
+    assert policy.burst_milestone(cfg, 10_000) == 0
+
+
+def test_promptpath_spike_does_not_poison_peak(tmp_path):
+    """Symmetric with the PostToolUse guard: a single anomalous context reading
+    on the UserPromptSubmit path must not advance peak_ctx (which would inflate
+    the learned-window tier — the 303k spike bumped a session to the 512k tier).
+    last_ctx is still recorded so the next eval can corroborate a real jump."""
+    state_dir = tmp_path / ".claude" / "autocompactor"
+    state_dir.mkdir(parents=True)
+    (state_dir / "pspk.state.json").write_text(json.dumps(
+        {"last_ctx": 145_000, "peak_ctx": 145_000}))
+    t = tmp_path / "t.jsonl"
+    t.write_text(json.dumps(_assistant(usage=_usage(303_000))) + "\n")
+    payload = json.dumps({
+        "session_id": "pspk", "cwd": "/tmp", "transcript_path": str(t),
+        "hook_event_name": "UserPromptSubmit", "prompt": "hi"})
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, MONITOR)],
+        input=payload, capture_output=True, text=True,
+        env=_hook_env(tmp_path), cwd=REPO, timeout=60)
+    assert r.returncode == 0
+    st = _read_state(tmp_path, "pspk")
+    assert st["peak_ctx"] == 145_000     # spike did NOT advance peak
+    assert st["last_ctx"] == 303_000     # but recorded for next eval

@@ -116,16 +116,34 @@ badly (claimed 400k ceiling / 336k trigger / env thresholds that were never set)
   landing point: numbers in `systemMessage` (reliable + verbatim), Claude told to
   stay quiet. Do NOT move the readout back into `additionalContext`. (The
   compaction notice rides the same `systemMessage` channel, below.)
-- **Escalating-milestone mid-burst readout (owner Q2: "escalating thresholds
-  only").** During an autonomous burst that produces no `UserPromptSubmit`, the
-  `PostToolUse` watchdog is the only chance to surface a readout — but emitting one
-  per qualifying tool call reads as spam. So `_run_posttooluse` emits the readout
-  only on the **first cross of the soft line**, the **first cross of the hard
-  line**, and each further **+`BURST_MILESTONE_STEP`** (default `100k`) above hard.
-  `last_milestone_tokens` is the highest milestone already announced this burst; it
-  resets to `0` when context drops back below soft (a fresh burst can re-announce).
-  Set `AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS=1` to log cheap `watchdog_skip` evals on
-  at/above-soft non-recommends so PostToolUse coverage is measurable for a day.
+- **Window-invariant occupancy-milestone mid-burst readout (owner Q2: "escalating
+  thresholds", revised 2026-06-18 to occupancy rungs).** During an autonomous burst
+  that produces no `UserPromptSubmit`, the `PostToolUse` watchdog is the only chance
+  to surface a readout — but emitting one per qualifying tool call reads as spam. So
+  `_run_posttooluse` emits the readout only on the **first cross of the soft line**,
+  the **first cross of the hard line**, each **occupancy rung above hard**
+  (`policy.burst_milestone`, default `0.70/0.80/0.90/0.97` × effective window;
+  override via `BURST_MILESTONE_OCCUPANCY`), then **+`tail_pct`×window** steps past
+  the window. `last_milestone_tokens` is the highest rung announced this burst; it
+  resets to `0` when context drops below soft (a fresh burst can re-announce). This
+  **replaced the old fixed `+BURST_MILESTONE_STEP` (100k) ladder**, which was wider
+  than the `[hard≈110k, window 200k]` danger band — after the single hard-line
+  announce the next step (210k) landed past the window, so the watchdog went
+  **silent across the entire 110k→200k danger zone** (the 2026-06-18 "autocompactor
+  doesn't appear to be running" report: a session in `/srv/dev/petabit/skynet`
+  climbed 114k→203k unwarned). Occupancy rungs scale with the window, so no
+  rung-to-rung gap can exceed the `occ_pcts` spacing whatever the window/ceiling.
+- **Single-sample spike guard (same 2026-06-18 fix).** A tail-parse read can
+  momentarily double-count (observed: `303k` for one eval, back to `155k` 4s later).
+  `policy.is_ctx_spike` (>1.5× ratio **and** >0.5×window absolute jump vs the prior
+  `last_ctx`) flags such a read; on a spike the watchdog neither advances the
+  milestone ladder (a spurious high rung would mute it for the rest of the burst)
+  nor updates `peak_ctx` (a spike had inflated the learned window to the 512k tier
+  via `observed_peak`). `last_ctx` is recorded every eval, so a *genuine* sustained
+  jump is corroborated and let through on the next eval. Skip events carry
+  `spike_suspected`. Set `AUTOCOMPACTOR_LOG_WATCHDOG_SKIPS=1` to log cheap
+  `watchdog_skip` evals on at/above-soft non-recommends so PostToolUse coverage is
+  measurable for a day.
 - **Single compaction notice — first-of-either, one-shot (owner Q1).** Neither
   `PreCompact` nor `PostCompact` can carry a user-visible message: **CC 2.1.x
   rejects a `PreCompact` `hookSpecificOutput` outright** (PreCompact/PostCompact
