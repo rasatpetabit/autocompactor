@@ -28,14 +28,16 @@ const PREPARE_TIMEOUT_MS = 60_000
 
 // Repo config (config.json + config.local.json overlay) read once at load.
 // Lets the pre-gate share the bridge's tuning even in env-less processes;
-// env vars still override. BRIDGE points into the checkout, so the config
-// lives next to it.
+// env vars still override. BRIDGE points into src/, so the config lives at
+// the repo root (dirname of BRIDGE dir) — matching the Python bridge's
+// config_lib._load_config() which reads _REPO_ROOT/config.json.
+const CONFIG_DIR = path.dirname(path.dirname(BRIDGE))
 const CFG: any = (() => {
   let merged: any = {}
   for (const name of ["config.json", "config.local.json"]) {
     try {
       const data = JSON.parse(
-        fs.readFileSync(path.join(path.dirname(BRIDGE), name), "utf8"),
+        fs.readFileSync(path.join(CONFIG_DIR, name), "utf8"),
       )
       merged = { ...merged, ...data }
     } catch {
@@ -61,6 +63,22 @@ const RESERVE_FALLBACK = num("AUTOCOMPACTOR_PI_RESERVE", cfgNum("RESERVE", 40_00
 function num(name: string, dflt: number): number {
   const v = parseFloat(process.env[name] ?? "")
   return Number.isFinite(v) ? v : dflt
+}
+
+// Window-aware SOFT_PCT: mirrors pi_bridge's float_windowed(). When the
+// model's context window is >= 300K, the _WIDE variant wins (config.json
+// SOFT_PCT_WIDE or env), falling back to the flat SOFT_PCT. A 976K window
+// at 0.40 would need 374K tokens to trigger — unreachable in most sessions.
+// SOFT_PCT_WIDE (~0.25) scales the gate so compaction advise fires at a
+// practical threshold (~234K), with HARD_PCT_WIDE (~0.40) forcing it.
+function softPctFor(ctxWindow: number): number {
+  if (ctxWindow >= 300_000) {
+    return num(
+      "AUTOCOMPACTOR_PI_SOFT_PCT_WIDE",
+      num("AUTOCOMPACTOR_SOFT_PCT_WIDE", cfgNum("SOFT_PCT_WIDE", SOFT_PCT)),
+    )
+  }
+  return SOFT_PCT
 }
 
 function mode(verdictMode?: unknown): "advise" | "actuate" {
@@ -122,7 +140,11 @@ export default function autocompactor(pi: ExtensionAPI) {
       const window = usage.contextWindow - RESERVE_FALLBACK
       if (window <= 0) return
       // Pre-gate: below SOFT or nothing worth reclaiming or cooling down -> no spawn.
-      if (usage.tokens / window < SOFT_PCT) return
+      // Window-aware: large windows (>=300K) use SOFT_PCT_WIDE so the gate
+      // scales with the model's context window — a 976K GLM-5.2 window at
+      // 0.40 would need 374K tokens (unreachable); WIDE (~0.25) fires at ~234K.
+      const softPct = softPctFor(usage.contextWindow)
+      if (usage.tokens / window < softPct) return
       if (usage.tokens - POST_FLOOR < MIN_SAVINGS) return
       if (usage.tokens - lastRecTokens < COOLDOWN) return
 
