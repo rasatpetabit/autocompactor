@@ -103,6 +103,67 @@ function interceptEnabled(): boolean {
   return true
 }
 
+type StatusLevel = "info" | "warning" | "error"
+
+function setAcStatus(ctx: ExtensionContext, text: string | undefined): void {
+  try {
+    if (!ctx.hasUI) return
+    const ui = ctx.ui as any
+    if (typeof ui?.setStatus === "function") {
+      ui.setStatus("autocompactor", text)
+    }
+  } catch {
+    /* status is best-effort */
+  }
+}
+
+function notify(ctx: ExtensionContext, message: string, level: StatusLevel): void {
+  try {
+    if (!ctx.hasUI) return
+    ctx.ui.notify(message, level)
+  } catch {
+    /* notification is best-effort */
+  }
+}
+
+function persistVisible(
+  pi: ExtensionAPI,
+  message: string,
+  level: StatusLevel = "info",
+): void {
+  try {
+    pi.sendMessage(
+      {
+        customType: "autocompactor.status",
+        content: message,
+        display: true,
+        details: { level, timestamp: Date.now() },
+      },
+      { deliverAs: "followUp" },
+    )
+  } catch {
+    /* persistent status is best-effort */
+  }
+}
+
+function announce(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  message: string,
+  level: StatusLevel = "info",
+  persist = true,
+): void {
+  setAcStatus(ctx, message)
+  notify(ctx, message, level)
+  if (persist) persistVisible(pi, message, level)
+}
+
+function errorText(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message
+  if (typeof err === "string" && err) return err
+  return "unknown error"
+}
+
 async function bridge(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -129,30 +190,83 @@ async function bridge(
 export default function autocompactor(pi: ExtensionAPI) {
   // In-memory cooldown: token reading at the last recommendation.
   let lastRecTokens = -Infinity
-  let selfTriggered = false // reentrancy flag for actuate mode
+  let selfTriggered = false // reentrancy flag for actuate/intercept mode
   let compactionPreTokens = 0 // captured in session_before_compact for post summary
+  let bridgeWarned = false
+
+  pi.on("session_start", async (_event, ctx) => {
+    try {
+      announce(
+        pi,
+        ctx,
+        `autocompactor: loaded (mode=${mode()}, bridge=${BRIDGE}).`,
+        "info",
+        true,
+      )
+    } catch {
+      /* never break Pi */
+    }
+  })
 
   // agent_end: the boundary moment. Zero-spawn pre-gate, then bridge evaluate.
   pi.on("agent_end", async (_event, ctx) => {
     try {
       const usage = ctx.getContextUsage()
-      if (!usage || usage.tokens === null) return // unknown right after compaction
+      if (!usage || usage.tokens === null) {
+        setAcStatus(ctx, "autocompactor: monitoring — context usage unavailable.")
+        return // unknown right after compaction
+      }
       const window = usage.contextWindow - RESERVE_FALLBACK
-      if (window <= 0) return
+      if (window <= 0) {
+        setAcStatus(ctx, "autocompactor: monitoring — invalid effective context window.")
+        return
+      }
       // Pre-gate: below SOFT or nothing worth reclaiming or cooling down -> no spawn.
       // Window-aware: large windows (>=300K) use SOFT_PCT_WIDE so the gate
       // scales with the model's context window — a 976K GLM-5.2 window at
       // 0.40 would need 374K tokens (unreachable); WIDE (~0.25) fires at ~234K.
       const softPct = softPctFor(usage.contextWindow)
-      if (usage.tokens / window < softPct) return
-      if (usage.tokens - POST_FLOOR < MIN_SAVINGS) return
-      if (usage.tokens - lastRecTokens < COOLDOWN) return
+      const occupancy = usage.tokens / window
+      if (occupancy < softPct) {
+        setAcStatus(
+          ctx,
+          `autocompactor: monitoring — ${usage.tokens.toLocaleString()} tokens (${(occupancy * 100).toFixed(0)}% effective), below ${(softPct * 100).toFixed(0)}% gate.`,
+        )
+        return
+      }
+      const estReclaim = usage.tokens - POST_FLOOR
+      if (estReclaim < MIN_SAVINGS) {
+        setAcStatus(
+          ctx,
+          `autocompactor: monitoring — estimated reclaim ~${Math.max(estReclaim, 0).toLocaleString()} tokens, below ${MIN_SAVINGS.toLocaleString()} minimum.`,
+        )
+        return
+      }
+      if (usage.tokens - lastRecTokens < COOLDOWN) {
+        setAcStatus(
+          ctx,
+          `autocompactor: monitoring — cooldown (${Math.max(usage.tokens - lastRecTokens, 0).toLocaleString()}/${COOLDOWN.toLocaleString()} tokens since last recommendation).`,
+        )
+        return
+      }
 
       const verdict = await bridge(pi, ctx, "evaluate", [
         "--tokens", String(usage.tokens),
         "--context-window", String(usage.contextWindow),
       ])
-      if (!verdict?.recommend) return
+      if (!verdict) {
+        const msg = "autocompactor: bridge evaluate returned no data; run install_pi.py --status or reinstall."
+        setAcStatus(ctx, msg)
+        if (!bridgeWarned) {
+          announce(pi, ctx, msg, "warning", true)
+          bridgeWarned = true
+        }
+        return
+      }
+      if (!verdict.recommend) {
+        setAcStatus(ctx, `autocompactor: evaluated — no compaction: ${verdict.reason ?? "criteria not met"}.`)
+        return
+      }
       lastRecTokens = usage.tokens
       const effMode = mode(verdict.mode)
 
@@ -166,33 +280,46 @@ export default function autocompactor(pi: ExtensionAPI) {
         // agent_end handlers from both triggering compaction.
         selfTriggered = true
         compactionPreTokens = usage.tokens
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `autocompactor: criteria met — ${reason}; running compaction now.`,
-            "info",
-          )
-        }
+        announce(
+          pi,
+          ctx,
+          `autocompactor: criteria met — ${reason}; running compaction now.`,
+          "info",
+          true,
+        )
         const prep = await bridge(
           pi, ctx, "prepare", ["--trigger", "actuate"], PREPARE_TIMEOUT_MS)
+        if (!prep?.customInstructions) {
+          announce(
+            pi,
+            ctx,
+            "autocompactor: prepare returned no custom instructions; compacting anyway.",
+            "warning",
+            true,
+          )
+        }
         ctx.compact({
           customInstructions: prep?.customInstructions,
           onComplete: () => { selfTriggered = false },
-          onError: () => { selfTriggered = false },
+          onError: (err) => {
+            announce(pi, ctx, `autocompactor: compaction failed — ${errorText(err)}.`, "error", true)
+            selfTriggered = false
+          },
         })
       } else {
-        // advise mode OR actuate mode with reentrancy guard (compaction in
-        // flight): visible UI notification only. Do not queue visible
-        // custom messages with nextTurn: they persist into the session and
-        // can surface stale/duplicated advice on the next user prompt.
-        if (ctx.hasUI) {
-          const modeTag = effMode === "actuate"
-            ? "compaction in progress"
-            : "advise mode"
-          ctx.ui.notify(
-            `autocompactor: criteria met — ${reason} (${modeTag}).`,
-            "warning",
-          )
-        }
+        // Advise mode OR actuate mode with reentrancy guard (compaction in
+        // flight): persistent visible status. User-visible status never uses
+        // nextTurn; nextTurn is reserved for the hidden post-compaction digest.
+        const modeTag = effMode === "actuate"
+          ? "compaction in progress"
+          : "advise mode"
+        announce(
+          pi,
+          ctx,
+          `autocompactor: criteria met — ${reason} (${modeTag}).`,
+          "warning",
+          true,
+        )
       }
     } catch {
       /* never break Pi */
@@ -209,7 +336,10 @@ export default function autocompactor(pi: ExtensionAPI) {
       // untouched — a second prepare(trigger=native) here is redundant
       // (its result is discarded) and, with the optional LLM digest on,
       // would double the digest cost per self-triggered compaction.
-      if (selfTriggered) return
+      if (selfTriggered) {
+        setAcStatus(ctx, "autocompactor: compaction already in progress; letting self-triggered compaction continue.")
+        return
+      }
       const usage = ctx.getContextUsage()
       // Capture pre-compaction tokens for the post-compaction summary.
       if (usage && usage.tokens != null) {
@@ -218,18 +348,52 @@ export default function autocompactor(pi: ExtensionAPI) {
       // Fire-and-forget prepare for backup + artifacts + founding-goal.
       // Non-intercept: do NOT await — native compaction proceeds immediately.
       if (!interceptEnabled()) {
+        announce(
+          pi,
+          ctx,
+          "autocompactor: native compaction starting — preparing backup/artifacts.",
+          "info",
+          true,
+        )
         void bridge(pi, ctx, "prepare", ["--trigger", "native"], PREPARE_TIMEOUT_MS)
         return
       }
       // Intercept mode: cancel native compaction and re-trigger with
-      // our customInstructions (selfTriggered is false here).
+      // our customInstructions.
+      announce(
+        pi,
+        ctx,
+        "autocompactor: native compaction starting — preparing backup/artifacts with custom instructions.",
+        "info",
+        true,
+      )
       const prep = await bridge(
         pi, ctx, "prepare", ["--trigger", "native"], PREPARE_TIMEOUT_MS)
-      if (!prep?.customInstructions) return
+      if (!prep?.customInstructions) {
+        announce(
+          pi,
+          ctx,
+          "autocompactor: prepare returned no custom instructions; allowing native compaction unchanged.",
+          "warning",
+          true,
+        )
+        return
+      }
+      selfTriggered = true
+      announce(
+        pi,
+        ctx,
+        "autocompactor: intercepting native compaction with custom instructions.",
+        "info",
+        true,
+      )
       ctx.compact({
         customInstructions: prep.customInstructions,
         onComplete: () => { selfTriggered = false },
-        onError: () => { selfTriggered = false },
+        onError: (err) => {
+          announce(pi, ctx, `autocompactor: compaction failed — ${errorText(err)}.`, "error", true)
+          selfTriggered = false
+        },
       })
       return { cancel: true }
     } catch {
@@ -255,31 +419,29 @@ export default function autocompactor(pi: ExtensionAPI) {
         )
       }
 
-      // Visible post-compaction status belongs in the UI, not as a queued
-      // session message. tokensBefore from the compaction entry survives
-      // runtime reloads better than closure state.
+      // Visible post-compaction status is both a UI notification/status and a
+      // persistent displayed custom message. tokensBefore from the compaction
+      // entry survives runtime reloads better than closure state.
       const usage = ctx.getContextUsage()
       const preTokens = event?.compactionEntry?.tokensBefore ?? compactionPreTokens
       const postTokens = usage?.tokens
-      if (ctx.hasUI) {
-        let msg = "autocompactor: compaction completed."
-        if (preTokens > 0 && postTokens != null && postTokens > 0) {
-          const reclaimed = Math.max(preTokens - postTokens, 0)
-          // Anchor the post-compaction occupancy to the true model window the
-          // runtime reports (no reserve guess, no bare %): "X% of ~Wt model
-          // window" cannot be misread the way a lone "(47%)" was.
-          const modelWindow = usage?.contextWindow ?? 0
-          const postOcc = modelWindow > 0
-            ? ` (${((postTokens / modelWindow) * 100).toFixed(0)}% of ~${modelWindow.toLocaleString()}t model window)`
-            : ""
-          msg = `autocompactor: compaction completed — context ${preTokens.toLocaleString()} → ${postTokens.toLocaleString()} tokens${postOcc}; reclaimed ~${reclaimed.toLocaleString()} tokens.`
-        } else if (preTokens > 0) {
-          msg = `autocompactor: compaction completed — before context was ${preTokens.toLocaleString()} tokens; current usage will refresh on the next turn.`
-        } else if (postTokens != null && postTokens > 0) {
-          msg = `autocompactor: compaction completed — current context is ${postTokens.toLocaleString()} tokens.`
-        }
-        ctx.ui.notify(msg, "info")
+      let msg = "autocompactor: compaction completed."
+      if (preTokens > 0 && postTokens != null && postTokens > 0) {
+        const reclaimed = Math.max(preTokens - postTokens, 0)
+        // Anchor the post-compaction occupancy to the true model window the
+        // runtime reports (no reserve guess, no bare %): "X% of ~Wt model
+        // window" cannot be misread the way a lone "(47%)" was.
+        const modelWindow = usage?.contextWindow ?? 0
+        const postOcc = modelWindow > 0
+          ? ` (${((postTokens / modelWindow) * 100).toFixed(0)}% of ~${modelWindow.toLocaleString()}t model window)`
+          : ""
+        msg = `autocompactor: compaction completed — context ${preTokens.toLocaleString()} → ${postTokens.toLocaleString()} tokens${postOcc}; reclaimed ~${reclaimed.toLocaleString()} tokens.`
+      } else if (preTokens > 0) {
+        msg = `autocompactor: compaction completed — before context was ${preTokens.toLocaleString()} tokens; current usage will refresh on the next turn.`
+      } else if (postTokens != null && postTokens > 0) {
+        msg = `autocompactor: compaction completed — current context is ${postTokens.toLocaleString()} tokens.`
       }
+      announce(pi, ctx, msg, "info", true)
       compactionPreTokens = 0 // reset for next compaction
     } catch {
       /* never break Pi */
