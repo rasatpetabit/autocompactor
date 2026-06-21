@@ -41,7 +41,11 @@ def test_active_segment_begins_after_last_compaction_entry():
     assert "src/batch.ts" not in st.read_files
 
 
-def test_pi_and_claude_transcript_signal_parity_for_same_logical_session(tmp_path):
+def test_pi_transcript_signals_for_commit_and_verify_session(tmp_path):
+    # Was a Pi<->Claude parser parity check; the Claude entry-parser
+    # (transcript_lib.analyze) was removed in the Pi-only pivot, so this now
+    # pins the Pi parser's signal set directly for the same logical session
+    # (a passing test run followed by a commit -> tests_pass + commit).
     pi_path = _write_jsonl(tmp_path / "pi.jsonl", [
         {
             "type": "message",
@@ -118,72 +122,10 @@ def test_pi_and_claude_transcript_signal_parity_for_same_logical_session(tmp_pat
         },
     ])
 
-    claude_entries = [
-        {
-            "type": "user",
-            "message": {"content": [{"type": "text", "text": "Commit and verify."}]},
-        },
-        {
-            "type": "assistant",
-            "message": {
-                "content": [{
-                    "type": "tool_use",
-                    "id": "claude-test",
-                    "name": "Bash",
-                    "input": {"command": "pytest -q"},
-                }],
-                "usage": {
-                    "input_tokens": 100,
-                    "cache_read_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "output_tokens": 10,
-                },
-            },
-        },
-        {
-            "type": "user",
-            "message": {
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": "claude-test",
-                    "content": "1 passed in 0.01s",
-                    "is_error": False,
-                }]
-            },
-        },
-        {
-            "type": "assistant",
-            "message": {
-                "content": [{
-                    "type": "tool_use",
-                    "id": "claude-commit",
-                    "name": "Bash",
-                    "input": {"command": "git commit -am 'ship tests'"},
-                }],
-                "usage": {
-                    "input_tokens": 100,
-                    "cache_read_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "output_tokens": 10,
-                },
-            },
-        },
-        {
-            "type": "user",
-            "message": {
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": "claude-commit",
-                    "content": "[main abc123] ship tests",
-                    "is_error": False,
-                }]
-            },
-        },
-    ]
-
-    assert _signal_names(pi_session_lib.analyze(pi_path)) == _signal_names(
-        transcript_lib.analyze(entries=claude_entries)
-    )
+    st = pi_session_lib.analyze(pi_path)
+    assert st.recent_tests_pass
+    assert st.recent_commit
+    assert set(_signal_names(st)) == {"commit", "tests_pass"}
 
 
 def test_session_with_no_compaction_returns_stats(tmp_path):

@@ -1,0 +1,7 @@
+{"type": "session", "version": 3, "id": "22222222-2222-4222-8222-222222222222", "cwd": "/workspace/p"}
+{"type": "message", "id": "u1", "parentId": null, "message": {"role": "user", "content": [{"type": "text", "text": "Build the frobnicator with 100% compat"}]}}
+{"type": "message", "id": "a1", "parentId": "u1", "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}], "usage": {"input": 100, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 105}}}
+{"type": "message", "id": "u2", "parentId": "a1", "message": {"role": "user", "content": [{"type": "text", "text": "also add tests"}]}}
+{"type": "message", "id": "u3", "parentId": "u2", "message": {"role": "user", "content": [{"type": "text", "text": "third message"}]}}
+{"type": "message", "id": "u4", "parentId": "u3", "message": {"role": "user", "content": [{"type": "text", "text": "fourth message -- beyond the cap"}]}}
+{"type": "message", "id": "a2", "parentId": "u4", "message": {"role": "assistant", "content": [{"type": "text", "text": "working"}], "usage": {"input": 200, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 205}}}

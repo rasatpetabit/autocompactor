@@ -87,27 +87,15 @@ def test_analyze_rich_fixture_core_fields():
 # ------------------------------------------------- task-tool state tracking
 
 
-def test_todowrite_shape_still_supported():
-    entries = [_assistant("TodoWrite", {"todos": [
-        {"content": "a", "status": "completed"},
-        {"content": "b", "status": "pending"}]})]
-    st = tl.analyze(entries=entries)
-    assert st.todo_step and not st.todos_all_done
-
-
-def test_taskcreate_failed_result_not_tracked():
-    entries = [
-        _assistant("TaskCreate", {"subject": "a"}, tool_id="c1"),
-        _tool_result("error: tasks unavailable", tool_id="c1", is_error=True),
-    ]
-    st = tl.analyze(entries=entries)
-    assert st.todos == []
-
-
-def test_agent_and_task_tools_both_set_subagent_signal():
-    for name in ("Task", "Agent"):
-        st = tl.analyze(entries=[_assistant(name, {"prompt": "x"})])
-        assert st.task_tool_recent, name
+def test_subagent_signal_emitted_when_task_tool_recent():
+    # Was a Claude-parser test (Task/Agent tool_use -> task_tool_recent); the
+    # entry-parser was removed in the Pi-only pivot. task_tool_recent is
+    # harness-agnostic state; assert active_signals surfaces subagent_done
+    # from it (active_signals returns the raw registry; observe-only gating is
+    # applied by callers, not here).
+    st = tl.TranscriptStats()
+    st.task_tool_recent = True
+    assert "subagent_done" in dict(tl.active_signals(st))
 
 
 # ------------------------------------------------------------ signals/phase
@@ -140,10 +128,18 @@ def test_stale_output_threshold_respected():
 def test_active_signals_empty_and_degenerate_transcripts():
     """active_signals must not crash and fires nothing on empty / single-entry
     transcripts (no usage series, no boundary signals to gate on)."""
-    assert tl.active_signals(tl.analyze(entries=[])) == []
-    assert tl.active_signals(tl.analyze(entries=[_human("hi")])) == []
-    one = tl.analyze(entries=[_assistant(usage=_usage(40_000))])
-    assert isinstance(tl.active_signals(one), list)
+    assert tl.active_signals(tl.TranscriptStats()) == []
+    # a single user turn with no assistant usage: still no boundary signals
+    one_user = tl.TranscriptStats()
+    one_user.user_prompt_chars = 2
+    assert tl.active_signals(one_user) == []
+    # a single assistant turn with usage but no signal-bearing state
+    one_asst = tl.TranscriptStats()
+    one_asst.context_tokens = 40_000
+    one_asst.last_usage = {"input_tokens": 40_000}
+    one_asst.usage_series = [40_000]
+    assert isinstance(tl.active_signals(one_asst), list)
+    assert tl.active_signals(one_asst) == []
 
 
 def test_topic_shift_degenerate_prompts():
@@ -154,53 +150,34 @@ def test_topic_shift_degenerate_prompts():
 
 
 def test_failed_tap_output_does_not_count_as_tests_passed():
-    entries = [
-        _assistant("Bash", {"command": "node --test"}, tool_id="t1"),
-        _tool_result("not ok 1 test\n# failed", tool_id="t1", is_error=True),
-    ]
-    st = tl.analyze(entries=entries)
+    # The TEST_PASS_RE guard against false positives lives in the parser; the
+    # parser-level case ("not ok 1 test" is an error result -> recent_tests_pass
+    # stays False) is now covered by the Pi parser. Here we assert the agnostic
+    # contract: a stats object with recent_tests_pass unset emits no tests_pass
+    # signal, AND the regex itself rejects failing TAP output.
+    assert not tl.TEST_PASS_RE.search("not ok 1 test\n# failed")
+    st = tl.TranscriptStats()
     assert not st.recent_tests_pass
     assert "tests_pass" not in dict(tl.active_signals(st))
 
 
-def test_analyze_resets_active_signals_after_compact_boundary():
-    entries = [
-        _human("Original goal"),
-        _assistant("Bash", {"command": "git commit -m done"}, tool_id="c1",
-                   usage=_usage(120_000)),
-        _tool_result("[main abc123] done", tool_id="c1"),
-        {"type": "system", "subtype": "compact_boundary",
-         "compactMetadata": {"preTokens": 120_000, "postTokens": 70_000}},
-        {"type": "user", "isCompactSummary": True,
-         "message": {"content": [{"type": "text", "text": "summary"}]}},
-        _assistant(usage=_usage(110_000)),
-    ]
-    st = tl.analyze(entries=entries)
-    assert st.initial_user_prompts == ["Original goal"]
-    assert st.context_tokens == 110_000
-    assert not st.recent_commit
+def test_active_signals_quiet_after_boundary_resets_commit():
+    # Post-boundary the parser drops pre-boundary state (recent_commit) and
+    # carries the survivors (initial_user_prompts, context_tokens). The
+    # boundary-segmentation parsing now lives in pi_session_lib (covered by the
+    # with_compaction Pi fixture). Here we pin the agnostic contract that, given
+    # the post-boundary state, active_signals emits no commit signal.
+    st = tl.TranscriptStats()
+    st.initial_user_prompts = ["Original goal"]
+    st.context_tokens = 110_000
+    st.last_usage = {"input_tokens": 110_000}
+    st.recent_commit = False
     assert "commit" not in dict(tl.active_signals(st, window=300_000,
                                                   stale_frac_thr=0.9))
-
-
-def test_analyze_counts_compaction_boundaries():
-    entries = [
-        _human("Original goal"),
-        _assistant(usage=_usage(100_000)),
-        {"type": "system", "subtype": "compact_boundary",
-         "compactMetadata": {"preTokens": 100_000, "postTokens": 60_000}},
-        _assistant(usage=_usage(150_000)),
-        {"type": "system", "subtype": "compact_boundary",
-         "compactMetadata": {"preTokens": 150_000, "postTokens": 70_000}},
-        _assistant(usage=_usage(80_000)),
-    ]
-    st = tl.analyze(entries=entries)
-    assert st.compaction_count == 2
-    # build_context_state surfaces the real count, not a stuck-at-0 default
+    # build_context_state surfaces the carried compaction_count verbatim
+    # (parser-side counting is covered by the Pi fixture tests).
+    st.compaction_count = 2
     assert "Compaction count: 2" in tl.build_context_state(st, window=300_000)
-    # a transcript with no compactions reports 0
-    st0 = tl.analyze(entries=[_human("hi"), _assistant(usage=_usage(50_000))])
-    assert st0.compaction_count == 0
 
 
 def test_detect_phase_variants():
@@ -272,14 +249,9 @@ def test_merge_handles_empty_sides():
 
 
 def test_initial_prompts_captured_verbatim():
-    entries = [
-        _human("Build the frobnicator with 100% compat"),
-        _assistant(text="ok"),
-        _human("also add tests"),
-        _human("third message"),
-        _human("fourth message -- beyond the cap"),
-    ]
-    st = tl.analyze(entries=entries)
+    # Founding-prompt capture (verbatim, capped at INITIAL_PROMPTS_MAX) now
+    # lives in pi_session_lib; build_preservation_instructions is agnostic.
+    st = psl.analyze(os.path.join(PI_FIX, "initial_prompts.jsonl"))
     assert st.initial_user_prompts == [
         "Build the frobnicator with 100% compat",
         "also add tests",
@@ -288,19 +260,6 @@ def test_initial_prompts_captured_verbatim():
     assert st.last_user_task == "fourth message -- beyond the cap"
     instr = tl.build_preservation_instructions(st, cwd="")
     assert "Build the frobnicator with 100% compat" in instr
-
-
-def test_initial_prompts_skip_harness_injected():
-    summary = _human("This session is being continued from a previous "
-                     "conversation that ran out of context...")
-    summary["isCompactSummary"] = True
-    meta = _human("Caveat: the messages below were generated by the user...")
-    meta["isMeta"] = True
-    entries = [summary, meta, _human("real founding prompt"),
-               _human("/compact")]
-    st = tl.analyze(entries=entries)
-    assert st.initial_user_prompts == ["real founding prompt"]
-    assert st.last_user_task == "real founding prompt"
 
 
 def test_initial_prompts_merge_old_wins():
@@ -485,22 +444,6 @@ def test_burn_rate_signal_does_not_claim_forced_autocompact():
     assert "burn_rate" in sigs              # within the horizon at this burn
     assert "autocompact" not in sigs["burn_rate"]
     assert "compact line" in sigs["burn_rate"]
-
-
-# --------------------------- never-raise hardening (malformed transcript body)
-
-
-def test_analyze_survives_non_dict_usage():
-    """A non-dict message.usage (corruption / producer-version skew) reaches
-    usage.get(...) and used to crash analyze(); the turn is now skipped and a
-    later well-formed turn is still counted."""
-    entries = [
-        _human("hi"),
-        {"type": "assistant", "message": {"usage": "not-a-dict", "content": []}},
-        _assistant(usage=_usage(50_000)),
-    ]
-    st = tl.analyze(entries=entries)
-    assert st.context_tokens == 50_000
 
 
 def _isolate_config(monkeypatch):
