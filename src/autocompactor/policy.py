@@ -94,13 +94,13 @@ def readout_line(used: int, soft: int = 0, hard: int = 0,
     * the autocompactor ADVISORY band (soft..hard): the token range above which
       this tool *suggests* compacting early to keep cached-read cost low. These
       are recommendations, NOT walls — being above them is expected and fine.
-    * the forced wall: Claude's own native auto-compaction (forced_auto =
-      native_ceiling × pct). This is the only point where a compaction is
-      actually forced. We show headroom to it so "near the soft limit" can
-      never be misread as "one turn from auto-compacting" (owner feedback).
+    * the forced wall: the harness's own forced compaction point (forced_auto).
+      This is the only point where a compaction is actually forced. We show
+      headroom to it so "near the soft limit" can never be misread as "one turn
+      from auto-compacting" (owner feedback).
 
-    model_window is shown only when the caller has a confident estimate (Claude
-    cannot see the live window directly), else omitted."""
+    model_window is shown only when the caller supplies a confident estimate,
+    else omitted."""
     parts = [f"{_fmt_tokens(used)} in context"]
     if soft and hard and abs(int(hard) - int(soft)) >= 1000:
         parts.append(f"compact advised ~{_fmt_tokens(soft)}–{_fmt_tokens(hard)}")

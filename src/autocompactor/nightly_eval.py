@@ -2,27 +2,17 @@
 """
 nightly_eval.py — scheduled self-evaluation for autocompactor.
 
-Run nightly from cron (no Claude Code environment needed — thresholds are
-read from ~/.claude/settings.json directly):
+Run nightly from cron:
 
     30 3 * * * cd /srv/dev/ras/autocompactor && python3 src/nightly_eval.py
 
 Each run:
   1. Runs the test suites (pytest + smoke) — the canary for transcript
-     schema drift after Claude Code upgrades.
-  2. Backtests the last day's transcripts; writes a dated JSON report to
-     ~/.claude/autocompactor/reports/.
-  3. Aggregates live hook telemetry (--events equivalent).
-  4. Health checks: hooks firing at all, forced compactions beating the
-     hard nag, ceiling violations, dead signals, CLI version changes,
-     auto-trigger drift vs. the native_auto_estimate (ceiling × pct) —
-     epoch-sourced from precompact events and deferred when <3 current-epoch
-     autos are in the window — session-anchored rapid-refill-breaker symptoms,
-     realized post-compaction reduction, native-microcompaction rollout
-     markers.
-  5. Appends one summary line to reports/nightly_history.jsonl and writes
+     schema drift after harness upgrades.
+  2. Aggregates live hook telemetry; realized post-compaction reduction.
+  3. Appends one summary line to reports/nightly_history.jsonl and writes
      a human-readable reports/nightly-YYYY-MM-DD.md.
-  6. Prunes artifacts/backups/reports older than RETENTION_DAYS.
+  4. Prunes artifacts/backups/reports older than RETENTION_DAYS.
 
 Local-only and content-free, like all autocompactor telemetry. Always
 exits 0 (issues are reported in the outputs, not the exit code).
@@ -41,33 +31,11 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # checkout root
 import autocompactor.config_lib as config_lib  # noqa: E402
-from autocompactor import policy, window_resolver  # noqa: E402
 
 BASE = os.path.expanduser("~/.claude/autocompactor")
 REPORTS = os.path.join(BASE, "reports")
 HISTORY = os.path.join(REPORTS, "nightly_history.jsonl")
-SETTINGS = os.path.expanduser("~/.claude/settings.json")
 RETENTION_DAYS = 30
-CEILING_SLACK = 40_000   # auto-compact may overshoot the ceiling mid-turn
-# Where native autocompact actually fires = native_ceiling ×
-# CLAUDE_AUTOCOMPACT_PCT_OVERRIDE% (default 90%), via
-# window_resolver.native_auto_estimate(). The host ceiling moved 300k→900k on
-# 2026-06-17, so the estimate moved ~270k→~810k; the old `0.675 × min(ceiling,
-# 200k)` model hard-predicted 135k regardless of the real ceiling and
-# phantom-flagged every session as "drifted" — retired. The drift watch is
-# sourced from the EPOCH-STAMPED precompact events (epoch_auto_trigger()) and
-# defers when <3 current-epoch autos are in the 1-day window (a fresh ceiling
-# change leaves the window holding mostly old-epoch transcripts).
-TRIGGER_DEVIATION = 25_000   # |current-epoch auto median - estimate| worth a note
-MICRO_MARKER = "[Old tool result content cleared]"   # native microcompaction
-
-
-def settings_env() -> dict:
-    try:
-        with open(SETTINGS, encoding="utf-8") as fh:
-            return json.load(fh).get("env", {}) or {}
-    except Exception:
-        return {}
 
 
 def run(cmd: list, timeout: int = 1800) -> tuple:
@@ -98,63 +66,6 @@ def day_events(hours: float = 26.0) -> list:
     except OSError:
         pass
     return out
-
-
-def auto_warning_coverage(pre: list, mon: list, live_ceiling=None) -> dict:
-    """Of the CURRENT-config native autos the hooks saw, how many got an advance
-    recommendation? Returns counts dict.
-
-    WI-1 corrections vs the naive metric (which over-reported "unwarned"):
-      * epoch filter — count only autos from the current native_ceiling config.
-        Old-config autos (e.g. native auto at ~133k under a former ~150k window)
-        and pre-instrumentation events (native_ceiling=None) are excluded; an
-        auto recorded at ~133k is not a native auto at a 300k ceiling.
-      * cold-start separation — a native auto that fires before ANY monitor_eval
-        ran in the session (resumed/cold-start) is unwarnable, not a miss.
-      * session-level warned — warned if ANY prior recommended eval exists in the
-        session, not just within the immediately-preceding precompact interval
-        (which marked repeat/rapid-refill autos unwarned even when warned earlier).
-    """
-    autos = [e for e in pre if e.get("trigger") == "auto"]
-    epoch = live_ceiling
-    if epoch is None:                      # fall back to the modal observed ceiling
-        ceilings = [e.get("native_ceiling") for e in autos if e.get("native_ceiling")]
-        epoch = max(set(ceilings), key=ceilings.count) if ceilings else None
-    cur = [e for e in autos
-           if epoch is None or e.get("native_ceiling") == epoch]
-    warned = unwarned = cold_start = 0
-    for ev in cur:
-        sid, ts = ev.get("session_id"), ev.get("ts", "")
-        prior = [m for m in mon
-                 if m.get("session_id") == sid and m.get("ts", "") < ts]
-        if not prior:
-            cold_start += 1
-        elif any(m.get("recommended") for m in prior):
-            warned += 1
-        else:
-            unwarned += 1
-    return {"warned": warned, "unwarned": unwarned, "cold_start": cold_start,
-            "off_epoch": len(autos) - len(cur), "epoch": epoch,
-            "auto_seen": len(autos)}
-
-
-def epoch_auto_trigger(pre: list, epoch) -> tuple:
-    """Median pre-compaction size of CURRENT-epoch native autos, sourced from
-    the epoch-stamped `precompact` events (each carries `trigger` +
-    `native_ceiling`). Returns (median_or_None, n).
-
-    The drift watch must read from events, not backtest sessions: backtest
-    `before` values can't epoch-stamp, so a 1-day window that still contains
-    old-epoch transcripts mixes ceiling regimes and would phantom-flag a
-    "drift" on every ceiling change. Mirrors the epoch selection in
-    auto_warning_coverage().
-    """
-    cur = [e.get("context_tokens") for e in pre
-           if e.get("trigger") == "auto" and e.get("context_tokens")
-           and (epoch is None or e.get("native_ceiling") == epoch)]
-    if not cur:
-        return None, 0
-    return statistics.median(cur), len(cur)
 
 
 def realized_reductions(pre: list, mon: list) -> dict:
@@ -204,21 +115,9 @@ def prune(directory: str, days: int = RETENTION_DAYS) -> int:
 def main() -> int:
     os.makedirs(REPORTS, exist_ok=True)
     today = datetime.date.today().isoformat()
-    env = settings_env()
     window = config_lib.cfg.float("WINDOW", default=200_000)
     hard_pct = config_lib.cfg.float("HARD_PCT", default=0.65)
-    stale_frac = config_lib.cfg.float("STALE_FRAC", default=0.90)
-    # Window-aware SOFT: derive from the target curve (parity with the live
-    # monitor) unless a deprecated SOFT_PCT override is set.
-    if config_lib.cfg.raw("SOFT_PCT") is not None:
-        soft_pct = config_lib.cfg.float("SOFT_PCT", default=0.40)
-    else:
-        _prof = config_lib.cfg.str("PROFILE", default="balanced") or "balanced"
-        _F = config_lib.cfg.float("POST_FLOOR", default=70_000)
-        _MS = config_lib.cfg.float("MIN_SAVINGS", default=30_000)
-        soft_pct = policy.target_tokens(window, _prof, _F, _MS, hard_pct) / window
     hard_tokens = window * hard_pct
-    ceiling = float(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", 0)) or None
     issues, notes = [], []
 
     # 1. test suites — schema-drift canary
@@ -227,192 +126,14 @@ def main() -> int:
     tests_pass = py_rc == 0 and sm_rc == 0
     if not tests_pass:
         issues.append("TESTS FAILING — likely transcript schema drift; "
-                      "pin/inspect the Claude Code version")
+                      "pin/inspect the harness version")
 
-    # CLI version change detection (cron PATH lacks ~/.local/bin)
-    claude_bin = next((p for p in (
-        os.path.expanduser("~/.local/bin/claude"), "claude")
-        if p == "claude" or os.path.exists(p)), "claude")
-    rc, ver_out = run([claude_bin, "--version"], timeout=60)
-    version = (ver_out.strip().split("\n")[0]
-               if rc == 0 and ver_out.strip() else "unknown")
-    prev_version = None
-    try:
-        with open(HISTORY, encoding="utf-8") as fh:
-            lines = fh.read().strip().splitlines()
-            if lines:
-                prev_version = json.loads(lines[-1]).get("version")
-    except Exception:
-        pass
-    if prev_version and version != prev_version:
-        notes.append(f"Claude Code version changed: {prev_version} -> "
-                     f"{version}")
-        if not tests_pass:
-            issues.append("version change + failing tests: treat as "
-                          "schema break until proven otherwise")
-
-    # 2. one-day backtest
-    report_path = os.path.join(REPORTS, f"backtest-{today}.json")
-    bt_rc, bt_out = run([sys.executable, "src/analyze_corpus.py",
-                         "--root", "~/.claude/projects", "--days", "1",
-                         "--window", str(window),
-                         "--soft", str(soft_pct),
-                         "--hard", str(hard_pct),
-                         "--stale-frac", str(stale_frac),
-                         "--native-ceiling", str(ceiling or 0),
-                         "--json", report_path])
-    summary_txt = "\n".join(l for l in bt_out.splitlines()
-                            if not l.strip().startswith("- ")
-                            and "skipped" not in l).strip()
-    auto_pre, manual_n, dead = [], 0, []
-    sessions_n = compactions_n = breaker_suspects = 0
-    learned_tiers = {}
-    native_ceiling_blocked_sessions = 0
-    expected_trigger = window_resolver.native_auto_estimate(
-        ceiling, window_resolver.pct_override_from_settings()) if ceiling else None
-    try:
-        with open(report_path, encoding="utf-8") as fh:
-            sessions = json.load(fh)["sessions"]
-        sessions_n = len(sessions)
-        for s in sessions:
-            tier = s.get("learned_tier") or "unknown"
-            td = learned_tiers.setdefault(tier, {
-                "sessions": 0, "compactions": 0, "late_by_tokens": [],
-                "auto_pre": []})
-            td["sessions"] += 1
-            if s.get("native_ceiling_blocks_learned_window"):
-                native_ceiling_blocked_sessions += 1
-            autos_n = 0
-            sess_autos = []
-            for c in s.get("compactions", []):
-                compactions_n += 1
-                td["compactions"] += 1
-                if "late_by_tokens" in c:
-                    td["late_by_tokens"].append(c["late_by_tokens"])
-                if c.get("trigger") == "auto":
-                    auto_pre.append(c["before"])
-                    td["auto_pre"].append(c["before"])
-                    sess_autos.append(c["before"])
-                    autos_n += 1
-                elif c.get("trigger") == "manual":
-                    manual_n += 1
-            # breaker symptom: repeated auto-compactions, then context
-            # climbing well past the trigger with no further compaction —
-            # the upstream rapid-refill breaker may have disabled
-            # autocompact for the rest of the session. Anchored to the
-            # session's OWN observed auto-trigger (max auto-pre this session),
-            # not the global ceiling estimate — so it stays valid across a
-            # ceiling change and never phantom-flags an old-epoch session whose
-            # real trigger sat far below the current ~ceiling×pct estimate.
-            post_peak = s.get("post_last_compaction_peak")
-            sess_auto = max(sess_autos) if sess_autos else None
-            if (autos_n >= 2 and post_peak and sess_auto
-                    and post_peak > sess_auto + CEILING_SLACK):
-                breaker_suspects += 1
-        # health check: ceiling enforcement
-        if ceiling:
-            over = [p for p in auto_pre if p > ceiling + CEILING_SLACK]
-            if over:
-                issues.append(
-                    f"{len(over)} auto-compaction(s) exceeded the "
-                    f"{ceiling:,.0f}t ceiling (max {max(over):,.0f}t) — "
-                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW may not be applying")
-        # (auto-trigger drift watch runs below, after the epoch-stamped
-        # precompact events are loaded — backtest `auto_pre` mixes ceiling
-        # epochs and would phantom-flag a drift on every ceiling change, so it
-        # cannot be the source. See epoch_auto_trigger().)
-        if breaker_suspects:
-            issues.append(
-                f"{breaker_suspects} session(s) show rapid-refill-breaker "
-                "symptoms: repeated auto-compactions, then context climbing "
-                f">{CEILING_SLACK / 1000:.0f}k past the session's own observed "
-                "auto-trigger with no further compaction — autocompact may "
-                "have been disabled mid-session")
-    except Exception as exc:
-        if bt_rc != 0:
-            issues.append(f"backtest failed: {bt_out[-300:]}")
-        else:
-            notes.append(f"report parse: {type(exc).__name__}: {exc}")
-    for line in bt_out.splitlines():
-        if "never fired" in line:
-            dead.append(line.strip("* ").strip())
-    for td in learned_tiers.values():
-        late = td.pop("late_by_tokens")
-        pres = td.pop("auto_pre")
-        td["late_median"] = round(statistics.median(late)) if late else None
-        td["auto_pre_median"] = round(statistics.median(pres)) if pres else None
-
-    # 3. live telemetry (hooks actually running?)
+    # 2. live telemetry (hooks actually running?)
     evs = day_events()
     mon = [e for e in evs if e.get("type") == "monitor_eval"]
     pre = [e for e in evs if e.get("type") == "precompact"]
     rei = [e for e in evs if e.get("type") == "reinject"]
-    had_sessions = sessions_n > 0
-    if had_sessions and not mon:
-        issues.append("sessions ran in the last day but ZERO monitor_eval "
-                      "telemetry — hooks may be unregistered or crashing")
     recos = sum(1 for e in mon if e.get("recommended"))
-
-    # Hook-coverage self-check: transcript compactions (ground truth, from
-    # the backtest) vs PreCompact hook events. Both hook event counts drop
-    # TOGETHER in a Claude Code hook-invocation regression, so an
-    # evals/precompact ratio cannot detect a total hook death — but this
-    # ratio against transcript compactions can, and it catches PARTIAL
-    # deaths too (a silent regression that still logs a few evals; e.g. the
-    # 2026-06-11 2.1.173 upgrade left ~87 transcript compactions but only
-    # ~1 precompact event). See miss-attribution.md.
-    hook_coverage = (len(pre) / compactions_n) if compactions_n else None
-    if compactions_n >= 3 and (hook_coverage or 0) < 0.5:
-        issues.append(
-            f"PreCompact hook fired for only {len(pre)}/{compactions_n} "
-            f"transcript compactions ({(hook_coverage or 0):.0%}) — hooks "
-            "are under-firing (upgrade regression? ensure the PostToolUse "
-            "watchdog is installed: python3 src/install.py)")
-
-    # The purpose metric (WI-1 corrected): of the CURRENT-config native autos the
-    # hooks saw, how many got an advance recommendation earlier in the session?
-    # Epoch-filtered, cold-start-separated, session-level — see
-    # auto_warning_coverage(). The naive per-interval metric over-reported
-    # "unwarned" by mixing config epochs and counting unwarnable cold-starts.
-    cov = auto_warning_coverage(
-        pre, mon, window_resolver.native_ceiling_from_settings())
-    unwarned = cov["unwarned"]
-    measurable = cov["warned"] + unwarned        # cold-starts are unwarnable
-    # Min sample of 4 avoids alarming on tiny n (one cold/odd auto = "100%").
-    if measurable >= 4 and unwarned > measurable * 0.5:
-        issues.append(
-            f"{unwarned}/{measurable} current-config auto-compactions arrived "
-            "with no advance recommendation — thresholds/signals are not "
-            "engaging before the trigger; inspect --events and per-signal "
-            "precision")
-    if cov["cold_start"] or cov["off_epoch"]:
-        notes.append(
-            f"auto coverage: {cov['warned']} warned / {unwarned} unwarned"
-            f" (epoch ceiling {cov['epoch']}); {cov['cold_start']} cold-start"
-            " (fired before any hook eval — unwarnable),"
-            f" {cov['off_epoch']} off-epoch auto(s) excluded")
-
-    # Auto-trigger drift watch (relocated here, epoch-sourced). Compares the
-    # CURRENT-epoch auto-trigger median — taken from the epoch-stamped
-    # precompact events — against the ~ceiling×pct estimate. Require >=3
-    # current-epoch autos; with fewer (the ceiling changed recently and the
-    # window still holds mostly old-epoch transcripts) defer with a note
-    # rather than emit a phantom "retune" issue.
-    trig_med, trig_n = epoch_auto_trigger(
-        pre, window_resolver.native_ceiling_from_settings())
-    if expected_trigger and trig_n >= 3:
-        if abs(trig_med - expected_trigger) > TRIGGER_DEVIATION:
-            notes.append(
-                f"auto-trigger median {trig_med:,.0f}t (current epoch, "
-                f"n={trig_n}) is >{TRIGGER_DEVIATION / 1000:.0f}k from the "
-                f"~{expected_trigger:,.0f}t estimate (ceiling×pct) — retune "
-                "HARD_PCT (config.json claude section) to stay ahead of the "
-                "real trigger")
-    elif expected_trigger and ceiling:
-        notes.append(
-            f"auto-trigger drift check deferred: <3 current-epoch (ceiling "
-            f"{ceiling:,.0f}t) autos in the window (n={trig_n}) — ceiling "
-            "recently changed; re-measure next nightly")
 
     # Realized post-compaction reduction (WI-B): reconstruct the after-size
     # PostCompact can't log, by joining each precompact event to the first
@@ -420,115 +141,32 @@ def main() -> int:
     # reclaim figure; "reclaimed ~Z" was previously unverifiable.
     reduc = realized_reductions(pre, mon)
 
-    # 4. native-microcompaction rollout watch. The cleared-content marker
-    # is statsig-gated upstream (off for this account as of 2026-06); if
-    # it starts appearing, per-turn tool-result clearing changes the
-    # compaction economics and thresholds need a rethink. The autocompactor
-    # dev project is excluded — its sessions *discuss* the literal marker.
-    micro_n = 0
-    cutoff_t = time.time() - 26 * 3600
-    for p in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
-        if "-home-grojas-autocompactor" in p:
-            continue
-        try:
-            if os.path.getmtime(p) < cutoff_t:
-                continue
-            with open(p, "rb") as fh:
-                prev = b""
-                while True:
-                    buf = fh.read(1 << 20)
-                    if not buf:
-                        break
-                    if MICRO_MARKER.encode() in prev + buf:
-                        micro_n += 1
-                        break
-                    prev = buf[-64:]
-        except OSError:
-            continue
-    if micro_n:
-        notes.append(
-            f"native-microcompaction marker in {micro_n} recent "
-            "transcript(s) — upstream rollout may have reached this "
-            "account; per-turn tool-result clearing changes the math, "
-            "revisit thresholds")
-
-    # 5. outputs
+    # 3. outputs
     record = {
-        "date": today, "version": version, "tests_pass": tests_pass,
-        "sessions": sessions_n, "compactions": compactions_n,
-        "auto_n": len(auto_pre),
-        "auto_pre_median": (round(statistics.median(auto_pre))
-                            if auto_pre else None),
-        "auto_pre_max": max(auto_pre) if auto_pre else None,
-        "manual_n": manual_n,
+        "date": today, "tests_pass": tests_pass,
         "monitor_evals": len(mon), "recommendations": recos,
         "precompact_events": len(pre), "reinjects": len(rei),
-        "auto_seen_by_hooks": cov["auto_seen"], "auto_unwarned": unwarned,
-        "auto_warned": cov["warned"], "auto_cold_start": cov["cold_start"],
-        "auto_off_epoch": cov["off_epoch"], "auto_epoch_ceiling": cov["epoch"],
-        "hook_coverage": (round(hook_coverage, 3)
-                          if hook_coverage is not None else None),
-        "hard_tokens": hard_tokens, "ceiling": ceiling,
-        "expected_trigger": expected_trigger,
-        "auto_trigger_epoch_median": (round(trig_med) if trig_med else None),
-        "auto_trigger_epoch_n": trig_n,
+        "hard_tokens": hard_tokens,
         "reclaim_n": reduc["reclaim_n"], "reclaim_median": reduc["reclaim_median"],
-        "breaker_suspects": breaker_suspects,
-        "micro_marker_sessions": micro_n,
-        "learned_tiers": learned_tiers,
-        "native_ceiling_blocked_sessions": native_ceiling_blocked_sessions,
-        "dead_signals": dead, "issues": issues, "notes": notes,
+        "issues": issues, "notes": notes,
     }
     with open(HISTORY, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
 
     md = [f"# autocompactor nightly — {today}", "",
-          f"- CLI: {version}   tests: {'PASS' if tests_pass else 'FAIL'}",
-          f"- sessions {sessions_n}, compactions {compactions_n} "
-          f"(auto {len(auto_pre)}, manual {manual_n})"]
-    if auto_pre:
-        line = (f"- auto trigger: median {statistics.median(auto_pre):,.0f}t, "
-                f"max {max(auto_pre):,.0f}t (hard nag {hard_tokens:,.0f}t")
-        line += f", ceiling {ceiling:,.0f}t)" if ceiling else ")"
-        md.append(line)
-    md.append(f"- hooks: {len(mon)} evals, {recos} recommendations, "
-              f"{len(pre)} precompact, {len(rei)} reinjects"
-              + (f"  (hook coverage {hook_coverage:.0%} of "
-                  f"{compactions_n} compactions)" if hook_coverage is not None
-                  else ""))
-    if cov["auto_seen"]:
-        md.append(
-            f"- auto warning coverage (epoch {cov['epoch']}): "
-            f"{cov['warned']} warned, {unwarned} unwarned, "
-            f"{cov['cold_start']} cold-start, {cov['off_epoch']} off-epoch")
+          f"- tests: {'PASS' if tests_pass else 'FAIL'}",
+          f"- hooks: {len(mon)} evals, {recos} recommendations, "
+          f"{len(pre)} precompact, {len(rei)} reinjects"]
     if reduc["reclaim_n"]:
         md.append(
             f"- realized reduction: median {reduc['reclaim_median']:,.0f}t "
             f"reclaimed over {reduc['reclaim_n']} compaction(s) "
             "(precompact → first smaller eval)")
-    if expected_trigger:
-        md.append(f"- watches: expected trigger ~{expected_trigger:,.0f}t, "
-                  f"breaker suspects {breaker_suspects}, "
-                  f"micro markers {micro_n}")
-    if learned_tiers:
-        md.append("- learned windows: " + "; ".join(
-            f"{tier}: sessions {data['sessions']}, "
-            f"compactions {data['compactions']}"
-            + (f", auto median {data['auto_pre_median']:,.0f}t"
-               if data.get("auto_pre_median") else "")
-            + (f", late median {data['late_median']:,.0f}t"
-               if data.get("late_median") else "")
-            for tier, data in sorted(learned_tiers.items())))
-    if native_ceiling_blocked_sessions:
-        md.append("- native ceiling blocks learned window: "
-                  f"{native_ceiling_blocked_sessions} session(s)")
     md.append("")
     md.append("## Issues" if issues else "## No issues")
     md += [f"- {i}" for i in issues]
     if notes:
         md += ["", "## Notes"] + [f"- {n}" for n in notes]
-    if summary_txt:
-        md += ["", "## Backtest summary", "```", summary_txt, "```"]
     if not tests_pass:
         md += ["", "## Test output (tail)", "```",
                (py_out + "\n" + sm_out)[-1500:], "```"]
@@ -536,14 +174,13 @@ def main() -> int:
               encoding="utf-8") as fh:
         fh.write("\n".join(md) + "\n")
 
-    # 6. retention
+    # 4. retention
     pruned = sum(prune(os.path.join(BASE, d))
                  for d in ("artifacts", "backups", "reports"))
     if pruned:
         print(f"pruned {pruned} file(s) older than {RETENTION_DAYS}d")
 
     print(f"nightly eval {today}: tests={'PASS' if tests_pass else 'FAIL'} "
-          f"sessions={sessions_n} compactions={compactions_n} "
           f"issues={len(issues)}")
     return 0
 

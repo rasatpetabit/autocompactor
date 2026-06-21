@@ -130,7 +130,6 @@ def cmd_evaluate(opts: dict) -> dict:
     resolution = window_resolver.resolve_window(
         configured_window=configured_window,
         observed_peak=observed_peak,
-        harness=HARNESS,
         runtime_context_window=runtime_context_window,
         reserve=reserve)
     window = resolution.effective_window
@@ -292,7 +291,6 @@ def cmd_prepare(opts: dict) -> dict:
     prepare_resolution = window_resolver.resolve_window(
         configured_window=cfg.float("WINDOW", harness=HARNESS, default=200_000),
         observed_peak=max(st.usage_series) if st.usage_series else st.context_tokens,
-        harness=HARNESS,
         reserve=int(cfg.float("RESERVE", harness=HARNESS, default=RESERVE_FALLBACK)))
     effective_window = prepare_resolution.effective_window
     ctx_state = transcript_lib.build_context_state(
