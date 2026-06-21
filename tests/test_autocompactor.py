@@ -1,10 +1,12 @@
 """Pytest suite for autocompactor (open item #8 — maturity-gap closure).
 
 Covers the harness-agnostic unit surface: transcript_lib / artifacts /
-analyze_corpus / policy / llm_digest. The Claude-hook contract tests
-(context_monitor / precompact_analyzer subprocess behavior) were removed in
-the Pi-only pivot (Task 3) along with those modules; this file now holds only
-the shared-brain tests. They are re-fixtured for Pi in Task 4.
+policy / llm_digest. The Claude-hook contract tests (context_monitor /
+precompact_analyzer subprocess behavior) were removed in the Pi-only pivot
+(Task 3) along with those modules; the Claude backtester (analyze_corpus) and
+its tests were removed in Task 4. This file now holds only the shared-brain
+tests, re-fixtured for Pi (TranscriptStats sourced from
+pi_session_lib.analyze(tests/fixtures/pi/*.jsonl)).
 
 Run from the repo root:  python3 -m pytest tests/ -q
 """
@@ -20,11 +22,15 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(REPO, "tests", "fixtures")
 sys.path.insert(0, REPO)
 
-from autocompactor import analyze_corpus, artifacts, policy  # noqa: E402
+from autocompactor import artifacts, policy  # noqa: E402
 from autocompactor import llm_digest as ld, transcript_lib as tl  # noqa: E402
+from autocompactor import pi_session_lib as psl  # noqa: E402
+
+PI_FIX = os.path.join(REPO, "tests", "fixtures", "pi")
 
 
 # ---------------------------------------------------------------- helpers
+
 
 def _assistant(tool_name=None, tool_input=None, tool_id="t1", usage=None,
                text="", ts=None):
@@ -66,26 +72,20 @@ def _usage(total):
 
 # ------------------------------------------------------ transcript parsing
 
-def test_load_transcript_skips_malformed_lines(tmp_path):
-    p = tmp_path / "t.jsonl"
-    p.write_text('{"type":"user"}\nnot json\n\n{"type":"assistant"}\n')
-    entries = tl.load_transcript(str(p))
-    assert [e["type"] for e in entries] == ["user", "assistant"]
-
-
-def test_load_transcript_missing_file_returns_empty():
-    assert tl.load_transcript("/nonexistent/nope.jsonl") == []
-
 
 def test_analyze_rich_fixture_core_fields():
-    st = tl.analyze(os.path.join(FIX, "rich_transcript.jsonl"))
+    # Re-fixtured onto the Pi parser (Task 4); the `st.todos` sub-assertion was
+    # dropped — Pi never populates todos (todo signals removed). The Pi
+    # with_compaction fixture carries a Bash working-command and a concluded
+    # error-then-clean debug loop so the remaining field coverage survives.
+    st = psl.analyze(os.path.join(PI_FIX, "with_compaction.jsonl"))
     assert st.context_tokens > 0
-    assert st.todos  # fixture carries a TodoWrite state
     assert st.working_commands  # successful Bash commands recorded
     assert st.recent_error_then_clean  # fixture encodes a concluded debug loop
 
 
 # ------------------------------------------------- task-tool state tracking
+
 
 def test_todowrite_shape_still_supported():
     entries = [_assistant("TodoWrite", {"todos": [
@@ -93,35 +93,6 @@ def test_todowrite_shape_still_supported():
         {"content": "b", "status": "pending"}]})]
     st = tl.analyze(entries=entries)
     assert st.todo_step and not st.todos_all_done
-
-
-def test_taskcreate_taskupdate_synthesis():
-    entries = [
-        _assistant("TaskCreate", {"subject": "ship it"}, tool_id="c1"),
-        _tool_result("Task #1 created successfully: ship it", tool_id="c1"),
-        _assistant("TaskCreate", {"subject": "test it"}, tool_id="c2"),
-        _tool_result("Task #2 created successfully: test it", tool_id="c2"),
-        _assistant("TaskUpdate", {"taskId": "1", "status": "completed"}),
-    ]
-    st = tl.analyze(entries=entries)
-    assert len(st.todos) == 2
-    assert st.todo_step and not st.todos_all_done
-    sigs = dict(tl.active_signals(st))
-    assert "todo_step" in sigs
-
-
-def test_taskupdate_all_completed_and_deleted():
-    entries = [
-        _assistant("TaskCreate", {"subject": "a"}, tool_id="c1"),
-        _tool_result("Task #1 created successfully: a", tool_id="c1"),
-        _assistant("TaskCreate", {"subject": "b"}, tool_id="c2"),
-        _tool_result("Task #2 created successfully: b", tool_id="c2"),
-        _assistant("TaskUpdate", {"taskId": "1", "status": "completed"}),
-        _assistant("TaskUpdate", {"taskId": "2", "status": "deleted"}),
-    ]
-    st = tl.analyze(entries=entries)
-    assert st.todos_all_done
-    assert dict(tl.active_signals(st)).get("todos_done")
 
 
 def test_taskcreate_failed_result_not_tracked():
@@ -140,6 +111,7 @@ def test_agent_and_task_tools_both_set_subagent_signal():
 
 
 # ------------------------------------------------------------ signals/phase
+
 
 def test_topic_shift_detection():
     st = tl.TranscriptStats()
@@ -245,7 +217,7 @@ def test_detect_phase_variants():
 
 
 def test_instructions_contain_schema_phase_and_anchors():
-    st = tl.analyze(os.path.join(FIX, "rich_transcript.jsonl"))
+    st = psl.analyze(os.path.join(PI_FIX, "with_compaction.jsonl"))
     out = tl.build_preservation_instructions(st, cwd="/tmp/x")
     assert "structured handoff" in out
     assert "Session-specific anchors" in out
@@ -254,9 +226,10 @@ def test_instructions_contain_schema_phase_and_anchors():
 
 # ---------------------------------------------------------------- artifacts
 
+
 def test_artifact_roundtrip_and_budget(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    st = tl.analyze(os.path.join(FIX, "rich_transcript.jsonl"))
+    st = psl.analyze(os.path.join(PI_FIX, "with_compaction.jsonl"))
     arts = artifacts.extract(st)
     artifacts.save("pytest-sess", arts)
     loaded = artifacts.load("pytest-sess")
@@ -359,61 +332,6 @@ def test_digest_founding_goal_survives_budget_trim():
 
 # ------------------------------------------------------- compaction events
 
-def test_find_compactions_prefers_explicit_markers():
-    entries = [
-        _assistant(usage=_usage(150_000)),
-        {"type": "system", "subtype": "compact_boundary",
-         "compactMetadata": {"trigger": "auto", "preTokens": 180_000,
-                             "postTokens": 20_000}},
-        _assistant(usage=_usage(25_000)),
-    ]
-    traj = analyze_corpus.trajectory(entries)
-    events = analyze_corpus.find_compactions(traj, entries)
-    assert len(events) == 1
-    ev = events[0]
-    assert ev["before"] == 180_000 and ev["after"] == 20_000
-    assert ev["trigger"] == "auto" and ev["explicit"]
-
-
-def test_analyze_prefix_includes_sampled_entry():
-    entries = [
-        _assistant(usage=_usage(90_000)),
-        _assistant("Bash", {"command": "git commit -m x"}, usage=_usage(160_000)),
-    ]
-    st = analyze_corpus.analyze_prefix(entries, 1)
-    assert st.context_tokens == 160_000
-    assert st.recent_commit
-
-
-def test_analyze_prefix_boundary_cases():
-    """Backtester fidelity (fix 6d4a533 uses entries[:upto+1]): upto=0 keeps
-    exactly the first entry; upto<0 yields an empty analysis, never an error."""
-    entries = [_human("start"), _assistant(usage=_usage(50_000))]
-    st0 = analyze_corpus.analyze_prefix(entries, 0)
-    assert len(st0.entries) == 1 and st0.context_tokens == 0
-    st_neg = analyze_corpus.analyze_prefix(entries, -1)
-    assert st_neg.entries == [] and st_neg.context_tokens == 0
-
-
-def test_backtester_signal_registry_matches_monitor():
-    """Invariant: the live monitor and the backtester MUST share one signal
-    registry. Pin it — analyze_corpus.active_signals (names) equals the names
-    transcript_lib yields for the same state, so the two cannot silently
-    diverge (the backtester is just the name-projection of the registry)."""
-    st = tl.TranscriptStats()
-    st.recent_commit = True
-    st.todos = [{"content": "a", "status": "completed"}]
-    st.todos_all_done = True
-    st.stale_tool_chars, st.total_tool_chars = 80, 100
-    st.usage_series = [100_000, 130_000, 160_000]
-    st.context_tokens = 160_000
-    registry = [name for name, _ in tl.active_signals(
-        st, window=200_000, stale_frac_thr=0.5)]
-    backtester = analyze_corpus.active_signals(
-        st, window=200_000, stale_frac_thr=0.5)
-    assert backtester == registry
-    assert "commit" in backtester  # sanity: this state actually fires signals
-
 
 def test_build_context_state_uses_window_harness_and_default_count(monkeypatch):
     monkeypatch.setenv("AUTOCOMPACTOR_PI_OBSERVE_ONLY", "stale_output")
@@ -428,6 +346,7 @@ def test_build_context_state_uses_window_harness_and_default_count(monkeypatch):
 
 
 # ------------------------------------------- dual-anchor readout + composition
+
 
 def test_readout_line_separates_advisory_band_from_forced_wall():
     """The advisory soft–hard band and the forced native wall are different
@@ -570,6 +489,7 @@ def test_burn_rate_signal_does_not_claim_forced_autocompact():
 
 # --------------------------- never-raise hardening (malformed transcript body)
 
+
 def test_analyze_survives_non_dict_usage():
     """A non-dict message.usage (corruption / producer-version skew) reaches
     usage.get(...) and used to crash analyze(); the turn is now skipped and a
@@ -582,17 +502,6 @@ def test_analyze_survives_non_dict_usage():
     st = tl.analyze(entries=entries)
     assert st.context_tokens == 50_000
 
-
-def test_load_transcript_skips_non_object_json_lines(tmp_path):
-    """Valid JSON that isn't an object (bare string/number) would crash the
-    .get() calls in analyze(); load_transcript drops it so the parse holds."""
-    p = tmp_path / "t.jsonl"
-    p.write_text('"a bare string"\n42\n[1,2,3]\n{"type":"assistant"}\n')
-    entries = tl.load_transcript(str(p))
-    assert [e.get("type") for e in entries] == ["assistant"]
-
-
-# --------------------------------------------------------------- llm_digest
 
 def _isolate_config(monkeypatch):
     """Hermetic in-process config: ignore repo config.json/config.local.json."""
@@ -657,6 +566,7 @@ def test_public_config_does_not_pin_site_local_llm_defaults():
 
 
 # ---------------------------------- single-sample spike guard (shared policy)
+
 
 def test_is_ctx_spike_detects_transient_jump():
     assert policy.is_ctx_spike(303_000, 114_000, 200_000) is True   # the report

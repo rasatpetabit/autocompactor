@@ -4,7 +4,7 @@ stats.py — autocompactor telemetry.
 
 Appends one JSON line per event to ~/.claude/autocompactor/stats/events.jsonl.
 Local-only; nothing leaves the machine. Used to tune thresholds and phase
-addenda against real behavior (analyze with analyze_corpus.py --events).
+addenda against real behavior.
 
 Event types:
   monitor_eval : every UserPromptSubmit — context_tokens, occupancy,
@@ -12,7 +12,7 @@ Event types:
   precompact   : every compaction — trigger, context_tokens, phase,
                  had_staged, had_user_instructions, instr_chars
 The post-compaction context size is recovered offline by joining the next
-monitor_eval for the same session (analyze_corpus computes reduction ratios).
+monitor_eval for the same session.
 """
 
 import datetime

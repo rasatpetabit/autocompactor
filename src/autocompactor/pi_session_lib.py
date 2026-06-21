@@ -374,13 +374,6 @@ def analyze(path: str = "", recent_window: int = 30) -> transcript_lib.Transcrip
     st.corrections = st.corrections[-20:]
     st.hex_constants = st.hex_constants[-20:]
 
-    if st.todos:
-        st.todos_all_done = all(t.get("status") == "completed" for t in st.todos)
-        st.todo_step = (
-            any(t.get("status") == "completed" for t in st.todos)
-            and any(t.get("status") != "completed" for t in st.todos)
-        )
-
     if recent_result_flags:
         had_err = any(recent_result_flags)
         tail = recent_result_flags[-3:]

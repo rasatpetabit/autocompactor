@@ -130,129 +130,6 @@ def _entry_ts(entry: dict):
         return None
 
 
-def load_transcript(path: str, start_offset: int = 0) -> list:
-    """Parse JSONL entries, optionally starting at a byte offset.
-
-    start_offset must point at a line start (e.g. from
-    find_last_boundary_offset) — JSONL lines begin on clean UTF-8
-    boundaries, so seeking there is safe.
-    """
-    entries = []
-    try:
-        with open(os.path.expanduser(path), "rb") as fh:
-            if start_offset > 0:
-                fh.seek(start_offset)
-            for raw in fh:
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line.decode("utf-8", "replace"))
-                except json.JSONDecodeError:
-                    continue
-                # Only dict entries are usable; a valid-JSON-but-non-object
-                # line (bare string/number) would crash the .get() calls in
-                # analyze(). Skip it rather than poison the whole parse.
-                if isinstance(obj, dict):
-                    entries.append(obj)
-    except OSError:
-        pass
-    return entries
-
-
-def find_last_boundary_offset(path: str, needle: bytes = b'"compact_boundary"',
-                              chunk: int = 1 << 20) -> int:
-    """Byte offset of the line containing the LAST compaction boundary
-    marker, scanning backwards in chunks; 0 if none (or on any error).
-
-    Lets callers parse only the active (post-compaction) segment of huge
-    transcripts instead of the whole file: between compactions the active
-    segment is bounded by the autocompact ceiling, the dead prefix is not.
-    """
-    def _is_boundary_line(fh, line_off: int) -> bool:
-        # A transcript can *mention* the marker string (e.g. a session
-        # about this very tool), so verify the line is the real thing.
-        try:
-            fh.seek(line_off)
-            entry = json.loads(fh.readline().decode("utf-8", "replace"))
-            return (entry.get("type") == "system"
-                    and entry.get("subtype") == "compact_boundary")
-        except Exception:
-            return False
-
-    try:
-        with open(os.path.expanduser(path), "rb") as fh:
-            fh.seek(0, 2)
-            pos = fh.tell()
-            tail = b""
-            while pos > 0:
-                step = min(chunk, pos)
-                pos -= step
-                fh.seek(pos)
-                buf = fh.read(step) + tail
-                i = len(buf)
-                while True:
-                    i = buf.rfind(needle, 0, i)
-                    if i == -1:
-                        break
-                    j = buf.rfind(b"\n", 0, i)
-                    if j == -1 and pos > 0:
-                        continue   # line start in an earlier chunk; the
-                                   # overlap below re-exposes it next pass
-                    line_off = pos + (j + 1 if j != -1 else 0)
-                    if _is_boundary_line(fh, line_off):
-                        return line_off
-                # overlap so needles/line-starts straddling chunks survive
-                tail = buf[:4096]
-    except OSError:
-        pass
-    return 0
-
-
-def current_context_tokens(path: str) -> int:
-    """Cheap current-context estimate: the summed usage of the LAST
-    assistant entry in the transcript.
-
-    Reverse tail read (no full parse): try a 256KB tail, then a 4MB tail if
-    no assistant usage block is found there. ~1ms typical. Returns 0 if no
-    assistant usage is present or on any error.
-
-    Purpose: the PostToolUse trigger needs to detect hard-limit crossings
-    mid-burst (during long autonomous tool runs that produce no
-    UserPromptSubmit) without paying for a full analyze() on every tool
-    call. The full analyze runs only once occupancy is already at/above
-    the hard line.
-    """
-    try:
-        p = os.path.expanduser(path)
-        size = os.path.getsize(p)
-        for tail_bytes in (1 << 18, 1 << 22):   # 256KB, then 4MB
-            with open(p, "rb") as fh:
-                if size > tail_bytes:
-                    fh.seek(size - tail_bytes)
-                    fh.readline()   # drop the partial first line
-                data = fh.read()
-            for line in reversed(data.split(b"\n")):
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line.decode("utf-8", "replace"))
-                except Exception:
-                    continue
-                if entry.get("type") == "assistant":
-                    usage = (entry.get("message") or {}).get("usage") or {}
-                    if isinstance(usage, dict) and usage:
-                        return (int(usage.get("input_tokens", 0))
-                                + int(usage.get("cache_read_input_tokens", 0))
-                                + int(usage.get("cache_creation_input_tokens", 0))
-                                + int(usage.get("output_tokens", 0)))
-            if size <= tail_bytes:
-                break   # whole file already scanned; retrying won't help
-        return 0
-    except OSError:
-        return 0
-
-
 def _finalize_stats(st: TranscriptStats, edited: dict, read: dict,
                     task_state: dict, recent_result_flags: list) -> None:
     """Derive summary fields from the raw material the analyze() loop
@@ -293,8 +170,7 @@ def _finalize_stats(st: TranscriptStats, edited: dict, read: dict,
 def analyze(path: str = "", recent_window: int = 30,
             entries: list = None, start_offset: int = 0) -> TranscriptStats:
     st = TranscriptStats()
-    raw_entries = (entries if entries is not None
-                   else load_transcript(path, start_offset=start_offset))
+    raw_entries = entries if entries is not None else []
     st.entries = raw_entries
 
     last_boundary = -1
@@ -303,27 +179,6 @@ def analyze(path: str = "", recent_window: int = 30,
                 and entry.get("subtype") == "compact_boundary"):
             last_boundary = idx
             st.compaction_count += 1
-
-    # Loaded skills / large instruction injections (isMeta) persist in context
-    # across compaction boundaries — the model keeps skill bodies live — so they
-    # are scanned over the FULL transcript (not the post-boundary slice) and
-    # deduped by name (a skill loaded once is counted once, at its largest seen
-    # size). Surfaced separately in the composition because they dominate the
-    # residual yet are reclaimable, unlike the system prompt + tool schemas.
-    _SKILL_MARKER = "Base directory for this skill:"
-    _skills = {}
-    for entry in raw_entries:
-        if not entry.get("isMeta"):
-            continue
-        text = "\n".join(_block_text(b) for b in _content_blocks(entry))
-        i = text.find(_SKILL_MARKER)
-        if i < 0:
-            continue
-        path = text[i + len(_SKILL_MARKER):].split("\n", 1)[0].strip()
-        name = path.rsplit("/", 1)[-1] or path or "skill"
-        _skills[name] = max(_skills.get(name, 0), len(text))
-    st.skill_chars = sum(_skills.values())
-    st.skill_names = list(_skills.keys())
 
     if last_boundary >= 0:
         for entry in raw_entries:
@@ -578,10 +433,6 @@ def active_signals(st: TranscriptStats, prompt: str = "",
         sigs.append(("commit", "a git commit was just made"))
     if st.recent_tests_pass:
         sigs.append(("tests_pass", "tests just passed"))
-    if st.todos and st.todos_all_done:
-        sigs.append(("todos_done", "all todo items are complete"))
-    elif st.todo_step:
-        sigs.append(("todo_step", "a plan step was just completed"))
     if st.recent_error_then_clean:
         sigs.append(("error_resolved", "a debug loop just concluded"))
     if st.task_tool_recent:
