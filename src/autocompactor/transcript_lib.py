@@ -253,7 +253,11 @@ def active_signals(st: TranscriptStats, prompt: str = "",
 #            as load-bearing.
 #   error_resolved stays observe-only (3%/0.5x, still sub-baseline).
 # Tunable: AUTOCOMPACTOR_OBSERVE_ONLY (comma-separated signal names).
-OBSERVE_ONLY_DEFAULT = "error_resolved,burn_rate,subagent_done"
+# In-code default matches the flat config.json OBSERVE_ONLY byte-for-byte (the
+# Pi conservative set). Pi ACTUATES, so subagent_done/commit must stay strong
+# GATES, never observe-only (design trap #4) — keeping this default aligned with
+# config means a cleared config key can never silently demote them.
+OBSERVE_ONLY_DEFAULT = "error_resolved,tests_pass,idle_gap"
 
 
 def observe_only(harness: str = "claude") -> frozenset:

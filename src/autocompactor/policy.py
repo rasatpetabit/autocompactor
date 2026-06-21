@@ -83,7 +83,6 @@ def _fmt_tokens(n) -> str:
 
 
 def readout_line(used: int, soft: int = 0, hard: int = 0,
-                 forced_auto: int | None = None,
                  model_window: int | None = None) -> str:
     """Human-facing context readout with absolute anchors instead of a single
     occupancy % (which, computed against the aggressive configured target,
@@ -91,13 +90,12 @@ def readout_line(used: int, soft: int = 0, hard: int = 0,
 
     Distinguishes the two things that are easily — and damagingly — conflated:
 
-    * the autocompactor ADVISORY band (soft..hard): the token range above which
-      this tool *suggests* compacting early to keep cached-read cost low. These
-      are recommendations, NOT walls — being above them is expected and fine.
-    * the forced wall: the harness's own forced compaction point (forced_auto).
-      This is the only point where a compaction is actually forced. We show
-      headroom to it so "near the soft limit" can never be misread as "one turn
-      from auto-compacting" (owner feedback).
+    The autocompactor ADVISORY band (soft..hard) is the token range above which
+    this tool *suggests* compacting early to keep cached-read cost low. These
+    are recommendations, NOT walls — being above them is expected and fine. Pi
+    actuates at its own hard line, so there is no separate forced native wall to
+    show; "near the soft limit" can never be misread as "one turn from
+    auto-compacting" because no forced-wall anchor is rendered.
 
     model_window is shown only when the caller supplies a confident estimate,
     else omitted."""
@@ -106,15 +104,6 @@ def readout_line(used: int, soft: int = 0, hard: int = 0,
         parts.append(f"compact advised ~{_fmt_tokens(soft)}–{_fmt_tokens(hard)}")
     elif hard or soft:
         parts.append(f"compact advised ~{_fmt_tokens(hard or soft)}")
-    if forced_auto:
-        anchor = f"forced auto-compact ~{_fmt_tokens(forced_auto)}"
-        if forced_auto > used:
-            anchor += f" (~{_fmt_tokens(forced_auto - used)} away)"
-        else:
-            # context is already at/over the forced wall — never silently
-            # drop the headroom clause and read as "comfortably below".
-            anchor += " (reached — auto-compact imminent)"
-        parts.append(anchor)
     if model_window:
         parts.append(f"model window {_fmt_tokens(model_window)}")
     return " · ".join(parts)

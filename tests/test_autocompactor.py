@@ -307,29 +307,22 @@ def test_build_context_state_uses_window_harness_and_default_count(monkeypatch):
 # ------------------------------------------- dual-anchor readout + composition
 
 
-def test_readout_line_separates_advisory_band_from_forced_wall():
-    """The advisory soft–hard band and the forced native wall are different
-    things; the readout must show both with headroom so 'near the soft limit'
-    can't be misread as 'one turn from auto-compacting' (owner feedback)."""
-    line = policy.readout_line(209_000, 100_000, 110_000, 270_000, 1_000_000)
+def test_readout_line_renders_advisory_band_and_model_window():
+    """The advisory soft–hard band and the model window are shown as distinct
+    anchors; never a bare occupancy %. Pi has no forced native wall, so no
+    forced-auto anchor is ever rendered (owner feedback)."""
+    line = policy.readout_line(209_000, 100_000, 110_000, 1_000_000)
     assert "209k in context" in line
     assert "compact advised ~100k–110k" in line
-    assert "forced auto-compact ~270k" in line
-    assert "61k away" in line              # headroom to the forced wall is shown
+    assert "forced auto-compact" not in line   # Pi: no forced native wall
+    assert "model window 1m" in line
     assert "%" not in line                 # never a bare occupancy %
-
-
-def test_readout_line_flags_when_forced_wall_reached():
-    """Edge case: context at/over the forced wall must not silently drop the
-    headroom clause and read as 'comfortably below'."""
-    line = policy.readout_line(285_000, 100_000, 110_000, 270_000)
-    assert "reached" in line and "imminent" in line
 
 
 def test_readout_line_pi_shape_omits_absent_forced_wall():
     """Pi actuates at its own hard line — there is no separate native wall, so
-    forced_auto is None and only the advisory band + true model window show."""
-    line = policy.readout_line(210_000, 225_000, 405_000, None, 450_000)
+    only the advisory band + true model window show, never a forced-wall anchor."""
+    line = policy.readout_line(210_000, 225_000, 405_000, 450_000)
     assert "forced auto-compact" not in line
     assert "model window 450k" in line
 

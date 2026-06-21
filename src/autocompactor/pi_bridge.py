@@ -202,11 +202,10 @@ def cmd_evaluate(opts: dict) -> dict:
 
     # Anchored readout (shared with Claude) instead of a bare occupancy % that
     # gave no denominator. Pi ACTUATES at its own hard line, so there is no
-    # separate native wall to show (forced_auto=None); the true model window
+    # separate native wall to show; the true model window
     # (runtime contextWindow) is the ceiling anchor when the runtime reported
     # it. Composition ("what's in the window") rides on contextState below.
     reason = policy.readout_line(context_tokens, soft_t, hard_t,
-                                 forced_auto=None,
                                  model_window=(runtime_context_window or None))
     if gating:
         reason += " — triggered by: " + "; ".join(gating)
