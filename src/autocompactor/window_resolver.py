@@ -45,7 +45,7 @@ def _int_or_none(value):
 def tiers(harness: str = "claude") -> list[int]:
     vals = []
     for raw in config_lib.cfg.list(
-            "AUTO_WINDOW_TIERS", harness=harness, default=DEFAULT_TIERS):
+            "AUTO_WINDOW_TIERS", default=DEFAULT_TIERS):
         try:
             val = int(float(raw))
         except (TypeError, ValueError):

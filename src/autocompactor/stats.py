@@ -2,7 +2,7 @@
 """
 stats.py — autocompactor telemetry.
 
-Appends one JSON line per event to ~/.claude/autocompactor/stats/events.jsonl.
+Appends one JSON line per event to ~/.autocompactor/pi/stats/events.jsonl.
 Local-only; nothing leaves the machine. Used to tune thresholds and phase
 addenda against real behavior.
 
@@ -22,22 +22,25 @@ import socket
 
 from autocompactor import statedir
 
-STATS_DIR = os.path.expanduser("~/.claude/autocompactor/stats")
+STATS_DIR = os.path.expanduser("~/.autocompactor/pi/stats")
 
 
-def _stats_dir(harness: str = "claude") -> str:
+def _stats_dir() -> str:
     try:
-        return os.path.join(statedir.state_root(harness), "stats")
+        return os.path.join(statedir.state_root(), "stats")
     except Exception:
         return STATS_DIR
 
 
-def log_event(event: dict, harness: str = "claude") -> None:
-    """Best-effort append; never raise into the hook path."""
+def log_event(event: dict, harness: str = "pi") -> None:
+    """Best-effort append; never raise into the hook path.
+
+    `harness` is accepted but ignored (Pi is the sole adapter); retained
+    for call-site compatibility.
+    """
     try:
         event = dict(event)
-        harness = event.setdefault("harness", harness)
-        stats_dir = _stats_dir(harness)
+        stats_dir = _stats_dir()
         os.makedirs(stats_dir, exist_ok=True)
         event.setdefault("ts", datetime.datetime.now().isoformat(timespec="seconds"))
         event.setdefault("host", socket.gethostname())
@@ -48,7 +51,7 @@ def log_event(event: dict, harness: str = "claude") -> None:
         pass
 
 
-def run_hook(name: str, fn, *args, harness: str = "claude", **kwargs) -> int:
+def run_hook(name: str, fn, *args, harness: str = "pi", **kwargs) -> int:
     """Run a hook entrypoint so it can never raise into the hook path.
 
     The contract: "hooks must never raise; every failure degrades to exit 0
@@ -63,5 +66,5 @@ def run_hook(name: str, fn, *args, harness: str = "claude", **kwargs) -> int:
         return int(rc) if isinstance(rc, int) else 0
     except Exception as exc:
         log_event({"type": "hook_skip", "hook": name,
-                   "error": type(exc).__name__}, harness=harness)
+                   "error": type(exc).__name__})
         return 0

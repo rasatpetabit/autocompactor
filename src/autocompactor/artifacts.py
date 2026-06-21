@@ -31,15 +31,16 @@ import os
 
 from autocompactor import statedir
 
-ART_DIR = os.path.expanduser("~/.claude/autocompactor/artifacts")
+ART_DIR = os.path.expanduser("~/.autocompactor/pi/artifacts")
 
 PRIORITY = ["initial_prompts", "corrections", "error_ledger",
             "working_commands", "hex_constants", "files"]
 
 
-def _artifact_dir(harness: str = "claude") -> str:
+def _artifact_dir(harness: str = "pi") -> str:
+    # `harness` accepted but ignored (Pi is the sole adapter).
     try:
-        return os.path.join(statedir.state_root(harness), "artifacts")
+        return os.path.join(statedir.state_root(), "artifacts")
     except Exception:
         return ART_DIR
 

@@ -31,8 +31,9 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # checkout root
 import autocompactor.config_lib as config_lib  # noqa: E402
+from autocompactor import statedir  # noqa: E402
 
-BASE = os.path.expanduser("~/.claude/autocompactor")
+BASE = statedir.state_root()
 REPORTS = os.path.join(BASE, "reports")
 HISTORY = os.path.join(REPORTS, "nightly_history.jsonl")
 RETENTION_DAYS = 30

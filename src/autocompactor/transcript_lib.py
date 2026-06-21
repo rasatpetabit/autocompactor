@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-transcript_lib.py — shared parsing utilities for Claude Code session
-transcripts (~/.claude/projects/<project>/<session-id>.jsonl).
+transcript_lib.py — shared parsing utilities for coding-agent session
+transcripts (per-session JSONL).
 
 Transcript format notes (observed, not a stable public API — pin your
-Claude Code version and re-verify after upgrades):
+producer version and re-verify after upgrades):
 
   * One JSON object per line.
   * Entries of interest have "type": "user" | "assistant" | "system".
@@ -258,7 +258,7 @@ OBSERVE_ONLY_DEFAULT = "error_resolved,burn_rate,subagent_done"
 
 def observe_only(harness: str = "claude") -> frozenset:
     from autocompactor import config_lib
-    raw = config_lib.cfg.str("OBSERVE_ONLY", harness=harness,
+    raw = config_lib.cfg.str("OBSERVE_ONLY",
                              default=OBSERVE_ONLY_DEFAULT)
     return frozenset(s.strip() for s in raw.split(",") if s.strip())
 
@@ -350,9 +350,9 @@ def build_context_state(st: TranscriptStats, window: float = 0.0,
         from autocompactor import config_lib
         if window <= 0:
             signal_window = config_lib.cfg.float(
-                "WINDOW", harness=harness, default=200_000)
+                "WINDOW", default=200_000)
         stale_frac_thr = config_lib.cfg.float(
-            "STALE_FRAC", harness=harness, default=0.50)
+            "STALE_FRAC", default=0.50)
     except Exception:
         pass
     signals = active_signals(st, window=signal_window,
@@ -382,7 +382,7 @@ def build_context_state(st: TranscriptStats, window: float = 0.0,
     lines.append(f"Read files: {len(st.read_files)}")
     if signals:
         gating = [desc for name, desc in signals
-                  if name not in observe_only(harness=harness)]
+                  if name not in observe_only()]
         lines.append(f"Active signals: {', '.join(gating) if gating else 'none'}")
     else:
         lines.append("Active signals: none")

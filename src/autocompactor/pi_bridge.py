@@ -31,9 +31,8 @@ Subcommands (flags mirror the shim's bridge() calls):
       exist, nothing otherwise. One-shot: clears pending state and resets
       the cooldown (fresh context).
 
-Thresholds read AUTOCOMPACTOR_PI_<NAME> first, then AUTOCOMPACTOR_<NAME>,
-then the Claude-monitor default (Pi-specific tuning waits for live Pi
-telemetry). State lives under statedir.state_root("pi")
+Thresholds read AUTOCOMPACTOR_<NAME> env overrides, else config.json,
+else code defaults. State lives under statedir.state_root()
 (~/.autocompactor/pi unless AUTOCOMPACTOR_STATE_DIR overrides).
 """
 
@@ -120,11 +119,11 @@ def cmd_evaluate(opts: dict) -> dict:
     context_tokens = _to_int(opts.get("tokens"))
     if context_tokens is None:
         context_tokens = st.context_tokens
-    configured_window = int(cfg.float("WINDOW", harness=HARNESS, default=200_000))
+    configured_window = int(cfg.float("WINDOW", default=200_000))
     runtime_context_window = _to_int(opts.get("context_window"))
     context_window = runtime_context_window or configured_window
     reserve = _to_int(opts.get("reserve"),
-                      int(cfg.float("RESERVE", harness=HARNESS, default=RESERVE_FALLBACK)))
+                      int(cfg.float("RESERVE", default=RESERVE_FALLBACK)))
     observed_peak = max(
         [context_tokens] + [int(v) for v in getattr(st, "usage_series", []) or []])
     resolution = window_resolver.resolve_window(
@@ -139,10 +138,10 @@ def cmd_evaluate(opts: dict) -> dict:
     soft = cfg.float_windowed("SOFT_PCT", context_window, HARNESS, 0.40)
     hard = cfg.float_windowed("HARD_PCT", context_window, HARNESS, 0.65)
     soft_t, hard_t = int(soft * window), int(hard * window)
-    cooldown = cfg.float("COOLDOWN", harness=HARNESS, default=25_000)
-    stale_frac_thr = cfg.float("STALE_FRAC", harness=HARNESS, default=0.50)
-    post_floor = cfg.float("POST_FLOOR", harness=HARNESS, default=70_000)
-    min_savings = cfg.float("MIN_SAVINGS", harness=HARNESS, default=30_000)
+    cooldown = cfg.float("COOLDOWN", default=25_000)
+    stale_frac_thr = cfg.float("STALE_FRAC", default=0.50)
+    post_floor = cfg.float("POST_FLOOR", default=70_000)
+    min_savings = cfg.float("MIN_SAVINGS", default=30_000)
 
     state = _load_state(session_id)
     last_reco = state.get("last_reco_tokens", -10**9)
@@ -164,7 +163,7 @@ def cmd_evaluate(opts: dict) -> dict:
     sig_pairs = transcript_lib.active_signals(
         st, window=window, stale_frac_thr=stale_frac_thr, hard_tokens=hard_t)
     signals = [desc for _, desc in sig_pairs]
-    observe = transcript_lib.observe_only(harness=HARNESS)
+    observe = transcript_lib.observe_only()
     gating = [desc for name, desc in sig_pairs if name not in observe]
 
     recommend = (occupancy >= hard or (occupancy >= soft and bool(gating)))
@@ -183,12 +182,12 @@ def cmd_evaluate(opts: dict) -> dict:
         "recommended": recommend and not suppressed,
         "suppressed_by_cooldown": recommend and suppressed,
         **resolution.event_fields(),
-    }, harness=HARNESS)
+    })
 
     # Pre-compaction context overview — for the TS shim to display and
     # for the compaction instructions to embed.
     ctx_state = transcript_lib.build_context_state(
-        st, window=window, harness=HARNESS)
+        st, window=window)
 
     if recommend and not suppressed:
         # Stage instructions for prepare and start the cooldown.
@@ -219,7 +218,7 @@ def cmd_evaluate(opts: dict) -> dict:
 
     return {"recommend": bool(recommend and not suppressed),
             "reason": reason,
-            "mode": cfg.str("MODE", harness=HARNESS, default="advise"),
+            "mode": cfg.str("MODE", default="advise"),
             "context_tokens": context_tokens,
             "contextState": ctx_state}
 
@@ -246,10 +245,10 @@ def cmd_prepare(opts: dict) -> dict:
     instructions = staged or transcript_lib.build_preservation_instructions(
         st, opts.get("cwd", ""))
 
-    arts = artifacts.merge(artifacts.load(session_id, harness=HARNESS),
+    arts = artifacts.merge(artifacts.load(session_id),
                            artifacts.extract(st))
-    art_sizes = artifacts.save(session_id, arts, harness=HARNESS)
-    if cfg.str("LLM", harness=HARNESS) == "1" and session:
+    art_sizes = artifacts.save(session_id, arts)
+    if cfg.str("LLM") == "1" and session:
         extra = llm_digest(session)
         if extra:
             instructions += "\n\nAdditional must-preserve facts:\n" + extra
@@ -289,12 +288,12 @@ def cmd_prepare(opts: dict) -> dict:
     # reflects the exact state when compaction starts (not when evaluate
     # fired, which may be several turns earlier).
     prepare_resolution = window_resolver.resolve_window(
-        configured_window=cfg.float("WINDOW", harness=HARNESS, default=200_000),
+        configured_window=cfg.float("WINDOW", default=200_000),
         observed_peak=max(st.usage_series) if st.usage_series else st.context_tokens,
-        reserve=int(cfg.float("RESERVE", harness=HARNESS, default=RESERVE_FALLBACK)))
+        reserve=int(cfg.float("RESERVE", default=RESERVE_FALLBACK)))
     effective_window = prepare_resolution.effective_window
     ctx_state = transcript_lib.build_context_state(
-        st, window=effective_window, harness=HARNESS)
+        st, window=effective_window)
 
     log_event({
         "type": "precompact", "session_id": session_id, "trigger": trigger,
@@ -304,7 +303,7 @@ def cmd_prepare(opts: dict) -> dict:
         "composition": comp or None,
         "artifacts_kept": art_kept, "artifacts_dropped": art_dropped,
         **prepare_resolution.event_fields(),
-    }, harness=HARNESS)
+    })
 
     return {"customInstructions": instructions,
             "contextState": ctx_state}
@@ -313,10 +312,10 @@ def cmd_prepare(opts: dict) -> dict:
 def cmd_reinject(opts: dict) -> dict:
     session = opts.get("session", "")
     session_id = _session_id(session)
-    arts = artifacts.load(session_id, harness=HARNESS)
+    arts = artifacts.load(session_id)
     state = _load_state(session_id)
     digest = artifacts.build_digest(
-        arts, budget_tokens=int(cfg.float("ARTIFACT_BUDGET", harness=HARNESS, default=1500)),
+        arts, budget_tokens=int(cfg.float("ARTIFACT_BUDGET", default=1500)),
         stats_line=state.get("last_compaction_stats", ""))
 
     state["pending_reinject"] = False
@@ -331,17 +330,17 @@ def cmd_reinject(opts: dict) -> dict:
     # to get the post-compaction token count, phase, occupancy.
     post_st = _analyze(session)
     effective_window = float(max(
-        int(cfg.float("WINDOW", harness=HARNESS, default=200_000)) - int(cfg.float("RESERVE", harness=HARNESS, default=RESERVE_FALLBACK)),
+        int(cfg.float("WINDOW", default=200_000)) - int(cfg.float("RESERVE", default=RESERVE_FALLBACK)),
         1))
     post_state = transcript_lib.build_context_state(
-        post_st, window=effective_window, harness=HARNESS)
+        post_st, window=effective_window)
 
     log_event({"type": "reinject", "session_id": session_id,
                "digest_tokens": len(digest) // 4,
                "artifact_keys": list(arts.keys()),
                "post_tokens": post_st.context_tokens,
                "post_phase": transcript_lib.detect_phase(post_st)},
-              harness=HARNESS)
+              )
     return {"text": digest, "customType": DIGEST_CUSTOM_TYPE,
             "contextState": post_state}
 

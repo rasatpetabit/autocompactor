@@ -313,7 +313,6 @@ class PolicyInput:
     effective_limit: int
     gating: bool                     # >=1 non-observe boundary signal present
     last_reco_tokens: int = -10**9   # cooldown baseline (adapter-owned, passed in)
-    harness: str = "claude"
 
 
 @dataclass
@@ -345,21 +344,21 @@ def resolve_policy_config(harness: str, effective_limit: int,
     occupancy. An explicit SOFT_PCT (deprecated) still wins (migration safety).
     """
     requested = profile or config_lib.cfg.str(
-        "PROFILE", harness=harness, default="balanced") or "balanced"
+        "PROFILE", default="balanced") or "balanced"
     base = _PROFILES.get(requested, _PROFILES["balanced"])
     pname = requested if requested in _PROFILES else "balanced"
-    hard = config_lib.cfg.float("HARD_PCT", harness=harness, default=base["hard"])
-    cooldown = config_lib.cfg.float("COOLDOWN", harness=harness, default=base["cooldown"])
-    stale_frac = config_lib.cfg.float("STALE_FRAC", harness=harness, default=base["stale_frac"])
-    post_floor = config_lib.cfg.float("POST_FLOOR", harness=harness, default=70_000)
-    min_savings = config_lib.cfg.float("MIN_SAVINGS", harness=harness, default=30_000)
-    mode = config_lib.cfg.str("MODE", harness=harness, default="advise") or "advise"
+    hard = config_lib.cfg.float("HARD_PCT", default=base["hard"])
+    cooldown = config_lib.cfg.float("COOLDOWN", default=base["cooldown"])
+    stale_frac = config_lib.cfg.float("STALE_FRAC", default=base["stale_frac"])
+    post_floor = config_lib.cfg.float("POST_FLOOR", default=70_000)
+    min_savings = config_lib.cfg.float("MIN_SAVINGS", default=30_000)
+    mode = config_lib.cfg.str("MODE", default="advise") or "advise"
     eff = max(int(effective_limit), 1)
 
     # Window-aware SOFT target, unless a deprecated SOFT_PCT override is set.
-    raw_soft = config_lib.cfg.raw("SOFT_PCT", harness=harness)
+    raw_soft = config_lib.cfg.raw("SOFT_PCT")
     if raw_soft is not None:
-        soft = config_lib.cfg.float("SOFT_PCT", harness=harness, default=base["soft"])
+        soft = config_lib.cfg.float("SOFT_PCT", default=base["soft"])
         tgt = 0
     else:
         tgt = target_tokens(eff, pname, post_floor, min_savings, hard)

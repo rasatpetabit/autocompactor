@@ -131,7 +131,7 @@ def test_evaluate_mode_env_overrides_config(tmp_path):
     result = run_bridge(
         ["evaluate", "--session", str(fixture_path), "--tokens", "150000", "--context-window", "200000"],
         state_dir,
-        extra_env={"AUTOCOMPACTOR_PI_MODE": "advise"},
+        extra_env={"AUTOCOMPACTOR_MODE": "advise"},
     )
     assert result.returncode == 0
     data = parse_single_json(result.stdout)

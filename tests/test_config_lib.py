@@ -1,9 +1,10 @@
 """
-Pins the config_lib resolution order: env (with _WIDE preference on wide
-windows) > config.json harness section > config.json top-level > default.
-These orderings broke in a73b3a5 (str checked config before env; the
-harness section could never override a top-level key; _WIDE keys in
-config.json were unreachable) and silently discarded user tuning.
+Pins the config_lib resolution order (single namespace, Pi sole adapter):
+env (with _WIDE preference on wide windows) > config.local.json >
+config.json > default. Harness sections and the AUTOCOMPACTOR_PI_* env
+prefix were removed in the Pi-only flatten; this suite pins the flat
+semantics plus an effective-value equivalence check against the shipped
+config.json.
 """
 import json
 import pathlib
@@ -43,10 +44,9 @@ def test_float_env_beats_config(temp_config, monkeypatch):
     assert config_lib.cfg.float("HARD_PCT") == 0.62
 
 
-def test_float_harness_section_beats_top_level(temp_config):
-    temp_config({"HARD_PCT": 0.65, "pi": {"HARD_PCT": 0.90}})
-    assert config_lib.cfg.float("HARD_PCT", harness="pi") == 0.90
-    assert config_lib.cfg.float("HARD_PCT", harness="claude") == 0.65
+def test_float_top_level(temp_config):
+    temp_config({"HARD_PCT": 0.90})
+    assert config_lib.cfg.float("HARD_PCT") == 0.90
 
 
 def test_float_wide_key_reachable_in_config(temp_config):
@@ -62,31 +62,30 @@ def test_float_wide_env_beats_wide_config(temp_config, monkeypatch):
 
 
 def test_str_env_beats_config(temp_config, monkeypatch):
-    temp_config({"MODE": "advise", "pi": {"MODE": "actuate"}})
-    monkeypatch.setenv("AUTOCOMPACTOR_PI_MODE", "advise")
-    assert config_lib.cfg.str("MODE", harness="pi") == "advise"
+    temp_config({"MODE": "advise"})
+    monkeypatch.setenv("AUTOCOMPACTOR_MODE", "actuate")
+    assert config_lib.cfg.str("MODE") == "actuate"
 
 
-def test_str_harness_section_beats_top_level(temp_config):
-    temp_config({"MODE": "advise", "pi": {"MODE": "actuate"}})
-    assert config_lib.cfg.str("MODE", harness="pi") == "actuate"
-    assert config_lib.cfg.str("MODE", harness="claude") == "advise"
+def test_str_top_level(temp_config):
+    temp_config({"MODE": "actuate"})
+    assert config_lib.cfg.str("MODE") == "actuate"
 
 
 def test_str_default_when_absent(temp_config):
     temp_config({})
-    assert config_lib.cfg.str("MODE", harness="pi", default="advise") == "advise"
+    assert config_lib.cfg.str("MODE", default="advise") == "advise"
 
 
 def test_local_overlay_merges_over_config(temp_config):
     temp_config(
-        {"HARD_PCT": 0.65, "pi": {"MODE": "actuate", "RESERVE": 40000}},
-        local={"LLM_MODEL": "site-model", "pi": {"RESERVE": 50000}},
+        {"HARD_PCT": 0.65, "MODE": "actuate", "RESERVE": 40000},
+        local={"LLM_MODEL": "site-model", "RESERVE": 50000},
     )
     assert config_lib.cfg.str("LLM_MODEL") == "site-model"
-    # harness sections merge key-by-key: local RESERVE wins, MODE survives
-    assert config_lib.cfg.float("RESERVE", harness="pi") == 50000
-    assert config_lib.cfg.str("MODE", harness="pi") == "actuate"
+    # local overlay wins key-by-key: RESERVE overridden, MODE survives
+    assert config_lib.cfg.float("RESERVE") == 50000
+    assert config_lib.cfg.str("MODE") == "actuate"
     assert config_lib.cfg.float("HARD_PCT") == 0.65
 
 
@@ -116,17 +115,6 @@ def test_list_malformed_json_falls_back_to_comma_split(temp_config, monkeypatch)
     assert config_lib.cfg.list("TIERS") == []
 
 
-def test_float_wide_and_harness_section_compose(temp_config):
-    """_WIDE selection and harness-section precedence compose: a wide window
-    picks the harness section's _WIDE key; a narrow one picks its bare key."""
-    temp_config({"HARD_PCT": 0.65,
-                 "pi": {"HARD_PCT": 0.90, "HARD_PCT_WIDE": 0.60}})
-    assert config_lib.cfg.float_windowed("HARD_PCT", 400_000, harness="pi") == 0.60
-    assert config_lib.cfg.float_windowed("HARD_PCT", 200_000, harness="pi") == 0.90
-    # claude (no section) still reads the top-level bare key
-    assert config_lib.cfg.float_windowed("HARD_PCT", 400_000) == 0.65
-
-
 def test_repo_config_ships_pi_actuate(monkeypatch):
     # The shipped config.json must keep Pi in actuate mode: this is the
     # actual regression fix (advise-only behavior in env-less processes).
@@ -136,5 +124,51 @@ def test_repo_config_ships_pi_actuate(monkeypatch):
     monkeypatch.setattr(config_lib, "_CONFIG",
                         str(REPO_ROOT / "config.json"))
     monkeypatch.setattr(config_lib, "_config_cache", None)
-    assert config_lib.cfg.str("MODE", harness="pi") == "actuate"
-    assert config_lib.cfg.str("MODE", harness="claude") == "advise"
+    assert config_lib.cfg.str("MODE") == "actuate"
+
+
+# --- Pi-only flatten: effective-value equivalence + flat-config invariant ---
+
+# Every config key the Pi path reads (pi_bridge, policy, config_lib, TS
+# shim). Values are the effective Pi config BEFORE the flatten (pi.*
+# overlaid on top-level), captured 2026-06-21 via the Step-2 snapshot.
+# The flat config.json must reproduce these exactly — behavior-preserving.
+PI_KEYS_FLOAT = {
+    "WINDOW": 200000, "RESERVE": 40000,
+    "SOFT_PCT": 0.50, "SOFT_PCT_WIDE": 0.25,
+    "HARD_PCT": 0.90, "HARD_PCT_WIDE": 0.40,
+    "COOLDOWN": 20000, "STALE_FRAC": 0.90,
+    "POST_FLOOR": 70000, "MIN_SAVINGS": 30000,
+    "ARTIFACT_BUDGET": 1500, "MAX_FULL_PARSE_MB": 8,
+}
+PI_KEYS_STR = {"MODE": "actuate", "PROFILE": "economy",
+               "OBSERVE_ONLY": "error_resolved,tests_pass,idle_gap"}
+
+
+def _shipped_config(monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("AUTOCOMPACTOR"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(config_lib, "_CONFIG", str(REPO_ROOT / "config.json"))
+    monkeypatch.setattr(config_lib, "_config_cache", None)
+
+
+def test_flat_config_preserves_effective_pi_values(monkeypatch):
+    _shipped_config(monkeypatch)
+    # STALE_FRAC canary: the pi section omitted it, so top-level 0.90 was
+    # the effective Pi value; the flat config must carry 0.90 (not revert
+    # to pi_bridge's 0.50 default).
+    assert config_lib.cfg.float("STALE_FRAC", default=0.50) == 0.90
+    # HARD_PCT_WIDE canary: effective Pi was pi.HARD_PCT_WIDE=0.40, NOT the
+    # old top-level 0.60 — the forced-compaction threshold on every
+    # >=300k-window session must stay 0.40.
+    assert config_lib.cfg.float("HARD_PCT_WIDE", default=-1) == 0.40
+    for k, v in PI_KEYS_FLOAT.items():
+        assert config_lib.cfg.float(k, default=-1) == v, k
+    for k, v in PI_KEYS_STR.items():
+        assert config_lib.cfg.str(k, default="") == v, k
+
+
+def test_no_harness_sections_or_pi_env_prefix():
+    data = json.load(open(config_lib._CONFIG))
+    assert "claude" not in data and "pi" not in data

@@ -521,11 +521,15 @@ def test_is_ctx_spike_detects_transient_jump():
 def test_burst_milestone_fills_danger_band():
     """Every occupancy rung between the hard line and the window is reachable —
     no rung-to-rung gap leaves a silent zone (the old 100k-step bug)."""
-    cfg = policy.resolve_policy_config("claude", 200_000)
+    cfg = policy.resolve_policy_config("pi", 200_000)
     _, hard = policy.advisory_band(cfg)
     reached = {policy.burst_milestone(cfg, c)
                for c in range(hard, 200_001, 2_000)}
+    # Only occupancy rungs at/above the hard line fall inside the danger
+    # band [hard, window]; every such rung must be reachable (no gap).
     for pct in (0.70, 0.80, 0.90, 0.97):
-        assert int(pct * 200_000) in reached
+        rung = int(pct * 200_000)
+        if rung >= hard:
+            assert rung in reached
     # below the soft line -> no milestone
     assert policy.burst_milestone(cfg, 10_000) == 0
