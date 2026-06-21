@@ -46,7 +46,7 @@ import sys
 from autocompactor import (artifacts, pi_session_lib, policy,  # noqa: E402
                            statedir, transcript_lib, window_resolver)
 from autocompactor.config_lib import cfg                          # noqa: E402
-from autocompactor.precompact_analyzer import llm_digest          # noqa: E402
+from autocompactor.llm_digest import llm_digest                 # noqa: E402
 from autocompactor.stats import log_event                         # noqa: E402
 
 HARNESS = "pi"
