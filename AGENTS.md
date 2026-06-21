@@ -26,18 +26,20 @@ Source of truth: `policy/dispatch-policy.jsonc` in the agent-dispatch repo (`age
 
 ## Project substance
 
-Autocompactor provides earlier, instruction-tailored compaction for coding-agent
-sessions: boundary-aware timing for when to compact, phase-aware structured
-instructions for how to summarize, mechanical artifact extraction for content
-that should not be entrusted to a summarizer, local telemetry, and an offline
-backtester. The core is harness-agnostic; two adapters ship (Claude Code, Pi).
-Read `HANDOFF.md` for the decision record, including the pi-custom-compactor
-evaluation and prioritized open items.
+Autocompactor is a **Pi context compactor**: it provides earlier,
+instruction-tailored compaction for Pi coding-agent sessions — boundary-aware
+timing for when to compact, phase-aware structured instructions for how to
+summarize, mechanical artifact extraction for content that should not be
+entrusted to a summarizer, and local telemetry. The core is harness-agnostic by
+design; Pi is the sole adapter that ships. Read `HANDOFF.md` for the decision
+record, including the Claude-adapter-removal rationale, the pi-custom-compactor
+evaluation, and prioritized open items.
 
 ## Operating notes (harness-agnostic)
 
 - Before changing behavior, run `python3 -m pytest tests/ -q` and
-  `bash tests/smoke_test.sh` when safe. Current baseline is 189 pytest cases.
+  `PI_SMOKE=1 bash tests/smoke_test_pi.sh` when safe. Current baseline is 100
+  pytest cases.
 - Owner directive: `>80%` of spend is cached reads. Compact often and keep
   context low.
 - Every-turn cheapness relies on the min-savings guard: no recommendation when
@@ -45,20 +47,14 @@ evaluation and prioritized open items.
 - For transcripts larger than `MAX_FULL_PARSE_MB(8)`, use tail-only parsing
   from the last verified `compact_boundary`; `peak_ctx` is carried in session
   state for the window clamp.
-- After a few live days, run `python3 src/analyze_corpus.py --events` to inspect
-  reduction-ratio-by-phase and tune phase addenda.
 - Open refinements: improve `topic_shift` precision with prompt replay at
-  backtest sample points; keep watching `stale_output`, which was below
-  baseline at `0.90`.
-- Signal gating (`OBSERVE_ONLY`) is re-derived from measured per-signal lift,
-  not fixed. 2026-06-10 demoted `error_resolved`/`tests_pass`/`idle_gap`
-  (anti-predictive then). 2026-06-17 recalibration (backtest 2026-06-17,
-  Claude only): demoted `burn_rate` (0.9x) + `subagent_done` (0.8x) — now
-  sub-baseline as gates; re-promoted `idle_gap` (7.5x) + `tests_pass` (2.7x) —
-  reversed by the larger corpus. `error_resolved` stays observe-only.
-  `idle_gap` (n=16) / `tests_pass` (n=30) are thin — re-check next nightly.
-  Pi keeps the pre-2026-06-17 conservative set (it actuates; must retain
-  `subagent_done`/`commit` as strong gates — design trap #4).
+  sample points; keep watching `stale_output`, which was below baseline at
+  `0.90`.
+- Signal gating (`OBSERVE_ONLY`) is the Pi conservative set: because Pi
+  actuates (`ctx.compact()`), it must retain `subagent_done`/`commit` as strong
+  gates (design trap #4). `error_resolved`/`tests_pass`/`idle_gap` are
+  observe-only (anti-predictive on real corpora) — `active_signals()` still
+  reports them for telemetry, but they never justify a recommendation.
 
 ## Conventions
 
@@ -68,47 +64,41 @@ evaluation and prioritized open items.
   counts/ratios/paths only, never transcript text.
 - Hooks must never raise into the hook path. Degrade silently and log
   best-effort.
-- `transcript_lib.active_signals()` is the single signal registry; the live
-  monitor and backtester must not diverge.
+- `transcript_lib.active_signals()` is the single signal registry consumed by
+  the Pi bridge; it is the one source of truth for which signals fire.
 
 ## Architecture
 
 All implementation modules live in the `src/autocompactor/` package. The thin
-shims in `src/*.py` are the entrypoints (hooks, cron, CLI) — they put `src/`
-on `sys.path` and call the matching `autocompactor.<module>.main()`.
+shims in `src/*.py` are the entrypoints (the Pi bridge, cron, installer) — they
+put `src/` on `sys.path` and call the matching `autocompactor.<module>.main()`.
 `config.json` and `config.local.json` stay at the checkout root as
-user-facing config.
+user-facing config. The core is harness-agnostic by design even though Pi is
+the only adapter that ships.
 
 | file | role |
 |---|---|
-| `src/autocompactor/transcript_lib.py` | JSONL parsing, signal registry, phase detection, instruction builder (shared brain) |
-| `src/autocompactor/config_lib.py` | unified config reader: `config.json`(+local) + `AUTOCOMPACTOR_*` env overrides, per-harness sections |
-| `src/autocompactor/context_monitor.py` | prompt-time signal monitor: signals + burn-rate -> recommendation; one-shot artifact re-injection |
-| `src/autocompactor/precompact_analyzer.py` | pre-compaction analyzer: backup, phase-aware instructions, artifact extraction |
+| `src/autocompactor/transcript_lib.py` | signal registry, phase detection, instruction builder (shared brain) |
+| `src/autocompactor/config_lib.py` | unified config reader: `config.json`(+local) + `AUTOCOMPACTOR_*` env overrides (single namespace) |
 | `src/autocompactor/artifacts.py` | mechanical extraction -> disk -> budgeted digest |
-| `src/autocompactor/stats.py` | telemetry appender (`harness` field) |
-| `src/autocompactor/statedir.py` | harness-namespaced state roots |
-| `src/autocompactor/window_resolver.py` | effective-window resolution (native ceiling vs learned tier) |
-| `src/autocompactor/analyze_corpus.py` | offline backtester + `--events` aggregator |
-| `src/autocompactor/nightly_eval.py` | cron self-evaluation: tests, 1-day backtest, telemetry health checks, dated reports, retention pruning |
+| `src/autocompactor/llm_digest.py` | optional cheap-model "must-survive" digest (harness-agnostic; consumed by pi_bridge) |
+| `src/autocompactor/stats.py` | telemetry appender |
+| `src/autocompactor/statedir.py` | state root (`~/.autocompactor/pi`) |
+| `src/autocompactor/window_resolver.py` | effective-window resolution (Pi runtime window: `contextWindow − reserveTokens`) |
+| `src/autocompactor/nightly_eval.py` | cron self-evaluation: tests, telemetry health checks, dated reports, retention pruning |
 | `src/autocompactor/pi_session_lib.py` | Pi v3 tree-format JSONL -> `TranscriptStats` |
 | `src/autocompactor/pi_bridge.py` | never-raise JSON CLI bridging the Pi extension to the Python core (evaluate/prepare/reinject) |
-| `src/autocompactor/install.py` | Claude Code harness adapter installer |
 | `src/autocompactor/install_pi.py` | Pi harness adapter installer (copy-with-rewrite TS shim, version-pin) |
-| `src/*.py` | thin entrypoint shims (hook/cron/CLI targets): `context_monitor`, `precompact_analyzer`, `pi_bridge`, `analyze_corpus`, `nightly_eval`, `install`, `install_pi` |
+| `src/*.py` | thin entrypoint shims (Pi bridge / cron / installer): `pi_bridge`, `nightly_eval`, `install_pi` |
 | `src/pi/autocompactor.ts` | Pi TypeScript extension |
-| `config.json` | versioned tuning (top-level + per-harness sections); `config.local.json` is the gitignored site-local overlay |
-| `tests/` | fixtures + `smoke_test.sh` + `smoke_test_pi.sh` + `test_*.py` |
+| `config.json` | versioned single-namespace tuning; `config.local.json` is the gitignored site-local overlay |
+| `tests/` | fixtures + `smoke_test_pi.sh` + `test_*.py` |
 
 ## Harness adapters
 
-Two adapters ship; each has its own installer and operating specifics. Keep
-adapter-specific operating detail in the matching harness doc, not here.
+Pi is the sole adapter. The core is harness-agnostic by design, but only the
+Pi adapter ships.
 
-- **Claude Code** — `python3 src/install.py` registers hooks, env defaults,
-  and the nightly cron. Claude-specific operating detail (hook wiring,
-  `settings.json` thresholds, native-ceiling tuning, state paths, verification)
-  lives in **`CLAUDE.md`**.
 - **Pi** (`@earendil-works/pi-coding-agent`) — `python3 src/install_pi.py`
   installs `src/pi/autocompactor.ts`, which shells out to `src/pi_bridge.py`
   (the shared Python core). State/telemetry live under `~/.autocompactor/pi/`.

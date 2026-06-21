@@ -1,25 +1,31 @@
 # autocompactor — handoff notes
 
-Project: smarter, earlier, instruction-tailored compaction for Claude Code.
-Status: built and smoke-tested in a sandbox against synthetic transcripts.
-**Not yet validated against real data** — the epyc1 transcript tarball never
-arrived, so the tuning pass is still open. This document is the handoff
-into a Claude Code session running directly on the server.
+Project: a **Pi context compactor** — smarter, earlier, instruction-tailored
+compaction for the Pi coding agent. The core is harness-agnostic by design; Pi
+is the sole adapter that ships.
 
-## Components (all in this directory)
+> **NOTE (2026-06-21):** the dated session history below records how the project
+> was built and is preserved as the decision record — including the original
+> Claude Code adapter and the rationale for removing it (the Pi-only pivot). It
+> reads in past tense. For the *current* module layout and entrypoints, see
+> `AGENTS.md` (Architecture); the canonical components are
+> `transcript_lib.py`, `artifacts.py`, `llm_digest.py`, `pi_session_lib.py`,
+> `pi_bridge.py`, `nightly_eval.py`, `install_pi.py`, and `src/pi/autocompactor.ts`.
+
+## Components (historical — see AGENTS.md Architecture for the current layout)
 
 | File                   | Role |
 |------------------------|------|
 | `transcript_lib.py`    | Shared JSONL parsing; phase detection; instruction builder (structured-handoff schema + phase addenda + session anchors) |
-| `context_monitor.py`   | `UserPromptSubmit` hook: occupancy + boundary-signal scoring, recommends `/compact`, stages tailored instructions, logs telemetry |
-| `precompact_analyzer.py` | `PreCompact` hook (manual+auto): transcript backup, injects `customInstructions`, logs telemetry |
+| `context_monitor.py`   | *(removed in the Pi-only pivot)* Claude `UserPromptSubmit` hook: occupancy + boundary-signal scoring, recommended `/compact`, staged tailored instructions |
+| `precompact_analyzer.py` | *(removed in the Pi-only pivot)* Claude `PreCompact` hook (manual+auto): transcript backup, injected `customInstructions` |
 | `artifacts.py`         | Mechanical extraction -> durable disk artifacts -> budgeted one-shot re-injection digest |
-| `stats.py`             | Local telemetry appender (`~/.claude/autocompactor/stats/events.jsonl`) |
-| `analyze_corpus.py`    | Offline backtester for real transcripts + `--events` aggregator for live telemetry |
-| `install.py`           | Idempotent hook registration in ~/.claude/settings.json |
-| `tests/`               | Fixtures + smoke_test.sh (isolated-HOME, end-to-end) |
-| `CLAUDE.md`            | Resume context for the on-server Claude Code session |
-| `README.md`            | Install, settings.json registration, tunables |
+| `stats.py`             | Local telemetry appender |
+| `analyze_corpus.py`    | *(removed in the Pi-only pivot)* Offline backtester + `--events` aggregator |
+| `install.py`           | *(removed in the Pi-only pivot)* Idempotent Claude hook registration |
+| `install_pi.py`        | Pi adapter installer (copy-with-rewrite TS shim, version-pin) |
+| `tests/`               | Fixtures + `smoke_test_pi.sh` (isolated-HOME, end-to-end) |
+| `README.md`            | Install, tunables, test matrix |
 
 ## Design decisions (and why)
 
@@ -491,9 +497,11 @@ founding-goal restatement are never lost.
 
 ## Smoke test (run after any change)
 
+The Claude hook smoke commands recorded here originally were removed in the
+Pi-only pivot. The current gate is:
+
 ```bash
-echo '{"session_id":"t","transcript_path":"/path/to/session.jsonl","cwd":"'$PWD'","hook_event_name":"UserPromptSubmit","prompt":"x"}' \
-  | python3 context_monitor.py
-echo '{"session_id":"t","transcript_path":"/path/to/session.jsonl","cwd":"'$PWD'","hook_event_name":"PreCompact","trigger":"manual","custom_instructions":""}' \
-  | python3 precompact_analyzer.py
+python3 -m pytest tests/ -q              # Python core (100 cases)
+PI_SMOKE=1 bash tests/smoke_test_pi.sh   # Pi bridge contract, isolated HOME
+node --test 'src/pi/test/*.test.mjs'     # Pi TS shim against stubbed pi/ctx
 ```
