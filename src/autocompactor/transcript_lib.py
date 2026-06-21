@@ -804,8 +804,8 @@ def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:
 def append_artifact_restatement(instructions: str, arts: dict) -> str:
     """Append the founding-goal restatement + the on-disk-artifacts NOTE.
 
-    Shared by both PreCompact paths (Claude precompact_analyzer + Pi bridge
-    prepare): every compaction pass must restate the session's original
+    Used by the Pi bridge prepare path: every compaction pass must restate
+    the session's original
     prompts verbatim — staged instructions built from a tail-only parse may
     predate their capture, but the old-wins artifact merge always carries
     them — and must tell the summarizer not to spend space duplicating the
