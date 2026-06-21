@@ -236,6 +236,28 @@ def analyze(path: str = "", recent_window: int = 30) -> transcript_lib.Transcrip
     st.entries = active
     st.compaction_count = compaction_count
 
+    # summary_chars: single-source the carried compaction summary.
+    # Prefer an explicit `compactionSummary`-role message; fall back to the
+    # `compaction` entry's own summary text. Never count both (double-count
+    # guard, spec §9). Scan the full path, not the active segment — the
+    # summary lives just before the cut.
+    summary_text = ""
+    for entry in full_path:
+        m = _message(entry)
+        if m.get("role") == "compactionSummary":
+            # Pi carries the carried summary as a `summary` string field on the
+            # message; fall back to content blocks for other shapes.
+            summary_text = str(m.get("summary") or "") or _message_text(
+                m, include_thinking=True)
+            break
+    if not summary_text:
+        for entry in full_path:
+            if entry.get("type") == "compaction":
+                summary_text = str(entry.get("summary") or "") or _message_text(
+                    _message(entry), include_thinking=True)
+                break
+    st.summary_chars = len(summary_text)
+
     # Founding-goal capture walks the FULL path, not the active segment:
     # the prompts that framed the session live before the last compaction.
     for entry in full_path:
@@ -276,6 +298,7 @@ def analyze(path: str = "", recent_window: int = 30) -> transcript_lib.Transcrip
             continue
 
         if role == "assistant":
+            st.assistant_text_chars += len(_message_text(msg, include_thinking=True))
             usage = msg.get("usage")
             if isinstance(usage, dict):
                 st.last_usage = _usage_compat(usage)
@@ -328,6 +351,7 @@ def analyze(path: str = "", recent_window: int = 30) -> transcript_lib.Transcrip
         elif role == "user":
             text = _message_text(msg).strip()
             if text and not text.startswith("/") and "<command-name>" not in text:
+                st.user_prompt_chars += len(text)
                 st.last_user_task = text[:500]
                 if is_recent:
                     st.recent_words |= transcript_lib._content_words(text)

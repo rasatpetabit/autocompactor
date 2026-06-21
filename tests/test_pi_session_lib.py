@@ -233,3 +233,26 @@ def test_single_line_session_returns_stats_without_raising(tmp_path):
     st = pi_session_lib.analyze(path)
     assert isinstance(st, transcript_lib.TranscriptStats)
     assert st.entries[0]["id"] == "only-session-line"
+
+
+def test_assistant_text_chars_includes_thinking():
+    st = pi_session_lib.analyze(os.path.join(FIX, "pi", "real_shapes.jsonl"))
+    # real_shapes.jsonl carries a thinking block; field must count it.
+    assert st.assistant_text_chars > 0
+
+
+def test_user_prompt_chars_populated():
+    st = pi_session_lib.analyze(os.path.join(FIX, "pi", "linear.jsonl"))
+    assert st.user_prompt_chars > 0
+
+
+def test_summary_chars_single_source():
+    st = pi_session_lib.analyze(os.path.join(FIX, "pi", "with_compaction.jsonl"))
+    # with_compaction.jsonl has BOTH a compactionSummary role and a
+    # compaction entry; summary_chars counts the summary once, never both.
+    assert st.summary_chars > 0
+
+
+def test_skills_remain_zero_spec0():
+    st = pi_session_lib.analyze(os.path.join(FIX, "pi", "linear.jsonl"))
+    assert st.skill_chars == 0 and st.skill_names == []
