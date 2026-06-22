@@ -245,10 +245,16 @@ def active_path(path: str) -> tuple[list, list, int]:
     return full_path, active, compaction_count
 
 
-def analyze(path: str = "", recent_window: int = 30) -> transcript_lib.TranscriptStats:
+def analyze_active_prefix(full_path, active, recent_window: int = 30,
+                          compaction_count: int = 0):
+    """Run the analyze() walk over an explicit (full_path, active prefix).
+
+    `full_path` provides founding prompts + carried summary (pre-cut context);
+    `active` is the segment to walk (the post-compaction segment for analyze(),
+    or a prefix of it up to some turn for composition-at-peak). Behavior-
+    identical to analyze() when called with the full active segment.
+    """
     st = transcript_lib.TranscriptStats()
-    full_path = _leaf_path(_load_jsonl(path))
-    active, compaction_count = _active_segment(full_path)
     st.entries = active
     st.compaction_count = compaction_count
 
@@ -398,3 +404,8 @@ def analyze(path: str = "", recent_window: int = 30) -> transcript_lib.Transcrip
         )
 
     return st
+
+
+def analyze(path: str = "", recent_window: int = 30) -> transcript_lib.TranscriptStats:
+    full_path, active, compaction_count = active_path(path)
+    return analyze_active_prefix(full_path, active, recent_window, compaction_count)
