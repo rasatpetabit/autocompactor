@@ -12,6 +12,48 @@ is the sole adapter that ships.
 > `transcript_lib.py`, `artifacts.py`, `llm_digest.py`, `pi_session_lib.py`,
 > `pi_bridge.py`, `nightly_eval.py`, `install_pi.py`, and `src/pi/autocompactor.ts`.
 
+## Post-pivot follow-ups (open items, 2026-06-21)
+
+Deferred, owner-held cleanup from the Pi-only pivot merge (branch
+`docs/spec0-pi-only-pivot`, merged to `main` @ `495088e`). None block the merge.
+Persisted here from the (gitignored) SDD ledger so they survive `git clean`.
+
+**Owner-held (touch uncommitted/user-owned or out-of-tree state):**
+1. **WORKLOG entry** — not applied because `WORKLOG.md` had uncommitted work at
+   merge time. Verbatim text to add:
+   ```
+   ## 2026-06-21 — Pi-only pivot
+   Dropped the Claude Code adapter entirely; Pi is now the sole product. Why:
+   the Claude adapter's history was channel-fighting (systemMessage redraw,
+   additionalContext relay, PreCompact hookSpecificOutput rejection, cooldown
+   starvation) and Claude only ever advised — it cannot invoke /compact. Pi
+   actuates via ctx.compact(). Extracted llm_digest to a kept module; completed
+   the Pi parser's assistant/user/summary field-completion before any removal.
+   Full scaffolding flatten: single-namespace config, state under ~/.autocompactor/pi.
+   ```
+2. **TS-shim dead-branch cleanup** — `src/pi/autocompactor.ts:50-86`: drop the
+   now-dead `CFG?.pi?.[key]` lookups in `cfgNum` and the `AUTOCOMPACTOR_PI_*`
+   env reads. Non-functional — the flatten already resolves correctly via the
+   `CFG?.pi?.[key] ?? CFG?.[key]` fallback with the `pi` config section gone.
+   Deferred to avoid colliding with in-flight delivery-channel work in that file.
+3. **`~/.claude/settings.json`** — deregister the now-deleted Claude hooks
+   (`context_monitor` UserPromptSubmit/PostToolUse, `precompact_analyzer`
+   PreCompact). They error non-fatally now that their scripts are gone. Outside
+   the repo tree; owner account.
+
+**Inert nits (safe post-merge sweep, no runtime effect):**
+- `transcript_lib.observe_only(harness="claude")` — inert dead `harness` param;
+  both callers (`pi_bridge.py`, `transcript_lib.py`) already call it arg-less.
+- `TranscriptStats.todo_step` / `todos_all_done` — dataclass fields the Pi
+  parser never sets (default `False`); read under guards, dormant-by-construction.
+- F401 unused imports in `tests/test_llm_digest.py`; stale `analyze()` reference
+  in the `_block_text` docstring.
+- `resolve_window` `cmd_prepare`/configured branch has no direct test pinning
+  `effective_window == configured − reserve` (assertion still true; the hot
+  `cmd_evaluate` path is covered). A 1-line regression pin would close it.
+- Optional: mark the historical `## Open items for the on-server session` header
+  as `(as of 2026-06-10; items 1–4 since closed)` to remove present-tense ambiguity.
+
 ## Components (historical — see AGENTS.md Architecture for the current layout)
 
 | File                   | Role |
