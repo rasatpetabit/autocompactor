@@ -217,5 +217,35 @@ def profile_turns(session: str, recent_window: int = 30) -> ProfileResult:
         prev_assistant_pos = i
         turns.append(rec)
 
+    _compute_flags(turns)
     res.turns = turns
     return res
+
+
+def _compute_flags(turns, *, large_output=5000, redundant_window=10,
+                   think_bloat_x=5, idle_gap_min=30):
+    seen_reads = []  # list of (turn_index, path)
+    for j, t in enumerate(turns):
+        if len(t.tools_called) > 1:
+            t.flags.append("parallel-tools")
+        if t.thinking_tokens > think_bloat_x * max(t.output_tokens, 1) and t.thinking_tokens > 0:
+            t.flags.append("think-bloat")
+        if any(fb["is_error"] for fb in t.fed_by):
+            t.flags.append("error-retry")
+        if any(fb["tokens"] >= large_output for fb in t.fed_by):
+            t.flags.append("large-output")
+        if t.wall_seconds is not None and t.wall_seconds >= idle_gap_min * 60:
+            t.flags.append("idle-gap")
+        # redundant read: same path read within the last redundant_window turns
+        for name, args in t.tool_call_args.items():
+            if name.lower() in ("read", "grep"):
+                p = args.get("path")
+                if p and any(p == sp for k, sp in seen_reads
+                             if j - k <= redundant_window and k != j):
+                    t.flags.append("redundant-read")
+                if p:
+                    seen_reads.append((j, p))
+        # error-retry: 2+ consecutive error turns
+        if j >= 1 and t.is_error_turn and turns[j - 1].is_error_turn \
+                and "error-retry" not in t.flags:
+            t.flags.append("error-retry")

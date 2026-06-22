@@ -112,3 +112,32 @@ def test_turn_attribution_exact_occupancy_and_pre_call(tmp_path):
     # fed-by for t1 includes the tool result (interval a1..a2 exclusive of a2)
     assert t1.fed_by_tokens > 0
     assert any(fb["tool"] == "read" for fb in t1.fed_by)
+
+
+def test_flags_parallel_and_error_and_think_bloat(tmp_path):
+    res = turn_profile.profile_turns(os.path.join(FIX, "pi", "parallel_tools.jsonl"))
+    t0 = res.turns[0]
+    assert "parallel-tools" in t0.flags          # two toolCalls in one turn
+    t1 = res.turns[1]
+    assert t1.fed_by_tokens > 0
+
+
+def test_flag_redundant_read(tmp_path):
+    entries = [{"type": "session", "id": "s0", "timestamp": "2026-01-01T00:00:00.000Z"},
+               {"type": "message", "id": "u1", "parentId": None,
+                "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}}]
+    for n in range(3):
+        a = {"type": "message", "id": f"a{n}", "parentId": entries[-1]["id"],
+             "message": {"role": "assistant",
+                         "content": [{"type": "toolCall", "id": f"c{n}",
+                                      "name": "read", "arguments": {"path": "same.py"}}],
+                         "usage": {"input": 10, "cacheRead": 0, "cacheWrite": 0,
+                                   "output": 1, "totalTokens": 11}}}
+        t = {"type": "message", "id": f"t{n}", "parentId": f"a{n}",
+             "message": {"role": "toolResult", "toolCallId": f"c{n}",
+                         "isError": False, "content": [{"type": "text", "text": "x"}]}}
+        entries += [a, t]
+    path = _write_jsonl(tmp_path / "rr.jsonl", entries)
+    res = turn_profile.profile_turns(path)
+    assert "redundant-read" in res.turns[1].flags
+    assert "redundant-read" in res.turns[2].flags
