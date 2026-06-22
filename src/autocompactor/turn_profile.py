@@ -249,3 +249,96 @@ def _compute_flags(turns, *, large_output=5000, redundant_window=10,
         if j >= 1 and t.is_error_turn and turns[j - 1].is_error_turn \
                 and "error-retry" not in t.flags:
             t.flags.append("error-retry")
+
+
+_SPARK = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(values):
+    if not values:
+        return ""
+    lo, hi = min(values), max(values)
+    if hi <= lo:
+        return _SPARK[3] * len(values)
+    return "".join(
+        _SPARK[min(len(_SPARK) - 1,
+                   int((v - lo) / (hi - lo) * (len(_SPARK) - 1)))]
+        for v in values)
+
+
+def summarize(res: ProfileResult, post_floor: float = 70000,
+              full_path=None, active=None, compaction_count: int = 0,
+              recent_window: int = 30) -> ProfileSummary:
+    turns = res.turns
+    s = res.summary
+    s.turn_count = len(turns)
+    used = [t for t in turns if t.has_usage]
+    s.has_usage = bool(used)
+    if turns:
+        s.start_ctx = turns[0].occupancy
+        s.final_ctx = turns[-1].occupancy
+    if used:
+        occupancies = [t.occupancy for t in turns]
+        s.peak_ctx = max(occupancies)
+        s.peak_turn_index = occupancies.index(s.peak_ctx)
+        s.total_cost = sum(t.cost for t in turns)
+        cr = sum(t.cache_read for t in used)
+        pre = sum(t.pre_call_tokens for t in used)
+        s.overall_cache_hit_ratio = cr / pre if pre else 0.0
+        s.avg_cache_write_per_turn = (sum(t.cache_write for t in used) / len(used))
+        deltas = [(t.index, t.delta_occupancy) for t in turns if t.delta_occupancy]
+        if deltas:
+            s.biggest_growth_turn = max(deltas, key=lambda kv: kv[1])
+        outs = [(t.index, t.fed_by_tokens) for t in turns if t.fed_by_tokens]
+        if outs:
+            s.biggest_tool_output_turn = max(outs, key=lambda kv: kv[1])
+        s.reclaimable_tokens = max(s.peak_ctx - int(post_floor), 0)
+
+    # tool frequency + per-tool result tokens (review P2#4: result-token share,
+    # NOT cost attribution)
+    freq = {}
+    per_tool = {}
+    for t in turns:
+        for name in t.tools_called:
+            freq[name] = freq.get(name, 0) + 1
+        for fb in t.fed_by:
+            if fb["role"] in ("toolResult", "bashExecution"):
+                n = fb["tool"]
+                slot = per_tool.setdefault(
+                    n, {"tool": n, "calls": 0, "result_tokens": 0})
+                slot["result_tokens"] += fb["tokens"]
+                slot["calls"] += 1
+    s.tool_frequency = freq
+    total_result = sum(v["result_tokens"] for v in per_tool.values()) or 1
+    s.per_tool_result_tokens = sorted(
+        [{"tool": v["tool"], "calls": v["calls"],
+          "result_tokens": v["result_tokens"],
+          "share": round(v["result_tokens"] / total_result, 3)}
+         for v in per_tool.values()],
+        key=lambda d: d["result_tokens"], reverse=True)
+    # flag-derived counts for the summary line
+    s.redundant_read_count = sum(
+        1 for t in turns if "redundant-read" in t.flags)
+    s.oversized_output_count = sum(
+        1 for t in turns if "large-output" in t.flags)
+
+    # composition @ peak (one prefix analysis; review P2#3)
+    if used and full_path is not None and active is not None:
+        try:
+            st = pi_session_lib.analyze_active_prefix(
+                full_path, active, recent_window, compaction_count)
+            s.composition_at_peak = transcript_lib.context_composition(
+                st, st.context_tokens)
+        except Exception:
+            s.composition_at_peak = None
+
+    # wall-clock total
+    wall = [t.wall_seconds for t in turns if t.wall_seconds is not None]
+    s.total_wall_seconds = sum(wall) if wall else None
+
+    s.sparkline = _sparkline([t.occupancy for t in turns])
+    if not turns:
+        s.warnings.append("no assistant turns in active segment")
+    elif not used:
+        s.warnings.append("no usage blocks found; exact token/cost fields are 0")
+    return s

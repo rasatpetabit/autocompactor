@@ -141,3 +141,21 @@ def test_flag_redundant_read(tmp_path):
     res = turn_profile.profile_turns(path)
     assert "redundant-read" in res.turns[1].flags
     assert "redundant-read" in res.turns[2].flags
+
+
+def test_summary_aggregates(tmp_path):
+    res = turn_profile.profile_turns(os.path.join(FIX, "pi", "parallel_tools.jsonl"))
+    s = turn_profile.summarize(res, post_floor=70000)
+    assert s.turn_count == 2
+    assert s.has_usage is True
+    assert s.peak_ctx == 284 and s.peak_turn_index == 1
+    assert s.start_ctx == 220 and s.final_ctx == 284
+    assert abs(s.total_cost - (0.016 + 0.0152)) < 1e-9
+    assert s.tool_frequency["read"] == 2
+    assert s.reclaimable_tokens == max(284 - 70000, 0)   # below floor -> 0
+    assert s.sparkline                  # non-empty
+    names = [r["tool"] for r in s.per_tool_result_tokens]
+    assert "read" in names
+    # review P2#4: no blended per-tool cost, only result-token share
+    assert all("share" in r and "result_tokens" in r
+               for r in s.per_tool_result_tokens)
