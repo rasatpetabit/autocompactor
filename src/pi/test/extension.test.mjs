@@ -105,16 +105,30 @@ function hiddenDigests(pi) {
   return pi.sent.filter((s) => s.message.customType === "autocompactor.digest")
 }
 
-function assertVisibleStatus(sent, pattern) {
+// EVERY visible notice — one-shot (load, compaction start/done, errors) AND
+// the recurring agent_end advisory — rides "nextTurn": the only channel that
+// renders+persists across a compaction (Pi's sendCustomMessage drops a
+// "followUp" message while the agent is streaming, which is when both the
+// compaction events AND agent_end fire). The advisory is deduped by text so
+// nextTurn can't pile up stale dupes.
+function assertVisibleStatus(sent, pattern, deliver = "nextTurn") {
   assert.equal(sent.message.display, true)
-  assert.deepEqual(sent.opts, { deliverAs: "followUp" })
+  assert.deepEqual(sent.opts, { deliverAs: deliver })
   assert.match(sent.message.content, pattern)
   assert.equal(typeof sent.message.details?.timestamp, "number")
 }
 
-function assertNoVisibleNextTurn(pi) {
+// Safety net: every visible status must use "nextTurn" with display:true —
+// never "followUp"/"steer"/"triggerTurn"/undefined. followUp is swallowed
+// while streaming; steer/triggerTurn would inject status text into the live
+// model stream.
+function assertVisibleChannelsValid(pi) {
   for (const sent of visibleStatuses(pi)) {
-    assert.notEqual(sent.opts?.deliverAs, "nextTurn", "visible status must not wait for next user turn")
+    assert.equal(
+      sent.opts?.deliverAs, "nextTurn",
+      `visible status used unexpected channel: ${sent.opts?.deliverAs}`,
+    )
+    assert.equal(sent.message.display, true)
   }
 }
 
@@ -131,7 +145,7 @@ test("session_start: extension announces it loaded visibly", async () => {
   const statuses = visibleStatuses(pi)
   assert.equal(statuses.length, 1)
   assertVisibleStatus(statuses[0], /autocompactor: loaded/)
-  assertNoVisibleNextTurn(pi)
+  assertVisibleChannelsValid(pi)
   assert.equal(ctx.statuses.at(-1).key, "autocompactor")
 })
 
@@ -175,7 +189,7 @@ test("advise mode: recommend -> visible persistent status", async () => {
   const statuses = visibleStatuses(pi)
   assert.equal(statuses.length, 1)
   assertVisibleStatus(statuses[0], /criteria met.*test boundary.*advise mode/)
-  assertNoVisibleNextTurn(pi)
+  assertVisibleChannelsValid(pi)
   assert.equal(ctx.notifications.length, 1)
   assert.equal(ctx.notifications[0].type, "warning")
   assert.match(ctx.notifications[0].message, /criteria met/)
@@ -207,7 +221,7 @@ test("actuate mode: compact exactly once; reentrancy blocks a concurrent second"
     let statuses = visibleStatuses(pi)
     assert.equal(statuses.length, 1)
     assertVisibleStatus(statuses[0], /criteria met.*running compaction now/)
-    assertNoVisibleNextTurn(pi)
+    assertVisibleChannelsValid(pi)
 
     // Compaction still in flight (onComplete NOT called): a second boundary
     // past the cooldown must NOT compact again — it shows "compaction in progress".
@@ -217,7 +231,7 @@ test("actuate mode: compact exactly once; reentrancy blocks a concurrent second"
     statuses = visibleStatuses(pi)
     assert.equal(statuses.length, 2)
     assertVisibleStatus(statuses[1], /criteria met.*test boundary.*compaction in progress/)
-    assertNoVisibleNextTurn(pi)
+    assertVisibleChannelsValid(pi)
     assert.equal(ctx2.notifications.length, 1)
     assert.match(ctx2.notifications[0].message, /criteria met/)
     assert.match(ctx2.notifications[0].message, /test boundary/)
@@ -232,7 +246,7 @@ test("actuate mode: compact exactly once; reentrancy blocks a concurrent second"
     statuses = visibleStatuses(pi)
     assert.equal(statuses.length, 3)
     assertVisibleStatus(statuses[2], /criteria met.*running compaction now/)
-    assertNoVisibleNextTurn(pi)
+    assertVisibleChannelsValid(pi)
   } finally {
     delete process.env.AUTOCOMPACTOR_PI_MODE
   }
@@ -252,7 +266,7 @@ test("error-swallow: bridge that throws never breaks any handler and warns visib
   assertVisibleStatus(statuses[0], /bridge evaluate returned no data/)
   assertVisibleStatus(statuses[1], /native compaction starting/)
   assertVisibleStatus(statuses[2], /compaction completed/)
-  assertNoVisibleNextTurn(pi)
+  assertVisibleChannelsValid(pi)
 })
 
 test("error-swallow: garbage bridge stdout warns but never compacts", async () => {
@@ -268,7 +282,7 @@ test("error-swallow: garbage bridge stdout warns but never compacts", async () =
   assert.equal(statuses.length, 2)
   assertVisibleStatus(statuses[0], /bridge evaluate returned no data/)
   assertVisibleStatus(statuses[1], /compaction completed/)
-  assertNoVisibleNextTurn(pi)
+  assertVisibleChannelsValid(pi)
 })
 
 test("session_compact: hidden digest is queued; visible summary is persistent", async () => {
@@ -286,7 +300,7 @@ test("session_compact: hidden digest is queued; visible summary is persistent", 
   const statuses = visibleStatuses(pi)
   assert.equal(statuses.length, 1)
   assertVisibleStatus(statuses[0], /150,000 → 10,000 tokens/)
-  assertNoVisibleNextTurn(pi)
+  assertVisibleChannelsValid(pi)
   assert.equal(ctx.notifications.length, 1)
   assert.equal(ctx.notifications[0].type, "info")
   assert.match(ctx.notifications[0].message, /150,000 → 10,000 tokens/)
@@ -301,23 +315,63 @@ test("session_compact: visible summary still persists when there is no digest", 
   const statuses = visibleStatuses(pi)
   assert.equal(statuses.length, 1)
   assertVisibleStatus(statuses[0], /before context was 150,000 tokens/)
-  assertNoVisibleNextTurn(pi)
+  assertVisibleChannelsValid(pi)
   assert.equal(ctx.notifications.length, 1)
   assert.match(ctx.notifications[0].message, /before context was 150,000 tokens/)
 })
 
-test("session_before_compact: prepare runs fire-and-forget, no cancel by default", async () => {
+test("session_before_compact: native path awaits prepare (skip-llm), no cancel by default", async () => {
   delete process.env.AUTOCOMPACTOR_PI_INTERCEPT
-  const pi = makePi({ exec: bridgeResponder(RECOMMEND) })
+  // prepare resolves only after a turn of the event loop; if the handler did
+  // NOT await it, prepareResolved would still be false when the handler returns
+  // (the race that let session_compact's reinject read stale artifacts).
+  let prepareResolved = false
+  const pi = makePi({
+    exec: async (_cmd, args) => {
+      if (args[1] === "prepare") {
+        await new Promise((r) => setTimeout(r, 5))
+        prepareResolved = true
+        return { stdout: "{}", stderr: "", code: 0, killed: false }
+      }
+      return { stdout: "", stderr: "", code: 1, killed: false }
+    },
+  })
   autocompactor(pi)
   const ctx = makeCtx({ tokens: 150_000 })
   const result = await pi.handlers.session_before_compact({}, ctx)
   assert.equal(result, undefined, "default path never cancels native compaction")
   assert.equal(ctx.compactCalls.length, 0)
-  assert.equal(pi.execCalls.length, 1, "prepare still fired for backup+artifacts")
-  assert.equal(pi.execCalls[0].args[1], "prepare")
-  const statuses = visibleStatuses(pi)
-  assert.equal(statuses.length, 1)
-  assertVisibleStatus(statuses[0], /native compaction starting.*backup\/artifacts/)
-  assertNoVisibleNextTurn(pi)
+  assert.equal(prepareResolved, true, "handler must AWAIT prepare before yielding to native compaction")
+  const prep = pi.execCalls.find((c) => c.args[1] === "prepare")
+  assert.ok(prep, "prepare fired for backup+artifacts")
+  assert.ok(prep.args.includes("--trigger") && prep.args.includes("native"), "native trigger")
+  assert.ok(prep.args.includes("--skip-llm"), "native prepare skips the (discarded) LLM digest")
+  assertVisibleStatus(visibleStatuses(pi)[0], /native compaction starting.*backup\/artifacts/)
+  assertVisibleChannelsValid(pi)
+})
+
+test("actuate: ctx.compact throwing synchronously clears selfTriggered (no permanent brick)", async () => {
+  process.env.AUTOCOMPACTOR_PI_MODE = "actuate"
+  try {
+    const pi = makePi({ exec: bridgeResponder(RECOMMEND) })
+    autocompactor(pi)
+    const ctx = makeCtx({ tokens: 150_000 })
+    ctx.compact = () => { throw new Error("compact boom") } // throws, NO callback fires
+    await pi.handlers.agent_end({}, ctx) // must not reject
+    // The synchronous throw is reported AND the reentrancy flag is reset:
+    assert.ok(
+      visibleStatuses(pi).some((s) => /compaction failed.*compact boom/.test(s.message.content)),
+      "compact failure is surfaced",
+    )
+    // Proof the flag cleared: a later native compaction is NOT short-circuited
+    // by the "already in progress" guard — it proceeds to prepare.
+    const ctx2 = makeCtx({ tokens: 150_000 })
+    await pi.handlers.session_before_compact({}, ctx2)
+    assert.ok(
+      visibleStatuses(pi).some((s) => /native compaction starting/.test(s.message.content)),
+      "selfTriggered was cleared — native prepare not blocked by a stuck reentrancy flag",
+    )
+  } finally {
+    delete process.env.AUTOCOMPACTOR_PI_MODE
+  }
 })

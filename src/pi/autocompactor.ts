@@ -48,17 +48,24 @@ const CFG: any = (() => {
 })()
 
 function cfgNum(key: string, dflt: number): number {
-  const v = parseFloat(String(CFG?.pi?.[key] ?? CFG?.[key] ?? ""))
+  // Single-namespace config post-pivot: the `pi` config section is gone, so
+  // read the flat key directly (the old `CFG?.pi?.[key]` lookup was dead).
+  const v = parseFloat(String(CFG?.[key] ?? ""))
   return Number.isFinite(v) ? v : dflt
 }
 
 // Zero-spawn pre-gate thresholds (mirror pi_bridge defaults; the bridge
 // re-checks with full signal analysis — this gate only avoids spawns).
-const SOFT_PCT = num("AUTOCOMPACTOR_PI_SOFT_PCT", num("AUTOCOMPACTOR_SOFT_PCT", cfgNum("SOFT_PCT", 0.40)))
-const MIN_SAVINGS = num("AUTOCOMPACTOR_PI_MIN_SAVINGS", num("AUTOCOMPACTOR_MIN_SAVINGS", cfgNum("MIN_SAVINGS", 30_000)))
-const POST_FLOOR = num("AUTOCOMPACTOR_PI_POST_FLOOR", num("AUTOCOMPACTOR_POST_FLOOR", cfgNum("POST_FLOOR", 70_000)))
-const COOLDOWN = num("AUTOCOMPACTOR_PI_COOLDOWN", num("AUTOCOMPACTOR_COOLDOWN", cfgNum("COOLDOWN", 25_000)))
-const RESERVE_FALLBACK = num("AUTOCOMPACTOR_PI_RESERVE", cfgNum("RESERVE", 40_000))
+// Env overrides use the SAME `AUTOCOMPACTOR_*` namespace the Python bridge
+// reads (config_lib), so the gate and the bridge can never diverge on a
+// tuned value. The old `AUTOCOMPACTOR_PI_*` threshold aliases were TS-only
+// (the flattened Python config never honored them) and were removed; the
+// Pi-only control flags AUTOCOMPACTOR_PI_MODE / _INTERCEPT stay namespaced.
+const SOFT_PCT = num("AUTOCOMPACTOR_SOFT_PCT", cfgNum("SOFT_PCT", 0.40))
+const MIN_SAVINGS = num("AUTOCOMPACTOR_MIN_SAVINGS", cfgNum("MIN_SAVINGS", 30_000))
+const POST_FLOOR = num("AUTOCOMPACTOR_POST_FLOOR", cfgNum("POST_FLOOR", 70_000))
+const COOLDOWN = num("AUTOCOMPACTOR_COOLDOWN", cfgNum("COOLDOWN", 25_000))
+const RESERVE_FALLBACK = num("AUTOCOMPACTOR_RESERVE", cfgNum("RESERVE", 40_000))
 
 function num(name: string, dflt: number): number {
   const v = parseFloat(process.env[name] ?? "")
@@ -73,10 +80,7 @@ function num(name: string, dflt: number): number {
 // practical threshold (~234K), with HARD_PCT_WIDE (~0.40) forcing it.
 function softPctFor(ctxWindow: number): number {
   if (ctxWindow >= 300_000) {
-    return num(
-      "AUTOCOMPACTOR_PI_SOFT_PCT_WIDE",
-      num("AUTOCOMPACTOR_SOFT_PCT_WIDE", cfgNum("SOFT_PCT_WIDE", SOFT_PCT)),
-    )
+    return num("AUTOCOMPACTOR_SOFT_PCT_WIDE", cfgNum("SOFT_PCT_WIDE", SOFT_PCT))
   }
   return SOFT_PCT
 }
@@ -126,10 +130,27 @@ function notify(ctx: ExtensionContext, message: string, level: StatusLevel): voi
   }
 }
 
+// Persistent, user-visible chat line. The delivery channel matters: Pi's
+// AgentSession.sendCustomMessage (verified against 0.79.9) only renders+persists
+// a message via its final (not-streaming) `else` branch. agent_end listeners run
+// while `agent.state.isStreaming` is still true, and compaction events fire
+// mid-stream — in BOTH cases `deliverAs:"followUp"` routes the message to
+// agent.followUp() (the agent's input queue): not rendered, never persisted, and
+// it can even trigger a spurious continuation turn that injects the status text
+// as agent input. So `followUp` is never used for a visible status. The only
+// channel that survives a compaction and renders is `deliverAs:"nextTurn"`: it is
+// queued and injected+rendered at the next user prompt (flush at agent-session.js
+// :797). EVERY visible notice — one-shot (load/compaction start/done/errors) and
+// the recurring agent_end advisory alike — uses "nextTurn". The recurring advisory
+// is de-duplicated by text (see lastAdvisory) so nextTurn cannot pile up stale
+// duplicates at the next prompt, which was the original reason it was on followUp.
+type Deliver = "nextTurn"
+
 function persistVisible(
   pi: ExtensionAPI,
   message: string,
   level: StatusLevel = "info",
+  deliver: Deliver = "nextTurn",
 ): void {
   try {
     pi.sendMessage(
@@ -139,7 +160,7 @@ function persistVisible(
         display: true,
         details: { level, timestamp: Date.now() },
       },
-      { deliverAs: "followUp" },
+      { deliverAs: deliver },
     )
   } catch {
     /* persistent status is best-effort */
@@ -152,16 +173,50 @@ function announce(
   message: string,
   level: StatusLevel = "info",
   persist = true,
+  deliver: Deliver = "nextTurn",
 ): void {
   setAcStatus(ctx, message)
   notify(ctx, message, level)
-  if (persist) persistVisible(pi, message, level)
+  if (persist) persistVisible(pi, message, level, deliver)
 }
 
 function errorText(err: unknown): string {
   if (err instanceof Error && err.message) return err.message
   if (typeof err === "string" && err) return err
   return "unknown error"
+}
+
+// Fire-and-forget ctx.compact() that can never leave the reentrancy flag stuck.
+// ctx.compact reports completion via onComplete/onError callbacks, but if it
+// throws synchronously or returns a promise that rejects WITHOUT invoking a
+// callback, the caller's try/catch would swallow it and `selfTriggered` would
+// stay true forever — bricking all future compaction. We settle exactly once
+// (onComplete | onError | sync-throw | promise-reject), always clearing the flag.
+function safeCompact(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  customInstructions: string | undefined,
+  clear: () => void,
+): void {
+  let settled = false
+  const finish = (errMsg?: string): void => {
+    if (settled) return
+    settled = true
+    if (errMsg) announce(pi, ctx, `autocompactor: compaction failed — ${errMsg}.`, "error", true)
+    clear()
+  }
+  try {
+    const ret: any = ctx.compact({
+      customInstructions,
+      onComplete: () => finish(),
+      onError: (err: unknown) => finish(errorText(err)),
+    })
+    if (ret && typeof ret.then === "function") {
+      ret.then(undefined, (err: unknown) => finish(errorText(err)))
+    }
+  } catch (err) {
+    finish(errorText(err))
+  }
 }
 
 async function bridge(
@@ -193,6 +248,7 @@ export default function autocompactor(pi: ExtensionAPI) {
   let selfTriggered = false // reentrancy flag for actuate/intercept mode
   let compactionPreTokens = 0 // captured in session_before_compact for post summary
   let bridgeWarned = false
+  let lastAdvisory = "" // dedupe key for the recurring advise/reentrancy notice
 
   pi.on("session_start", async (_event, ctx) => {
     try {
@@ -253,6 +309,7 @@ export default function autocompactor(pi: ExtensionAPI) {
       const verdict = await bridge(pi, ctx, "evaluate", [
         "--tokens", String(usage.tokens),
         "--context-window", String(usage.contextWindow),
+        "--reserve", String(RESERVE_FALLBACK),
       ])
       if (!verdict) {
         const msg = "autocompactor: bridge evaluate returned no data; run install_pi.py --status or reinstall."
@@ -298,28 +355,25 @@ export default function autocompactor(pi: ExtensionAPI) {
             true,
           )
         }
-        ctx.compact({
-          customInstructions: prep?.customInstructions,
-          onComplete: () => { selfTriggered = false },
-          onError: (err) => {
-            announce(pi, ctx, `autocompactor: compaction failed — ${errorText(err)}.`, "error", true)
-            selfTriggered = false
-          },
-        })
+        safeCompact(pi, ctx, prep?.customInstructions, () => { selfTriggered = false })
       } else {
         // Advise mode OR actuate mode with reentrancy guard (compaction in
-        // flight): persistent visible status. User-visible status never uses
-        // nextTurn; nextTurn is reserved for the hidden post-compaction digest.
+        // flight): RECURRING advisory — fires on every qualifying agent_end
+        // (cooldown-gated). It MUST persist via "nextTurn": followUp would be
+        // swallowed while streaming (agent_end runs before isStreaming clears),
+        // which is exactly when this fires. Live status rides setStatus/notify;
+        // the durable chat line is deduped by text so identical advisories
+        // can't pile up at the next user prompt (the reason it was on followUp).
         const modeTag = effMode === "actuate"
           ? "compaction in progress"
           : "advise mode"
-        announce(
-          pi,
-          ctx,
-          `autocompactor: criteria met — ${reason} (${modeTag}).`,
-          "warning",
-          true,
-        )
+        const advisory = `autocompactor: criteria met — ${reason} (${modeTag}).`
+        setAcStatus(ctx, advisory)
+        notify(ctx, advisory, "warning")
+        if (advisory !== lastAdvisory) {
+          lastAdvisory = advisory
+          persistVisible(pi, advisory, "warning")
+        }
       }
     } catch {
       /* never break Pi */
@@ -345,8 +399,15 @@ export default function autocompactor(pi: ExtensionAPI) {
       if (usage && usage.tokens != null) {
         compactionPreTokens = usage.tokens
       }
-      // Fire-and-forget prepare for backup + artifacts + founding-goal.
-      // Non-intercept: do NOT await — native compaction proceeds immediately.
+      // Non-intercept native path: AWAIT prepare before yielding to native
+      // compaction. Pi awaits this handler's promise (it honors a {cancel}
+      // return), so awaiting here holds the compaction until backup + artifacts
+      // + state are persisted — otherwise session_compact's reinject can race
+      // ahead and build the digest from stale/empty artifacts (data loss).
+      // We pass --skip-llm because the prepare's customInstructions are DISCARDED
+      // on this path (native compaction uses Pi's own summarizer), so the only
+      // outputs that matter — the on-disk artifacts and state — are cheap and
+      // fast; the 45s LLM digest would just stall every native compaction.
       if (!interceptEnabled()) {
         announce(
           pi,
@@ -355,7 +416,7 @@ export default function autocompactor(pi: ExtensionAPI) {
           "info",
           true,
         )
-        void bridge(pi, ctx, "prepare", ["--trigger", "native"], PREPARE_TIMEOUT_MS)
+        await bridge(pi, ctx, "prepare", ["--trigger", "native", "--skip-llm", "1"], PREPARE_TIMEOUT_MS)
         return
       }
       // Intercept mode: cancel native compaction and re-trigger with
@@ -387,14 +448,7 @@ export default function autocompactor(pi: ExtensionAPI) {
         "info",
         true,
       )
-      ctx.compact({
-        customInstructions: prep.customInstructions,
-        onComplete: () => { selfTriggered = false },
-        onError: (err) => {
-          announce(pi, ctx, `autocompactor: compaction failed — ${errorText(err)}.`, "error", true)
-          selfTriggered = false
-        },
-      })
+      safeCompact(pi, ctx, prep.customInstructions, () => { selfTriggered = false })
       return { cancel: true }
     } catch {
       /* fall through to native compaction untouched */
@@ -405,7 +459,14 @@ export default function autocompactor(pi: ExtensionAPI) {
   // and show a clear post-compaction summary to the user.
   pi.on("session_compact", async (event, ctx) => {
     try {
-      const inj = await bridge(pi, ctx, "reinject")
+      // Pass the runtime window so the bridge resolves the SAME effective
+      // window the evaluate/prepare paths used (otherwise reinject's
+      // post-compaction occupancy readout is computed off a stale config window).
+      const postUsage = ctx.getContextUsage()
+      const reinjectArgs = postUsage?.contextWindow
+        ? ["--context-window", String(postUsage.contextWindow)]
+        : []
+      const inj = await bridge(pi, ctx, "reinject", reinjectArgs)
       if (inj?.text) {
         // Artifact digest (persisted in context for the model — display: false
         // keeps it out of the user-facing chat history)

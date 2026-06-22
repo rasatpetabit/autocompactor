@@ -64,10 +64,9 @@ class TranscriptStats:
 def _block_text(block: dict) -> str:
     """Flatten a content block (or tool_result) to text.
 
-    Shared by both harnesses (pi_session_lib aliases this). The `thinking`
-    branch is unreachable on the Claude path — analyze() only calls this on
-    user/tool_result blocks, never assistant thinking — but Pi's _message_text
-    relies on it, so the registry stays single-source."""
+    Single-source flattener (pi_session_lib aliases this). The `thinking`
+    branch IS reached on the Pi path — pi_session_lib._message_text flattens
+    assistant blocks including thinking — so it must stay here."""
     if isinstance(block, str):
         return block
     if not isinstance(block, dict):

@@ -12,8 +12,8 @@ bridge must never break a Pi compaction.
 Subcommands (flags mirror the shim's bridge() calls):
 
   evaluate --session <path> [--tokens N] [--context-window N] [--reserve N]
-      Mirror of context_monitor's recommendation model, judged against the
-      Pi effective window (contextWindow - reserveTokens):
+      The recommendation model, judged against the Pi effective window
+      (contextWindow - reserveTokens):
       recommend when occupancy >= HARD_PCT, or >= SOFT_PCT with a gating
       signal (active_signals minus observe-only); min-savings guard and
       per-session cooldown identical to the Claude monitor. Emits
@@ -247,7 +247,10 @@ def cmd_prepare(opts: dict) -> dict:
     arts = artifacts.merge(artifacts.load(session_id),
                            artifacts.extract(st))
     art_sizes = artifacts.save(session_id, arts)
-    if cfg.str("LLM") == "1" and session:
+    # --skip-llm: the native (non-intercept) path discards customInstructions
+    # (Pi's own summarizer runs), so the shim awaits prepare only for the cheap
+    # on-disk artifacts/state — skip the up-to-45s LLM digest there.
+    if cfg.str("LLM") == "1" and session and opts.get("skip_llm") != "1":
         extra = llm_digest(session)
         if extra:
             instructions += "\n\nAdditional must-preserve facts:\n" + extra
@@ -328,11 +331,20 @@ def cmd_reinject(opts: dict) -> dict:
     # (which now has the compaction entry + truncated active segment)
     # to get the post-compaction token count, phase, occupancy.
     post_st = _analyze(session)
-    effective_window = float(max(
-        int(cfg.float("WINDOW", default=200_000)) - int(cfg.float("RESERVE", default=RESERVE_FALLBACK)),
-        1))
+    # Resolve the effective window the SAME way evaluate/prepare do (runtime
+    # window when the shim reports it), so the post-compaction occupancy
+    # readout is consistent rather than computed off a stale config window.
+    runtime_context_window = _to_int(opts.get("context_window"))
+    observed_peak = max(
+        [post_st.context_tokens]
+        + [int(v) for v in getattr(post_st, "usage_series", []) or []])
+    resolution = window_resolver.resolve_window(
+        configured_window=int(cfg.float("WINDOW", default=200_000)),
+        observed_peak=observed_peak,
+        runtime_context_window=runtime_context_window,
+        reserve=int(cfg.float("RESERVE", default=RESERVE_FALLBACK)))
     post_state = transcript_lib.build_context_state(
-        post_st, window=effective_window)
+        post_st, window=resolution.effective_window)
 
     log_event({"type": "reinject", "session_id": session_id,
                "digest_tokens": len(digest) // 4,

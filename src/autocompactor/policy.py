@@ -2,22 +2,21 @@
 """
 policy.py — unified compaction decision rule (harness-agnostic).
 
-Centralizes the decision that the Claude monitor (context_monitor.py) and the
-Pi bridge (pi_bridge.py) both compute inline today. Adapters gather resolved
-inputs (context_tokens, effective_limit, whether a non-observe boundary signal
-is present, the cooldown baseline) and call ``decide()``; they keep their own
-state, instruction staging, and actuation.
+Two kinds of helper live here:
 
-This is the foundation of the three-knob masterplan (see
-docs/masterplan/simplify-compaction-model/spec.md). It encodes the CURRENT
-semantics — binary signal gating, hard/soft thresholds, the min-savings guard,
-and the rising-only cooldown — so behavior is at parity. ``PROFILE``-derived
-constants are introduced but currently mirror today's defaults; per-adapter
-old-key overrides still win (no silent behavior change during migration).
+1. LIVE (consumed by pi_bridge): ``readout_line``, ``composition_line``,
+   ``skill_warning`` — the anchored, content-free display strings.
 
-Out of scope here (later gated steps): rewriting the two existing adapter
-paths to call ``decide()`` (highest-risk step — done after parity tests and
-the Workstream-0 fixes), and weighted boundary scoring.
+2. RESERVED / NOT WIRED: the ``decide()`` decision API plus ``target_tokens``,
+   ``resolve_policy_config``, ``PolicyConfig``/``PolicyInput``/``PolicyDecision``.
+   These are the foundation of the three-knob masterplan (see
+   docs/masterplan/simplify-compaction-model/spec.md): a single ``decide()`` the
+   Pi bridge would call instead of computing soft/hard inline. They encode the
+   CURRENT semantics (binary signal gating, hard/soft thresholds, min-savings
+   guard, rising-only cooldown) at parity, but NO live path calls them yet —
+   pi_bridge.cmd_evaluate still derives SOFT/HARD via cfg.float_windowed inline.
+   Kept deliberately as staged work; the gated rewrite (highest-risk step) lands
+   after parity tests. Do not mistake this for accidental dead code.
 """
 
 from __future__ import annotations

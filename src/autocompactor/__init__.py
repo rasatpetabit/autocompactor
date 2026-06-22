@@ -6,8 +6,8 @@ not be entrusted to a summarizer, local telemetry, and an offline backtester.
 
 This package is import-rooted at ``src/``: the thin entrypoint shims in
 ``src/*.py`` add ``src/`` to ``sys.path`` and call the matching ``main()``.
-Claude Code hooks, the Pi extension, and the nightly cron all invoke those
-shims directly (e.g. ``python3 src/context_monitor.py``).
+The Pi extension and the nightly cron invoke those shims directly
+(e.g. ``python3 src/pi_bridge.py`` and ``python3 src/nightly_eval.py``).
 """
 
 __version__ = "1.0.0"

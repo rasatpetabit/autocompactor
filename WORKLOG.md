@@ -2,6 +2,88 @@
 
 Terse handoff log for collaborating agents. Newest entry first.
 
+## 2026-06-22 — AUDIT (fresh-eyes, Pi-only) + fixes for the findings
+
+Full post-pivot audit (Opus synthesis + 2 GPT-5 codex adversarial passes [base
+vs origin/main + working-tree] + a Sonnet verify pass + a direct 0.79.9 SDK
+trace). Verdict was do-not-ship-as-is; fixed the CRITICAL/HIGH/MEDIUM findings
+this turn. Code-level facts confirmed at source, not guessed.
+
+- **CRITICAL — native artifact-loss race** (`autocompactor.ts` session_before_compact
+  non-intercept): was `void bridge("prepare")` un-awaited then returned, so native
+  compaction + `session_compact`→reinject could build the digest before prepare
+  persisted artifacts/state (near-certain with the 45s LLM digest). Fix: `await`
+  prepare (Pi awaits the handler, so this holds compaction) + pass `--skip-llm`
+  (customInstructions are discarded on the native path, so only the cheap on-disk
+  artifacts/state matter — no 45s stall). pi_bridge `cmd_prepare` honors `--skip-llm`.
+- **HIGH — sticky `selfTriggered` brick** (actuate + intercept): flag set before
+  `ctx.compact()`, cleared only in callbacks; a sync throw / unhandled rejection
+  left it stuck → all future compaction wedged. Fix: new `safeCompact()` settles
+  once (onComplete|onError|sync-throw|promise-reject), always clearing the flag.
+- **HIGH — advise advisory on the invisible channel**: recurring agent_end advisory
+  was `deliverAs:"followUp"`, which 0.79.9 swallows while streaming (agent_end runs
+  before isStreaming clears — verified in agent-session.js). Fix: route it via
+  `nextTurn` deduped by text (so it can't pile up — the original followUp rationale).
+  `Deliver` type narrowed to `"nextTurn"`; no visible status uses followUp now.
+- **MEDIUM**: shim now passes `--reserve` to `evaluate`; dropped the TS-only
+  `AUTOCOMPACTOR_PI_*` threshold aliases + dead `CFG.pi` lookups (gate now shares
+  the bridge's `AUTOCOMPACTOR_*` namespace — closes HANDOFF open-item #2; PI_MODE/
+  PI_INTERCEPT control flags kept); `cmd_reinject` now resolves the window via
+  `window_resolver` (runtime `--context-window`) like evaluate/prepare.
+- **Rollout**: kept `MODE=actuate` (the race/brick that gated it are now fixed);
+  README/HANDOFF reconciled to declare actuate the intended default (Sonnet worker).
+- **Cleanup**: removed dead `LOG_WATCHDOG_SKIPS` (config.local.json); fixed stale
+  Claude-module docstrings (`__init__`, `policy`, `pi_bridge`, `transcript_lib`
+  thinking-branch); labeled policy `decide()`/`target_tokens`/`PolicyConfig` as
+  RESERVED-not-wired (deliberate masterplan scaffolding — NOT deleted). Doc pins →
+  0.79.9 (render-channel spec comment + HANDOFF). README tunable table fixed to
+  shipped values (was documenting balanced defaults; ships economy 0.50/0.90/…).
+- Left as-is (noted, not bugs): `harness="claude"` default params (inert — statedir
+  ignores them); `todos_all_done`/`skill_*` TranscriptStats fields unset by the Pi
+  parser (one wrapup-signal arm dormant — needs Pi todo parsing + telemetry, not a
+  blind edit); `_WIDE` thresholds unreachable at the 200k window (dead until a
+  big-window model self-reports).
+- Gate green: 100 pytest + 15 node (+2 regressions: native-await/skip-llm,
+  selfTriggered-clear-on-throw) + Pi smoke. NOT yet reinstalled to
+  `~/.pi/agent/extensions/` (live shim still old build, pin 0.79.8 vs runtime
+  0.79.9) — owner-gated out-of-tree deploy: `python3 src/install_pi.py`.
+- DEFINITIVE proof still pending (unchanged): owner-driven live Pi compaction; the
+  headless harness can't launch the interactive TUI.
+
+## 2026-06-20 — FIX (Pi): compaction/precompaction notices invisible
+
+Report: "autocompactor displays nothing from Pi" → narrowed by owner to "I see it
+loaded, but not compaction or precompaction output." Root cause (code-trace +
+session-data, not guessed): all user notices go through `announce()` →
+`persistVisible()` which hardcoded `pi.sendMessage(..., {deliverAs:"followUp"})`. In
+Pi 0.79.8 `AgentSession.sendCustomMessage` (agent-session.js:983-1012), a `followUp`
+message only renders/persists when NOT streaming (falls to the final else). The
+compaction events (`session_before_compact`/`session_compact`) and `agent_end` fire
+while the agent IS streaming (compaction is a summarization turn), so followUp →
+`agent.followUp()` (agent input queue) → swallowed: never rendered, never persisted.
+`session_start` runs not-streaming, so its followUp hits the else and renders — which
+is why "loaded" showed. Empirical: `autocompactor.status` persists 0× across all
+sessions vs digest (nextTurn) 4× and hindsight (no-deliverAs) 27×. notify/setStatus
+(hasUI-gated) are swallowed by Pi's compaction redraw, so they don't rescue it.
+
+Fix (`src/pi/autocompactor.ts` only): parameterized `persistVisible`/`announce` with
+`deliver: "nextTurn"|"followUp"` (default **nextTurn** — the only channel proven to
+survive a compaction and render, via the next-prompt flush at agent-session.js:797;
+same mechanism the digest already uses). One-shot notices (load, before_compact,
+compact summary, onError, actuate "running compaction") now use nextTurn. The
+**recurring** agent_end advisory ("criteria met … advise mode" / reentrancy
+"compaction in progress") keeps `followUp` explicitly, to avoid piling up stale dup
+advisories at the next prompt (the reason it was on followUp originally). `appendEntry`
+was evaluated and rejected — it persists silently (no `_emit`), doesn't render.
+
+Tests: existing extension.test.mjs had codified the bug (asserted followUp +
+`assertNoVisibleNextTurn`) — updated to the corrected per-handler channel contract.
+New `render-channel.test.mjs` mirrors the SDK delivery+flush branches verbatim
+(version-pinned 0.79.8) as an executable root-cause spec. 198 pytest + smoke +
+14 node tests + pi smoke green; extension reinstalled (pinned 0.79.8). DEFINITIVE
+proof still pending: owner-driven live Pi session driven to a real compaction (the
+headless harness can't launch the interactive TUI).
+
 ## 2026-06-18 — FIX: "literally nothing" visible output (cooldown starvation)
 
 Root cause of the recurring "autocompactor shows no output across several Claude

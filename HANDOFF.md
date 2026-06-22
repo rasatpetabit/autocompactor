@@ -31,11 +31,9 @@ Persisted here from the (gitignored) SDD ledger so they survive `git clean`.
    the Pi parser's assistant/user/summary field-completion before any removal.
    Full scaffolding flatten: single-namespace config, state under ~/.autocompactor/pi.
    ```
-2. **TS-shim dead-branch cleanup** — `src/pi/autocompactor.ts:50-86`: drop the
-   now-dead `CFG?.pi?.[key]` lookups in `cfgNum` and the `AUTOCOMPACTOR_PI_*`
-   env reads. Non-functional — the flatten already resolves correctly via the
-   `CFG?.pi?.[key] ?? CFG?.[key]` fallback with the `pi` config section gone.
-   Deferred to avoid colliding with in-flight delivery-channel work in that file.
+2. ~~**TS-shim dead-branch cleanup**~~ — **CLOSED (2026-06-22, this change set).**
+   `src/pi/autocompactor.ts:50-86`: the dead `CFG?.pi?.[key]` lookups in
+   `cfgNum` and the `AUTOCOMPACTOR_PI_*` env reads have been dropped.
 3. **`~/.claude/settings.json`** — deregister the now-deleted Claude hooks
    (`context_monitor` UserPromptSubmit/PostToolUse, `precompact_analyzer`
    PreCompact). They error non-fatally now that their scripts are gone. Outside
@@ -452,10 +450,11 @@ tune Pi-specific values until live Pi telemetry exists.
 
 ### Verified ground-truth pins (do not re-derive)
 
-* Validated against `@earendil-works/pi-coding-agent` **0.79.1**
+* Validated against `@earendil-works/pi-coding-agent` **0.79.9**
   (installed at `~/.npm-global/lib/node_modules/`); every API name in the
   shim was checked against its `dist/core/extensions/types.d.ts` before
-  writing. `install_pi.py` re-pins the version observed at install time.
+  writing. Original validation baseline was 0.79.1; live-validated pin is
+  now 0.79.9. `install_pi.py` re-pins the version observed at install time.
 * This host pins Pi reserveTokens to **40,000** in `~/.pi/agent/settings.json`
   (Pi default is 16,384). The bridge's `RESERVE_FALLBACK = 40_000`
   mirrors the host pin; the shim passes the live `contextWindow` through
@@ -464,12 +463,21 @@ tune Pi-specific values until live Pi telemetry exists.
 
 ### Flip-to-actuate decision memo
 
-**Advise ships now; the flip-to-actuate is a later deploy decision gated
-on Pi telemetry.** `AUTOCOMPACTOR_PI_MODE=advise` (default) only posts an
+> **SUPERSEDED (2026-06-22):** `actuate` is now the shipped default
+> (`MODE=actuate` in `config.json`; `AUTOCOMPACTOR_PI_MODE` defaults to
+> `actuate`). The two bugs that previously gated actuation behind a telemetry
+> burn-in — a native-compaction artifact race and a sticky reentrancy flag —
+> were fixed in the same change set. The historical memo below is preserved as
+> the decision record for why a burn-in was originally required and how the
+> decision was reached.
+
+**[Historical — as of 2026-06-10, superseded above]** Advise shipped first;
+the flip-to-actuate was deferred pending Pi telemetry burn-in.
+`AUTOCOMPACTOR_PI_MODE=advise` (default at the time) only posted an
 `autocompactor.advice` message; `actuate` lets the shim call
 `ctx.compact({customInstructions})` itself — Pi is the first harness
-where we hold an actuator, so it earns a burn-in: flip only after ≥1 day
-of `monitor_eval` rows (harness `"pi"`) shows sane occupancy/recommend
+where we hold an actuator, so it earned a burn-in: flip only after ≥1 day
+of `monitor_eval` rows (harness `"pi"`) showed sane occupancy/recommend
 behavior at the 40k reserve. Reentrancy: a `selfTriggered` flag blocks a
 concurrent second compact while one is in flight (verified by
 `pi/test/extension.test.mjs` — the second boundary degrades to advice;

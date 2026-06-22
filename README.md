@@ -28,8 +28,8 @@ moderate occupancy, is dramatically cheaper than an autocompact firing near the
 ceiling — and the summary is better, because the instructions are generated from
 what actually happened in the session (files edited, recent errors, last task
 statement). Pi is the first harness where we hold an actuator: the bridge can
-either advise (`autocompactor.advice`) or, once burned in, call `ctx.compact()`
-itself.
+either advise (`autocompactor.advice`) or call `ctx.compact()` itself
+(the shipped default — see MODE below).
 
 ## Install
 
@@ -57,21 +57,27 @@ needed. `config.local.json` is the gitignored site-local overlay, and any
 
 | Key | Default | Meaning |
 |---|---|---|
+| `MODE` | `actuate` | `advise` only posts an `autocompactor.advice` message; `actuate` lets the shim call `ctx.compact()` itself. Overridden by `AUTOCOMPACTOR_PI_MODE` env var. |
+| `PROFILE` | `economy` | Compaction profile passed to the summarizer. |
 | `WINDOW` | 200000 | Fallback context window in tokens. Pi normally derives the exact effective window from `ctx` (`contextWindow − reserveTokens`), better than this static value. |
-| `SOFT_PCT` | 0.40 | Recommend at this occupancy *if* a boundary signal is present. |
-| `HARD_PCT` | 0.65 | Recommend unconditionally at this occupancy. |
-| `COOLDOWN` | 25000 | Min token growth between recommendations. |
-| `STALE_FRAC` | 0.50 | Stale-tool-output fraction that counts as a boundary signal. |
+| `RESERVE` | 40000 | Reserve tokens subtracted from `contextWindow` when Pi does not report one. Mirrors the Pi host pin in `~/.pi/agent/settings.json`. |
+| `SOFT_PCT` | 0.50 | Recommend at this occupancy *if* a boundary signal is present. |
+| `SOFT_PCT_WIDE` | 0.25 | Lower soft threshold used when the window tier is wide (e.g. ≥300k). |
+| `HARD_PCT` | 0.90 | Recommend unconditionally at this occupancy. |
+| `HARD_PCT_WIDE` | 0.40 | Lower hard threshold used when the window tier is wide. |
+| `COOLDOWN` | 20000 | Min token growth between recommendations. |
+| `STALE_FRAC` | 0.90 | Stale-tool-output fraction that counts as a boundary signal. |
 | `POST_FLOOR` | 70000 | Estimated post-compaction context (measured ~69k median here). A compaction can only reclaim what sits above this. |
 | `MIN_SAVINGS` | 30000 | Min estimated reclaim (context − POST_FLOOR) to recommend; below it a compaction stalls 30–60s for almost nothing. |
 | `MAX_FULL_PARSE_MB` | 8 | Above this transcript size, parse only the active segment after the last compaction boundary (bounds worst-case latency). |
 | `OBSERVE_ONLY` | `error_resolved,tests_pass,idle_gap` | Signals logged for telemetry but never allowed to justify a recommendation (defaults measured anti-predictive on real corpora). Set empty to restore full gating. |
 | `ARTIFACT_BUDGET` | 1500 | Token budget for the post-compaction artifact digest. |
+| `AUTO_WINDOW_TIERS` | `[200000,300000,512000,1000000]` | Ordered token-count breakpoints used to select wide-threshold variants (`SOFT_PCT_WIDE`, `HARD_PCT_WIDE`) for large-window sessions. |
 | `AUTOCOMPACTOR_LLM` | unset | `1` = `prepare` also runs a configured cheap-model LLM over the transcript tail for a smarter must-preserve digest. Adds latency and its own token cost. |
 | `AUTOCOMPACTOR_LLM_PROVIDER` | `claude` | Optional digest provider for the `AUTOCOMPACTOR_LLM` path. This is a *model provider* choice (Anthropic API), independent of the harness. |
-| `AUTOCOMPACTOR_PI_MODE` | `advise` | `advise` only posts an `autocompactor.advice` message; `actuate` lets the shim call `ctx.compact()` itself. |
+| `AUTOCOMPACTOR_PI_MODE` | `actuate` | Env override for `MODE`. `advise` only posts an `autocompactor.advice` message; `actuate` lets the shim call `ctx.compact()` itself. |
 | `AUTOCOMPACTOR_PI_INTERCEPT` | unset | `1` = cancel a native auto-compaction and re-trigger it with our enriched instructions. Default off; auto-disabled when `pi-custom-compactor` is configured. |
-| `AUTOCOMPACTOR_STATE_DIR` | unset | Override the state root (used by tests). Default: `~/.autocompactor/pi`. |
+| `AUTOCOMPACTOR_STATE_DIR` | `~/.autocompactor/pi` | Override the state root (used by tests). Pi is the sole adapter. |
 
 ## Boundary signals detected
 
