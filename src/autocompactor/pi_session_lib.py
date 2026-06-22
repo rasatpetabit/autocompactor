@@ -229,6 +229,22 @@ def _record_result_text(st, text: str, is_error: bool, is_recent: bool) -> None:
             st.recent_tests_pass = True
 
 
+def active_path(path: str) -> tuple[list, list, int]:
+    """Extract the live conversation path and its post-compaction active segment.
+
+    Returns (full_path, active, compaction_count):
+      full_path        — root->leaf path through the tree (founding prompts +
+                         carried summary live here, before the compaction cut)
+      active           — segment after the last compaction boundary
+      compaction_count — number of compaction entries on the path
+    Factored from _leaf_path + _active_segment for reuse by turn_profile
+    without importing many private helpers.
+    """
+    full_path = _leaf_path(_load_jsonl(path))
+    active, compaction_count = _active_segment(full_path)
+    return full_path, active, compaction_count
+
+
 def analyze(path: str = "", recent_window: int = 30) -> transcript_lib.TranscriptStats:
     st = transcript_lib.TranscriptStats()
     full_path = _leaf_path(_load_jsonl(path))
