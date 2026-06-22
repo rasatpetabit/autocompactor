@@ -71,6 +71,7 @@ def test_analyze_active_prefix_equivalent_to_analyze(tmp_path):
 
 
 from autocompactor import turn_profile  # noqa: E402
+from autocompactor import policy  # noqa: E402
 
 
 def test_turn_attribution_exact_occupancy_and_pre_call(tmp_path):
@@ -180,3 +181,23 @@ def test_empty_active_segment(tmp_path):
     assert res.turns == []
     assert res.summary.turn_count == 0
     assert res.summary.warnings
+
+
+def test_text_report_uses_si_formatting_and_reuses_policy_fmt(tmp_path):
+    res = turn_profile.profile_turns(os.path.join(FIX, "pi", "parallel_tools.jsonl"))
+    turn_profile.summarize(res, full_path=None)
+    txt = turn_profile.format_text(res)
+    # line 1 carries SI occupancy (reuse policy._fmt_tokens)
+    assert policy._fmt_tokens(220) in txt
+    assert "T  0" in txt or "T   0" in txt or "T 0" in txt
+    # fed-by line present for turns with fed content
+    assert "fed by" in txt
+    # review P2#4: result-token table, not per-tool cost
+    assert "result-tok" in txt and "est-cost" not in txt
+
+
+def test_rollup_collapses_under_user_prompts(tmp_path):
+    res = turn_profile.profile_turns(os.path.join(FIX, "pi", "parallel_tools.jsonl"))
+    roll = turn_profile.rollup(res)
+    assert len(roll) == 1              # one user prompt -> one human turn
+    assert roll[0].loop_len == 2

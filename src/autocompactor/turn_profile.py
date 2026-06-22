@@ -342,3 +342,96 @@ def summarize(res: ProfileResult, post_floor: float = 70000,
     elif not used:
         s.warnings.append("no usage blocks found; exact token/cost fields are 0")
     return s
+
+
+# ---- human-turn rollup ---------------------------------------------------
+
+def rollup(res: ProfileResult) -> list:
+    """Collapse consecutive assistant turns under each user prompt.
+
+    Uses the active positions captured during profile_turns()
+    (res.turns[i].active_pos and res.user_active_positions) -- no re-walk,
+    no file reload.
+    """
+    import bisect
+    user_positions = res.user_active_positions
+    human = []
+    groups = {}
+    for ti, t in enumerate(res.turns):
+        idx = bisect.bisect_right(user_positions, t.active_pos) - 1
+        groups.setdefault(idx if idx >= 0 else -1, []).append(ti)
+    for key in sorted(groups):
+        idxs = groups[key]
+        tslice = [res.turns[k] for k in idxs]
+        if not tslice:
+            continue
+        human.append(HumanTurnRollup(
+            index=len(human), start_turn=idxs[0], end_turn=idxs[-1],
+            loop_len=len(idxs),
+            start_ctx=tslice[0].occupancy, end_ctx=tslice[-1].occupancy,
+            growth=tslice[-1].occupancy - tslice[0].occupancy,
+            total_cost=sum(t.cost for t in tslice),
+            total_output=sum(t.output_tokens for t in tslice),
+            tools={n: sum(1 for t in tslice if n in t.tools_called)
+                   for n in {n for t in tslice for n in t.tools_called}},
+            wall_seconds=sum(t.wall_seconds for t in tslice
+                             if t.wall_seconds is not None) or None))
+    return human
+
+
+# ---- text report ---------------------------------------------------------
+
+def _counted(names):
+    d = {}
+    for n in names:
+        d[n] = d.get(n, 0) + 1
+    return d
+
+
+def format_text(res: ProfileResult) -> str:
+    s = res.summary
+    out = []
+    for t in res.turns:
+        tools = " ".join(
+            f"{n}" + (f"×{c}" if c > 1 else "")
+            for n, c in _counted(t.tools_called).items()) or "—"
+        out.append(
+            f"T {t.index:>3} {t.role}  ctx {policy._fmt_tokens(t.occupancy)}"
+            + (f" ▲{policy._fmt_tokens(t.delta_occupancy)}"
+               if t.delta_occupancy else "")
+            + f"  out {policy._fmt_tokens(t.output_tokens)}"
+            f"  ${t.cost:.2f}  cache {t.cache_hit_ratio:.0%}  {tools}")
+        if t.fed_by_tokens:
+            seg = " · ".join(
+                f"{policy._fmt_tokens(fb['tokens'])} {fb['tool']}"
+                for fb in t.fed_by[:3])
+            out.append(f"      └ fed by ≈{policy._fmt_tokens(t.fed_by_tokens)} "
+                       f"({seg})")
+        if t.flags:
+            out.append(f"      ⚠ {' · '.join(t.flags)}")
+    out.append("══════════════ SESSION PROFILE ══════════════")
+    out.append(f"{s.turn_count} turns · peak {policy._fmt_tokens(s.peak_ctx)} "
+               f"· grew {policy._fmt_tokens(s.start_ctx)}→"
+               f"{policy._fmt_tokens(s.final_ctx)}")
+    if s.sparkline:
+        out.append("ctx trend " + s.sparkline)
+    if s.has_usage:
+        out.append(f"Cost ${s.total_cost:.2f}  ·  cache "
+                   f"{s.overall_cache_hit_ratio:.0%} hit overall")
+    if s.composition_at_peak:
+        line = policy.composition_line(s.composition_at_peak)
+        if line:
+            out.append("Composition @ peak " + line)
+    if s.has_usage:
+        out.append(f"Reclaimable ≈{policy._fmt_tokens(s.reclaimable_tokens)} "
+                   f"· {s.redundant_read_count} redundant reads · "
+                   f"{s.oversized_output_count} oversized outputs")
+        if s.per_tool_result_tokens:
+            out.append("\nPer-tool result tokens   calls   result-tok   share")
+            for r in s.per_tool_result_tokens[:8]:
+                out.append(f"  {r['tool']:<18} {r['calls']:<7} "
+                           f"{policy._fmt_tokens(r['result_tokens']):<11} "
+                           f"{r['share']:.0%}")
+    for w in s.warnings:
+        out.append(f"⚠ {w}")
+    return "\n".join(out)
