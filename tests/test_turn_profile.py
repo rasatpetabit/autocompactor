@@ -201,3 +201,30 @@ def test_rollup_collapses_under_user_prompts(tmp_path):
     roll = turn_profile.rollup(res)
     assert len(roll) == 1              # one user prompt -> one human turn
     assert roll[0].loop_len == 2
+
+
+def test_main_json_never_raises_on_missing_session(capsys):
+    rc = turn_profile.main(["--session", "/nonexistent/path.jsonl", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    import json as _json
+    obj = _json.loads(out)              # valid JSON even on failure
+    assert obj["summary"]["warnings"]
+
+
+def test_main_text_and_json_flags(tmp_path, capsys):
+    path = _write_jsonl(tmp_path / "cli.jsonl", [
+        {"type": "session", "id": "s0", "timestamp": "2026-01-01T00:00:00.000Z"},
+        {"type": "message", "id": "u1", "parentId": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "x"}]}},
+        {"type": "message", "id": "a1", "parentId": "u1",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "y"}],
+                     "usage": {"input": 10, "cacheRead": 0, "cacheWrite": 0,
+                               "output": 1, "totalTokens": 11,
+                               "cost": {"total": 0.001}}}}])
+    rc = turn_profile.main(["--session", path])
+    assert rc == 0 and "SESSION PROFILE" in capsys.readouterr().out
+    rc = turn_profile.main(["--session", path, "--json"])
+    import json as _json
+    assert rc == 0
+    assert _json.loads(capsys.readouterr().out)["turns"]

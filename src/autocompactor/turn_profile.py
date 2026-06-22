@@ -435,3 +435,95 @@ def format_text(res: ProfileResult) -> str:
     for w in s.warnings:
         out.append(f"⚠ {w}")
     return "\n".join(out)
+
+
+# ---- CLI ------------------------------------------------------------------
+
+import json as _json
+import sys
+
+
+def _parse(argv):
+    opts = {}
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if isinstance(tok, str) and tok.startswith("--"):
+            key = tok[2:].replace("-", "_")
+            if i + 1 < len(argv) and not str(argv[i + 1]).startswith("--"):
+                opts[key] = argv[i + 1]; i += 2; continue
+            opts[key] = "1"   # valueless flag -> truthy marker
+        i += 1
+    return opts
+
+
+def _to_int(v, default=None):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_json(res: ProfileResult) -> str:
+    def _turn(t):
+        return {
+            "index": t.index, "role": t.role, "has_usage": t.has_usage,
+            "occupancy": t.occupancy, "pre_call_tokens": t.pre_call_tokens,
+            "delta_occupancy": t.delta_occupancy, "input_tokens": t.input_tokens,
+            "cache_read": t.cache_read, "cache_write": t.cache_write,
+            "output_tokens": t.output_tokens, "cost": t.cost,
+            "cache_hit_ratio": t.cache_hit_ratio, "fed_by_tokens": t.fed_by_tokens,
+            "assistant_text_tokens": t.assistant_text_tokens,
+            "thinking_tokens": t.thinking_tokens, "tools_called": t.tools_called,
+            "tool_call_args": t.tool_call_args, "fed_by": t.fed_by,
+            "is_error_turn": t.is_error_turn, "flags": t.flags,
+            "wall_seconds": t.wall_seconds,
+            "timestamp": t.timestamp.isoformat() if t.timestamp else None,
+        }
+    s = res.summary
+    return _json.dumps({
+        "session_id": res.session_id,
+        "turns": [_turn(t) for t in res.turns],
+        "human_turns": [vars(h) for h in res.human_turns],
+        "summary": {
+            **vars(s),
+            "biggest_growth_turn": (list(s.biggest_growth_turn)
+                                    if s.biggest_growth_turn else None),
+            "biggest_tool_output_turn": (list(s.biggest_tool_output_turn)
+                                         if s.biggest_tool_output_turn else None),
+        },
+    }, default=str)
+
+
+def main(argv=None) -> int:
+    opts = _parse(list(sys.argv[1:] if argv is None else argv))
+    session = opts.get("session", "")
+    try:
+        from autocompactor import config_lib
+        post_floor = config_lib.cfg.float("POST_FLOOR", default=70000)
+    except Exception:
+        post_floor = 70000
+    recent = _to_int(opts.get("recent"), 30) or 30
+    try:
+        res = profile_turns(session, recent_window=recent)
+        full = active = None; cc = 0
+        try:
+            full, active, cc = pi_session_lib.active_path(session)
+        except Exception:
+            pass
+        summarize(res, post_floor=post_floor, full_path=full, active=active,
+                  compaction_count=cc, recent_window=recent)
+        if opts.get("rollup"):
+            res.human_turns = rollup(res)
+        if opts.get("json"):
+            sys.stdout.write(_to_json(res) + "\n")
+        else:
+            sys.stdout.write(format_text(res) + "\n")
+    except Exception as e:  # never-raise
+        if opts.get("json"):
+            sys.stdout.write(_json.dumps(
+                {"session_id": "", "turns": [], "human_turns": [],
+                 "summary": {"warnings": [f"profile failed: {e}"]}}) + "\n")
+        else:
+            sys.stdout.write(f"turn-profile: could not profile session: {e}\n")
+    return 0
