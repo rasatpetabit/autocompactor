@@ -9,6 +9,3 @@ __pycache__/
 *.pyc
 .pytest_cache/
 config.local.json
-
-# Serena workspace (local-only: project config + cache + memories)
-.serena/
