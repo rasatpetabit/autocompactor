@@ -39,11 +39,16 @@ HISTORY = os.path.join(REPORTS, "nightly_history.jsonl")
 RETENTION_DAYS = 30
 
 
-def run(cmd: list, timeout: int = 1800) -> tuple:
-    """(exit_code, combined_output) — never raises."""
+def run(cmd: list, timeout: int = 1800, env: dict = None) -> tuple:
+    """(exit_code, combined_output) — never raises.
+
+    `env`, when given, is passed through to subprocess.run as the child's
+    full environment (callers must include PATH etc.); None inherits the
+    parent's, matching the prior behavior.
+    """
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, cwd=REPO)
+                           timeout=timeout, cwd=REPO, env=env)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except Exception as exc:
         return -1, f"{type(exc).__name__}: {exc}"
@@ -123,7 +128,12 @@ def main() -> int:
 
     # 1. test suites — schema-drift canary
     py_rc, py_out = run([sys.executable, "-m", "pytest", "tests/", "-q"])
-    sm_rc, sm_out = run(["bash", "tests/smoke_test.sh"])
+    # The Pi smoke test is a no-op (exit 0) unless PI_SMOKE=1, and the file is
+    # tests/smoke_test_pi.sh (not the generic tests/smoke_test.sh, which does
+    # not exist). Set the gate and use the real path so the canary actually
+    # exercises the Pi-bridge contract instead of silently skipping.
+    smoke_env = {**os.environ, "PI_SMOKE": "1"}
+    sm_rc, sm_out = run(["bash", "tests/smoke_test_pi.sh"], env=smoke_env)
     tests_pass = py_rc == 0 and sm_rc == 0
     if not tests_pass:
         issues.append("TESTS FAILING — likely transcript schema drift; "
