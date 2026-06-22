@@ -228,3 +228,51 @@ def test_main_text_and_json_flags(tmp_path, capsys):
     import json as _json
     assert rc == 0
     assert _json.loads(capsys.readouterr().out)["turns"]
+
+
+def test_mixed_usage_bounds_use_usage_bearing_turns(tmp_path):
+    """start_ctx/final_ctx bound to usage-bearing turns, not no-usage head/tail."""
+    path = _write_jsonl(tmp_path / "mixed.jsonl", [
+        {"type": "session", "id": "s0", "timestamp": "2026-01-01T00:00:00.000Z"},
+        {"type": "message", "id": "u1", "parentId": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}},
+        {"type": "message", "id": "a1", "parentId": "u1",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "no usage"}]}},
+        {"type": "message", "id": "a2", "parentId": "a1",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "usage"}],
+                     "usage": {"input": 100, "cacheRead": 0, "cacheWrite": 0,
+                               "output": 10, "totalTokens": 110,
+                               "cost": {"total": 1}}}},
+        {"type": "message", "id": "a3", "parentId": "a2",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "tail no usage"}]}}])
+    res = turn_profile.profile_turns(path)
+    s = turn_profile.summarize(res)
+    assert s.has_usage is True
+    assert s.start_ctx == 110 and s.final_ctx == 110   # NOT 0
+    assert s.peak_ctx == 110
+
+
+def test_repeated_parallel_tool_args_preserved(tmp_path):
+    """parallel reads with different paths keep ALL args (no overwrite)."""
+    path = _write_jsonl(tmp_path / "par.jsonl", [
+        {"type": "session", "id": "s0", "timestamp": "2026-01-01T00:00:00.000Z"},
+        {"type": "message", "id": "u1", "parentId": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}},
+        {"type": "message", "id": "a1", "parentId": "u1",
+         "message": {"role": "assistant",
+                     "content": [{"type": "toolCall", "id": "c1", "name": "read",
+                                  "arguments": {"path": "a.py"}},
+                                 {"type": "toolCall", "id": "c2", "name": "read",
+                                  "arguments": {"path": "b.py"}}],
+                     "usage": {"input": 50, "cacheRead": 0, "cacheWrite": 0,
+                               "output": 2, "totalTokens": 52}}},
+        {"type": "message", "id": "t1", "parentId": "a1",
+         "message": {"role": "toolResult", "toolCallId": "c1", "isError": False,
+                     "content": [{"type": "text", "text": "a"}]}},
+        {"type": "message", "id": "t2", "parentId": "a1",
+         "message": {"role": "toolResult", "toolCallId": "c2", "isError": False,
+                     "content": [{"type": "text", "text": "b"}]}}])
+    res = turn_profile.profile_turns(path)
+    t0 = res.turns[0]
+    paths = sorted(ca["arguments"].get("path") for ca in t0.tool_call_args)
+    assert paths == ["a.py", "b.py"]   # both preserved, not overwritten

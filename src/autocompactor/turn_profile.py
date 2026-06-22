@@ -35,7 +35,7 @@ class TurnRecord:
     assistant_text_tokens: int = 0
     thinking_tokens: int = 0
     tools_called: list = field(default_factory=list)
-    tool_call_args: dict = field(default_factory=dict)
+    tool_call_args: list = field(default_factory=list)  # [{name, arguments}] per call
     fed_by: list = field(default_factory=list)
     is_error_turn: bool = False
     flags: list = field(default_factory=list)
@@ -193,7 +193,10 @@ def profile_turns(session: str, recent_window: int = 30) -> ProfileResult:
         # tools emitted this turn (feed the NEXT call)
         for call in pi_session_lib._tool_calls(msg):
             rec.tools_called.append(call["name"])
-            rec.tool_call_args[call["name"]] = call.get("arguments", {})
+            # per-call list (not name->args dict) so repeated calls with
+            # different args (e.g. parallel reads) are all preserved.
+            rec.tool_call_args.append(
+                {"name": call["name"], "arguments": call.get("arguments", {})})
 
         # assistant text + thinking this turn (estimated)
         rec.assistant_text_tokens = len(
@@ -237,7 +240,9 @@ def _compute_flags(turns, *, large_output=5000, redundant_window=10,
         if t.wall_seconds is not None and t.wall_seconds >= idle_gap_min * 60:
             t.flags.append("idle-gap")
         # redundant read: same path read within the last redundant_window turns
-        for name, args in t.tool_call_args.items():
+        for ca in t.tool_call_args:
+            name = ca.get("name", "")
+            args = ca.get("arguments", {})
             if name.lower() in ("read", "grep"):
                 p = args.get("path")
                 if p and any(p == sp for k, sp in seen_reads
@@ -274,7 +279,13 @@ def summarize(res: ProfileResult, post_floor: float = 70000,
     s.turn_count = len(turns)
     used = [t for t in turns if t.has_usage]
     s.has_usage = bool(used)
-    if turns:
+    # start_ctx/final_ctx bound to usage-bearing turns so a mixed transcript
+    # (no-usage turns at head/tail) doesn't report "grew 0→0" while has_usage
+    # is true and a nonzero peak was observed.
+    if used:
+        s.start_ctx = used[0].occupancy
+        s.final_ctx = used[-1].occupancy
+    elif turns:
         s.start_ctx = turns[0].occupancy
         s.final_ctx = turns[-1].occupancy
     if used:
