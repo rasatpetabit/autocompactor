@@ -68,3 +68,47 @@ def test_analyze_active_prefix_equivalent_to_analyze(tmp_path):
     assert st_full.total_tool_chars == st_analyze.total_tool_chars
     assert st_full.edited_files == st_analyze.edited_files
     assert st_full.compaction_count == st_analyze.compaction_count
+
+
+from autocompactor import turn_profile  # noqa: E402
+
+
+def test_turn_attribution_exact_occupancy_and_pre_call(tmp_path):
+    path = _write_jsonl(tmp_path / "at.jsonl", [
+        {"type": "session", "id": "s0", "timestamp": "2026-01-01T00:00:00.000Z"},
+        {"type": "message", "id": "u1", "parentId": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "x"}]}},
+        {"type": "message", "id": "a1", "parentId": "u1",
+         "message": {"role": "assistant",
+                     "content": [{"type": "toolCall", "id": "c1", "name": "read",
+                                  "arguments": {"path": "f.py"}}],
+                     "usage": {"input": 100, "cacheRead": 0, "cacheWrite": 0,
+                               "output": 10, "totalTokens": 110,
+                               "cost": {"total": 0.01}}}},
+        {"type": "message", "id": "t1", "parentId": "a1",
+         "message": {"role": "toolResult", "toolCallId": "c1", "isError": False,
+                     "content": [{"type": "text", "text": "abcd" * 100}]}},
+        {"type": "message", "id": "a2", "parentId": "t1",
+         "message": {"role": "assistant",
+                     "content": [{"type": "text", "text": "ok"}],
+                     "usage": {"input": 60, "cacheRead": 110, "cacheWrite": 0,
+                               "output": 5, "totalTokens": 175,
+                               "cost": {"total": 0.02}}}},
+    ])
+    res = turn_profile.profile_turns(path)
+    assert len(res.turns) == 2
+    t0, t1 = res.turns
+    # occupancy == totalTokens (autocompactor-consistent), exact
+    assert t0.occupancy == 110 and t1.occupancy == 175
+    # pre_call == input + cacheRead + cacheWrite, exact
+    assert t0.pre_call_tokens == 100 and t1.pre_call_tokens == 170
+    # delta since previous call
+    assert t0.delta_occupancy == 0 and t1.delta_occupancy == 175 - 110
+    # cache hit ratio of pre_call
+    assert t0.cache_hit_ratio == 0.0
+    assert t1.cache_hit_ratio == 110 / 170
+    # tools emitted by t0 feed t1; t0 emits read
+    assert t0.tools_called == ["read"] and t1.tools_called == []
+    # fed-by for t1 includes the tool result (interval a1..a2 exclusive of a2)
+    assert t1.fed_by_tokens > 0
+    assert any(fb["tool"] == "read" for fb in t1.fed_by)
