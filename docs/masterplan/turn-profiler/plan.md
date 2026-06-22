@@ -1195,6 +1195,24 @@ git commit -m "turn-profile: full suite green + real-session smoke" || echo "not
 
 **Type consistency:** `occupancy`/`pre_call_tokens`/`delta_occupancy`/`fed_by`/`fed_by_tokens`/`active_pos` used consistently across Tasks 4–9. `summarize()` signature stable across Tasks 6–9. `ProfileResult`/`TurnRecord` field names match between definition (Task 4) and JSON/text (Tasks 8–9). `rollup()` uses stored positions (`res.user_active_positions`, `t.active_pos`) — no file reload.
 
+## Post-execution notes (implemented)
+
+Executed inline (subagent + skynet dispatch backends were both degraded this
+session). Two bugs surfaced during execution and were fixed:
+
+1. **Task 9 `_parse()` falsy-flag bug** — valueless flags (`--json`, `--rollup`)
+   were set to `""` (falsy), so the JSON branch never triggered. Fixed: set
+   `"1"` (truthy marker) for valueless flags.
+2. **Task 4 thinking-token expression** — caught in plan self-review before
+   execution; the shipped code uses `_thinking_only(msg)` directly.
+
+The Task 6 composition@peak analyzes the full active segment (the documented
+fallback); a turn-index→active-position prefix refinement stays as future work.
+
+Reconciliation gate (review P1#1) PASSED on a real 134-turn session:
+`turn_profile peak_ctx == analyze context_tokens == pi_bridge evaluate
+context_tokens` (all 150125). 113/113 tests green (101 baseline + 12 new).
+
 ---
 
 ## Execution Handoff
