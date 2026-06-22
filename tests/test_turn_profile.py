@@ -159,3 +159,24 @@ def test_summary_aggregates(tmp_path):
     # review P2#4: no blended per-tool cost, only result-token share
     assert all("share" in r and "result_tokens" in r
                for r in s.per_tool_result_tokens)
+
+
+def test_degenerate_no_usage(tmp_path):
+    res = turn_profile.profile_turns(os.path.join(FIX, "pi", "no_usage.jsonl"))
+    turn_profile.summarize(res, full_path=None)
+    s = res.summary
+    assert s.has_usage is False
+    assert s.peak_turn_index is None
+    assert s.biggest_growth_turn is None
+    assert "no usage blocks found" in " ".join(s.warnings)
+    assert res.turns and all(not t.has_usage for t in res.turns)
+
+
+def test_empty_active_segment(tmp_path):
+    path = _write_jsonl(tmp_path / "empty.jsonl", [
+        {"type": "session", "id": "e0", "timestamp": "2026-01-01T00:00:00.000Z"}])
+    res = turn_profile.profile_turns(path)
+    turn_profile.summarize(res, full_path=None)
+    assert res.turns == []
+    assert res.summary.turn_count == 0
+    assert res.summary.warnings
