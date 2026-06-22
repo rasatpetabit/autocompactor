@@ -1,0 +1,4 @@
+{"type":"session","id":"nu0","timestamp":"2026-01-01T00:00:00.000Z"}
+{"type":"message","id":"nu_u1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"hi"}]}}
+{"type":"message","id":"nu_a1","parentId":"nu_u1","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}
+{"type":"message","id":"nu_a2","parentId":"nu_a1","message":{"role":"assistant","content":[{"type":"text","text":"again"}]}}

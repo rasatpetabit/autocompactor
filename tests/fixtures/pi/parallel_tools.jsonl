@@ -1,0 +1,8 @@
+{"type":"session","id":"pt0","timestamp":"2026-01-01T00:00:00.000Z"}
+{"type":"message","id":"pt_u1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"scan"}]}}
+{"type":"message","id":"pt_a1","parentId":"pt_u1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"read two files"},{"type":"toolCall","id":"pt_c1","name":"read","arguments":{"path":"a.py"}},{"type":"toolCall","id":"pt_c2","name":"read","arguments":{"path":"b.py"}}],"usage":{"input":200,"cacheRead":0,"cacheWrite":0,"output":20,"totalTokens":220,"cost":{"input":0.01,"output":0.006,"cacheRead":0,"cacheWrite":0,"total":0.016}}}}
+{"type":"message","id":"pt_t2","parentId":"pt_a1","message":{"role":"toolResult","toolCallId":"pt_c2","content":[{"type":"text","text":"b body"}],"isError":false}}
+{"type":"message","id":"pt_t1","parentId":"pt_a1","message":{"role":"toolResult","toolCallId":"pt_c1","content":[{"type":"text","text":"a body"}],"isError":false}}
+{"type":"message","id":"pt_be1","parentId":"pt_t1","message":{"role":"bashExecution","command":"ls","output":"a.py b.py","exitCode":0}}
+{"type":"message","id":"pt_cu1","parentId":"pt_be1","message":{"role":"custom","content":[{"type":"text","text":"injected context"}]}}
+{"type":"message","id":"pt_a2","parentId":"pt_cu1","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input":60,"cacheRead":220,"cacheWrite":0,"output":4,"totalTokens":284,"cost":{"input":0.003,"output":0.0012,"cacheRead":0.011,"cacheWrite":0,"total":0.0152}}}}
