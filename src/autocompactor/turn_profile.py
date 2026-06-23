@@ -414,14 +414,16 @@ def format_text(res: ProfileResult) -> str:
         tools = " ".join(
             f"{n}" + (f"×{c}" if c > 1 else "")
             for n, c in _counted(t.tools_called).items()) or "—"
+        # A trustworthy cost requires both a usage block and a priced provider;
+        # no-usage turns and unpriced-provider turns both show '$—'.
+        cost_frag = (f"${t.cost:.2f}"
+                     if (t.cost_known and t.has_usage) else "$—")
         out.append(
             f"T {t.index:>3} {t.role}  ctx {policy._fmt_tokens(t.occupancy)}"
             + (f" ▲{policy._fmt_tokens(t.delta_occupancy)}"
                if t.delta_occupancy else "")
             + f"  out {policy._fmt_tokens(t.output_tokens)}"
-            f"  ${t.cost:.2f}  cache {t.cache_hit_ratio:.0%}  {tools}"
-            if t.cost_known else
-            f"  $—  cache {t.cache_hit_ratio:.0%}  {tools}")
+            f"  {cost_frag}  cache {t.cache_hit_ratio:.0%}  {tools}")
         if t.fed_by_tokens:
             seg = " · ".join(
                 f"{policy._fmt_tokens(fb['tokens'])} {fb['tool']}"
@@ -437,7 +439,9 @@ def format_text(res: ProfileResult) -> str:
     if s.sparkline:
         out.append("ctx trend " + s.sparkline)
     if s.has_usage:
-        priced = s.turn_count - s.unpriced_turn_count
+        # 'priced' = usage-bearing turns with a known cost. No-usage turns
+        # (default cost_known=True) must NOT count as priced.
+        priced = sum(1 for t in res.turns if t.cost_known and t.has_usage)
         if s.unpriced_turn_count and priced == 0:
             out.append(f"Cost $— (all {s.turn_count} turns unpriced)  ·  cache "
                        f"{s.overall_cache_hit_ratio:.0%} hit overall")

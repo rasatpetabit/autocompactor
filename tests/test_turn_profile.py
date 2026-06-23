@@ -299,3 +299,48 @@ def test_unpriced_provider_flagged_not_shown_as_zero(tmp_path):
     txt = turn_profile.format_text(res)
     assert "$—" in txt and "$0.00" not in txt           # shows $—, not $0.00
     assert "unpriced" in txt
+
+
+def test_unpriced_turn_row_keeps_prefix(tmp_path):
+    """An unpriced turn must still show its index/role/ctx/out, not just $—."""
+    path = _write_jsonl(tmp_path / "unp2.jsonl", [
+        {"type": "session", "id": "s0", "timestamp": "2026-01-01T00:00:00.000Z"},
+        {"type": "message", "id": "u1", "parentId": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}},
+        {"type": "message", "id": "a1", "parentId": "u1",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "y"}],
+                     "usage": {"input": 1000, "cacheRead": 0, "cacheWrite": 0,
+                               "output": 50, "totalTokens": 1050,
+                               "cost": {"input": 0, "output": 0, "cacheRead": 0,
+                                        "cacheWrite": 0, "total": 0}}}}])
+    res = turn_profile.profile_turns(path)
+    turn_profile.summarize(res)
+    line0 = turn_profile.format_text(res).splitlines()[0]
+    # the full row must be present: index, ctx, out, cost marker
+    assert line0.startswith("T   0 assistant"), line0
+    assert "ctx" in line0 and "out" in line0
+    assert "$—" in line0          # cost shown as unknown, but rest of row intact
+
+
+def test_summary_all_unpriced_with_no_usage_turns(tmp_path):
+    """No-usage turns must not be counted as 'priced', so an all-unpriced
+    session (even with no-usage turns) shows the all-unpriced summary, not
+    a misleading '$0.00 (N unpriced)'."""
+    path = _write_jsonl(tmp_path / "mix.jsonl", [
+        {"type": "session", "id": "s0", "timestamp": "2026-01-01T00:00:00.000Z"},
+        {"type": "message", "id": "u1", "parentId": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}},
+        # unpriced turn (tokens, zero cost)
+        {"type": "message", "id": "a1", "parentId": "u1",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "y"}],
+                     "usage": {"input": 1000, "cacheRead": 0, "cacheWrite": 0,
+                               "output": 50, "totalTokens": 1050,
+                               "cost": {"total": 0}}}},
+        # no-usage turn (no usage block at all)
+        {"type": "message", "id": "a2", "parentId": "a1",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "z"}]}}])
+    res = turn_profile.profile_turns(path)
+    turn_profile.summarize(res)
+    txt = turn_profile.format_text(res)
+    assert "all" in txt and "unpriced" in txt     # not the '$0.00 (N unpriced)' branch
+    assert "$0.00" not in txt
