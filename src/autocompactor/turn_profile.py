@@ -30,6 +30,7 @@ class TurnRecord:
     cache_write: int = 0
     output_tokens: int = 0
     cost: float = 0.0
+    cost_known: bool = True   # False when provider is unpriced (cost.total==0 but tokens>0)
     cache_hit_ratio: float = 0.0
     fed_by_tokens: int = 0
     assistant_text_tokens: int = 0
@@ -67,7 +68,8 @@ class ProfileSummary:
     peak_turn_index: int | None = None
     start_ctx: int = 0
     final_ctx: int = 0
-    total_cost: float = 0.0
+    total_cost: float = 0.0          # sum of KNOWN costs only
+    unpriced_turn_count: int = 0     # turns with tokens but no provider cost
     cost_split: dict = field(default_factory=dict)
     overall_cache_hit_ratio: float = 0.0
     avg_cache_write_per_turn: float = 0.0
@@ -184,6 +186,9 @@ def profile_turns(session: str, recent_window: int = 30) -> ProfileResult:
             cost = usage.get("cost")
             rec.cost = float(cost.get("total", 0.0)) if isinstance(cost, dict) else 0.0
             rec.pre_call_tokens = rec.input_tokens + rec.cache_read + rec.cache_write
+            # Detect unpriced providers (zai/glm, some codex): tokens present
+            # but cost.total is 0. Don't present $0.00 as a real cost.
+            rec.cost_known = not (rec.cost == 0.0 and rec.pre_call_tokens > 0)
             rec.cache_hit_ratio = (rec.cache_read / rec.pre_call_tokens
                                    if rec.pre_call_tokens else 0.0)
             rec.delta_occupancy = (rec.occupancy - prev_occupancy
@@ -292,7 +297,10 @@ def summarize(res: ProfileResult, post_floor: float = 70000,
         occupancies = [t.occupancy for t in turns]
         s.peak_ctx = max(occupancies)
         s.peak_turn_index = occupancies.index(s.peak_ctx)
-        s.total_cost = sum(t.cost for t in turns)
+        # Sum only KNOWN costs; count unpriced turns separately so $0 isn't
+        # mistaken for a genuinely free session.
+        s.total_cost = sum(t.cost for t in turns if t.cost_known)
+        s.unpriced_turn_count = sum(1 for t in turns if not t.cost_known)
         cr = sum(t.cache_read for t in used)
         pre = sum(t.pre_call_tokens for t in used)
         s.overall_cache_hit_ratio = cr / pre if pre else 0.0
@@ -411,7 +419,9 @@ def format_text(res: ProfileResult) -> str:
             + (f" ▲{policy._fmt_tokens(t.delta_occupancy)}"
                if t.delta_occupancy else "")
             + f"  out {policy._fmt_tokens(t.output_tokens)}"
-            f"  ${t.cost:.2f}  cache {t.cache_hit_ratio:.0%}  {tools}")
+            f"  ${t.cost:.2f}  cache {t.cache_hit_ratio:.0%}  {tools}"
+            if t.cost_known else
+            f"  $—  cache {t.cache_hit_ratio:.0%}  {tools}")
         if t.fed_by_tokens:
             seg = " · ".join(
                 f"{policy._fmt_tokens(fb['tokens'])} {fb['tool']}"
@@ -427,8 +437,17 @@ def format_text(res: ProfileResult) -> str:
     if s.sparkline:
         out.append("ctx trend " + s.sparkline)
     if s.has_usage:
-        out.append(f"Cost ${s.total_cost:.2f}  ·  cache "
-                   f"{s.overall_cache_hit_ratio:.0%} hit overall")
+        priced = s.turn_count - s.unpriced_turn_count
+        if s.unpriced_turn_count and priced == 0:
+            out.append(f"Cost $— (all {s.turn_count} turns unpriced)  ·  cache "
+                       f"{s.overall_cache_hit_ratio:.0%} hit overall")
+        elif s.unpriced_turn_count:
+            out.append(f"Cost ${s.total_cost:.2f} ({s.unpriced_turn_count} of "
+                       f"{s.turn_count} turns unpriced, excluded)  ·  cache "
+                       f"{s.overall_cache_hit_ratio:.0%} hit overall")
+        else:
+            out.append(f"Cost ${s.total_cost:.2f}  ·  cache "
+                       f"{s.overall_cache_hit_ratio:.0%} hit overall")
     if s.composition_at_peak:
         line = policy.composition_line(s.composition_at_peak)
         if line:
@@ -483,6 +502,7 @@ def _to_json(res: ProfileResult) -> str:
             "delta_occupancy": t.delta_occupancy, "input_tokens": t.input_tokens,
             "cache_read": t.cache_read, "cache_write": t.cache_write,
             "output_tokens": t.output_tokens, "cost": t.cost,
+            "cost_known": t.cost_known,
             "cache_hit_ratio": t.cache_hit_ratio, "fed_by_tokens": t.fed_by_tokens,
             "assistant_text_tokens": t.assistant_text_tokens,
             "thinking_tokens": t.thinking_tokens, "tools_called": t.tools_called,

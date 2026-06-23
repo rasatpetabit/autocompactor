@@ -276,3 +276,26 @@ def test_repeated_parallel_tool_args_preserved(tmp_path):
     t0 = res.turns[0]
     paths = sorted(ca["arguments"].get("path") for ca in t0.tool_call_args)
     assert paths == ["a.py", "b.py"]   # both preserved, not overwritten
+
+
+def test_unpriced_provider_flagged_not_shown_as_zero(tmp_path):
+    """An unpriced provider (cost.total==0 but tokens>0) must not read as $0.00."""
+    path = _write_jsonl(tmp_path / "unpriced.jsonl", [
+        {"type": "session", "id": "s0", "timestamp": "2026-01-01T00:00:00.000Z"},
+        {"type": "message", "id": "u1", "parentId": None,
+         "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}},
+        {"type": "message", "id": "a1", "parentId": "u1",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "y"}],
+                     "usage": {"input": 1000, "cacheRead": 0, "cacheWrite": 0,
+                               "output": 50, "totalTokens": 1050,
+                               "cost": {"input": 0, "output": 0, "cacheRead": 0,
+                                        "cacheWrite": 0, "total": 0}}}}])
+    res = turn_profile.profile_turns(path)
+    turn_profile.summarize(res)
+    t0 = res.turns[0]
+    assert t0.cost == 0.0 and t0.cost_known is False   # detected, not trusted
+    assert res.summary.unpriced_turn_count == 1
+    assert res.summary.total_cost == 0.0                # excluded from known sum
+    txt = turn_profile.format_text(res)
+    assert "$—" in txt and "$0.00" not in txt           # shows $—, not $0.00
+    assert "unpriced" in txt
