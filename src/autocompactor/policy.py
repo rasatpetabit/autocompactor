@@ -156,6 +156,86 @@ def composition_line(comp: dict) -> str:
     return "≈ " + " · ".join(parts)
 
 
+def _fmt_pct(part: int, total: int) -> str:
+    if not total:
+        return "0%"
+    return f"{(part / total):.0%}"
+
+
+def _tool_topline(comp: dict, max_items: int = 3) -> str:
+    items = comp.get("tool_breakdown") or []
+    if not items:
+        return ""
+    segs = []
+    for item in items[:max_items]:
+        name = str(item.get("name") or "tool")
+        tokens = int(item.get("tokens", 0) or 0)
+        if tokens <= 0:
+            continue
+        stale = float(item.get("stale_frac", 0.0) or 0.0)
+        piece = f"{name} {_fmt_tokens(tokens)}"
+        if stale > 0:
+            piece += f"/{stale:.0%} stale"
+        segs.append(piece)
+    if not segs:
+        return ""
+    extra = len(items) - len(segs)
+    suffix = f", +{extra}" if extra > 0 else ""
+    return "top tools: " + ", ".join(segs) + suffix
+
+
+def composition_detail_lines(comp: dict) -> list[str]:
+    """Multiline, content-free context accounting for UI notices.
+
+    This is intentionally more explicit than composition_line(): it names which
+    buckets are likely reclaimed by compaction (stale tool output), which are
+    lossy-summary material, and which are fixed/persistent. Counts remain
+    estimates, reconciled to the authoritative total by context_composition().
+    """
+    if not comp or not comp.get("total"):
+        return []
+    total = int(comp.get("total", 0) or 0)
+    lines = []
+    skills = int(comp.get("skills", 0) or 0)
+    if skills > 0:
+        names = [n for n in (comp.get("skill_names") or []) if n]
+        label = ", ".join(names[:3]) if names else "loaded skills"
+        if len(names) > 3:
+            label += f", +{len(names) - 3}"
+        lines.append(f"loaded skills: ~{_fmt_tokens(skills)} "
+                     f"({_fmt_pct(skills, total)}; {label}; persists across /compact)")
+    base = int(comp.get("base", 0) or 0)
+    if base > 0:
+        label = "system+tool schemas" if skills else "floor (system+tool schemas)"
+        lines.append(f"{label}: ~{_fmt_tokens(base)} "
+                     f"({_fmt_pct(base, total)}; not compactable)")
+    summary = int(comp.get("summary", 0) or 0)
+    if summary > 0:
+        lines.append(f"prior summary: ~{_fmt_tokens(summary)} "
+                     f"({_fmt_pct(summary, total)}; already compacted)")
+    tool = int(comp.get("tool", 0) or 0)
+    if tool > 0:
+        sf = float(comp.get("tool_stale_frac", 0.0) or 0.0)
+        stale_tokens = int(round(tool * sf))
+        details = [f"{_fmt_pct(tool, total)} of context"]
+        if sf > 0:
+            details.append(f"{sf:.0%} stale")
+            details.append(f"~{_fmt_tokens(stale_tokens)} likely reclaimable")
+        top = _tool_topline(comp)
+        if top:
+            details.append(top)
+        lines.append(f"tool output: ~{_fmt_tokens(tool)} (" + "; ".join(details) + ")")
+    asst = int(comp.get("assistant", 0) or 0)
+    if asst > 0:
+        lines.append(f"assistant text/thinking: ~{_fmt_tokens(asst)} "
+                     f"({_fmt_pct(asst, total)}; summarized lossily)")
+    prompts = int(comp.get("prompts", 0) or 0)
+    if prompts > 0:
+        lines.append(f"user prompts: ~{_fmt_tokens(prompts)} "
+                     f"({_fmt_pct(prompts, total)}; constraints to preserve)")
+    return lines
+
+
 # Fraction of the window above which loaded skills are called out as the
 # dominant (and persistent) consumer. Loaded skills do NOT shrink on /compact.
 SKILL_DOMINANCE_FRAC = 0.40

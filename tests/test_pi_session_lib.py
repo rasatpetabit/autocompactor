@@ -162,6 +162,62 @@ def test_session_with_no_compaction_returns_stats(tmp_path):
     assert st.read_files == ["README.md"]
 
 
+def test_tool_output_breakdown_tracks_tool_names(tmp_path):
+    path = _write_jsonl(tmp_path / "tool-breakdown.jsonl", [
+        {
+            "type": "message",
+            "id": "u1",
+            "parentId": None,
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Read and test."}],
+            },
+        },
+        {
+            "type": "message",
+            "id": "a1",
+            "parentId": "u1",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "toolCall", "id": "read-1", "name": "read",
+                     "arguments": {"path": "README.md"}},
+                    {"type": "toolCall", "id": "bash-1", "name": "bash",
+                     "arguments": {"command": "pytest -q"}},
+                ],
+                "usage": {"input": 100, "output": 5, "totalTokens": 105},
+            },
+        },
+        {
+            "type": "message",
+            "id": "r1",
+            "parentId": "a1",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "read-1",
+                "content": [{"type": "text", "text": "read output"}],
+            },
+        },
+        {
+            "type": "message",
+            "id": "r2",
+            "parentId": "r1",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "bash-1",
+                "content": [{"type": "text", "text": "bash output"}],
+            },
+        },
+    ])
+
+    st = pi_session_lib.analyze(path, recent_window=0)
+    assert st.tool_chars_by_name["read"] == len("read output")
+    assert st.tool_chars_by_name["bash"] == len("bash output")
+    assert st.stale_tool_chars_by_name["read"] == len("read output")
+    comp = transcript_lib.context_composition(st, st.context_tokens)
+    assert {item["name"] for item in comp["tool_breakdown"]} == {"read", "bash"}
+
+
 def test_single_line_session_returns_stats_without_raising(tmp_path):
     path = _write_jsonl(tmp_path / "single-line.jsonl", [
         {

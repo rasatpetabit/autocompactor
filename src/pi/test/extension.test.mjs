@@ -91,10 +91,13 @@ function bridgeResponder(byCmd) {
   }
 }
 
+const CONTEXT_STATE = "Context: 150,000 tokens\nComposition:\n  • tool output: ~80k (53% of context; 95% stale; ~76k likely reclaimable)"
+const COMPACTION_STATS = "compaction #1 (auto) | 150k before | pre-compaction composition: ≈ 80k tool (95% stale)\n  └ preserved verbatim → disk (survive the summary): 2 files"
+
 const RECOMMEND = {
-  evaluate: { recommend: true, reason: "test boundary", context_tokens: 150_000 },
-  prepare: { customInstructions: "PRESERVE THESE THINGS" },
-  reinject: { text: "digest body", customType: "autocompactor.digest" },
+  evaluate: { recommend: true, reason: "test boundary", context_tokens: 150_000, contextState: CONTEXT_STATE },
+  prepare: { customInstructions: "PRESERVE THESE THINGS", contextState: CONTEXT_STATE },
+  reinject: { text: "digest body", customType: "autocompactor.digest", compactionStats: COMPACTION_STATS },
 }
 
 function visibleStatuses(pi) {
@@ -157,7 +160,7 @@ test("pre-gate: below SOFT_PCT never spawns the bridge", async () => {
   assert.equal(pi.execCalls.length, 0, "bridge must not be spawned below the gate")
   assert.equal(pi.sent.length, 0)
   assert.equal(ctx.compactCalls.length, 0)
-  assert.match(ctx.statuses.at(-1).text, /below .*gate/)
+  assert.match(ctx.statuses.at(-1).text, /below (.*gate|30,000 minimum)/)
 })
 
 test("pre-gate: null tokens (right after compaction) never spawns", async () => {
@@ -177,6 +180,21 @@ test("pre-gate: reclaim below MIN_SAVINGS never spawns", async () => {
   assert.equal(pi.execCalls.length, 0)
 })
 
+test("pre-gate: detail threshold shows composition without compacting", async () => {
+  const pi = makePi({ exec: bridgeResponder(RECOMMEND) })
+  autocompactor(pi)
+  const ctx = makeCtx({ tokens: 120_000, contextWindow: 976_000 })
+  await pi.handlers.agent_end({}, ctx)
+  assert.equal(pi.execCalls.length, 1, "bridge evaluate gathers composition before soft gate")
+  assert.equal(pi.execCalls[0].args[1], "evaluate")
+  assert.equal(ctx.compactCalls.length, 0)
+  assert.equal(visibleStatuses(pi).length, 0, "early monitoring is UI-only, not persisted into context")
+  assert.equal(ctx.notifications.length, 1)
+  assert.match(ctx.notifications[0].message, /monitoring/)
+  assert.match(ctx.notifications[0].message, /context composition/)
+  assert.match(ctx.notifications[0].message, /tool output/)
+})
+
 test("advise mode: recommend -> visible persistent status", async () => {
   delete process.env.AUTOCOMPACTOR_PI_MODE
   const pi = makePi({ exec: bridgeResponder(RECOMMEND) })
@@ -189,6 +207,7 @@ test("advise mode: recommend -> visible persistent status", async () => {
   const statuses = visibleStatuses(pi)
   assert.equal(statuses.length, 1)
   assertVisibleStatus(statuses[0], /criteria met.*test boundary.*advise mode/)
+  assert.match(statuses[0].message.content, /context composition:[\s\S]*tool output/)
   assertVisibleChannelsValid(pi)
   assert.equal(ctx.notifications.length, 1)
   assert.equal(ctx.notifications[0].type, "warning")
@@ -221,6 +240,7 @@ test("actuate mode: compact exactly once; reentrancy blocks a concurrent second"
     let statuses = visibleStatuses(pi)
     assert.equal(statuses.length, 1)
     assertVisibleStatus(statuses[0], /criteria met.*running compaction now/)
+    assert.match(statuses[0].message.content, /context composition:[\s\S]*tool output/)
     assertVisibleChannelsValid(pi)
 
     // Compaction still in flight (onComplete NOT called): a second boundary
@@ -300,6 +320,7 @@ test("session_compact: hidden digest is queued; visible summary is persistent", 
   const statuses = visibleStatuses(pi)
   assert.equal(statuses.length, 1)
   assertVisibleStatus(statuses[0], /150,000 → 10,000 tokens/)
+  assert.match(statuses[0].message.content, /pre-compaction accounting:[\s\S]*pre-compaction composition/)
   assertVisibleChannelsValid(pi)
   assert.equal(ctx.notifications.length, 1)
   assert.equal(ctx.notifications[0].type, "info")

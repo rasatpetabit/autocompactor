@@ -119,6 +119,10 @@ def cmd_evaluate(opts: dict) -> dict:
     context_tokens = _to_int(opts.get("tokens"))
     if context_tokens is None:
         context_tokens = st.context_tokens
+    # The runtime's getContextUsage() is the authoritative total at the moment
+    # the TS shim asks for a readout. The transcript can lag or contain only an
+    # older per-message usage entry, so reconcile composition to this number.
+    st.context_tokens = context_tokens
     configured_window = int(cfg.float("WINDOW", default=200_000))
     runtime_context_window = _to_int(opts.get("context_window"))
     context_window = runtime_context_window or configured_window
@@ -274,9 +278,15 @@ def cmd_prepare(opts: dict) -> dict:
         + f" ({len(instructions):,} chars)",
     ])
     # Composition (a) + preservation ledger (b), mirroring the Claude path.
-    comp_line = policy.composition_line(comp)
-    if comp_line:
-        state["last_compaction_stats"] += "\n  └ " + comp_line
+    detail_lines = policy.composition_detail_lines(comp)
+    if detail_lines:
+        state["last_compaction_stats"] += "\npre-compaction composition:"
+        for line in detail_lines:
+            state["last_compaction_stats"] += "\n  • " + line
+    else:
+        comp_line = policy.composition_line(comp)
+        if comp_line:
+            state["last_compaction_stats"] += "\n  └ " + comp_line
     skill_warn = policy.skill_warning(comp)
     if skill_warn:
         state["last_compaction_stats"] += "\n  " + skill_warn
@@ -316,15 +326,16 @@ def cmd_reinject(opts: dict) -> dict:
     session_id = _session_id(session)
     arts = artifacts.load(session_id)
     state = _load_state(session_id)
+    stats_line = state.get("last_compaction_stats", "")
     digest = artifacts.build_digest(
         arts, budget_tokens=int(cfg.float("ARTIFACT_BUDGET", default=1500)),
-        stats_line=state.get("last_compaction_stats", ""))
+        stats_line=stats_line)
 
     state["pending_reinject"] = False
     state["last_reco_tokens"] = -10**9   # fresh context, reset cooldown
     _save_state(session_id, state)
 
-    if not digest:
+    if not digest and not stats_line:
         return {}
 
     # Post-compaction context overview: re-analyze the session
@@ -352,8 +363,12 @@ def cmd_reinject(opts: dict) -> dict:
                "post_tokens": post_st.context_tokens,
                "post_phase": transcript_lib.detect_phase(post_st)},
               )
-    return {"text": digest, "customType": DIGEST_CUSTOM_TYPE,
-            "contextState": post_state}
+    out = {"contextState": post_state}
+    if stats_line:
+        out["compactionStats"] = stats_line
+    if digest:
+        out.update({"text": digest, "customType": DIGEST_CUSTOM_TYPE})
+    return out
 
 
 def main(argv: list) -> int:

@@ -43,6 +43,8 @@ class TranscriptStats:
     todo_step: bool = False          # >=1 completed AND >=1 pending in latest TodoWrite
     stale_tool_chars: int = 0        # chars of tool_result older than window
     total_tool_chars: int = 0
+    tool_chars_by_name: dict = field(default_factory=dict)  # tool name -> chars
+    stale_tool_chars_by_name: dict = field(default_factory=dict)  # stale chars by tool
     assistant_text_chars: int = 0    # chars of assistant text+thinking in context
     user_prompt_chars: int = 0       # chars of genuine user turns in context
     summary_chars: int = 0           # chars of carried compaction summary in context
@@ -129,8 +131,8 @@ def context_composition(st: TranscriptStats, context_tokens: int = -1) -> dict:
 
     Categories (over the in-context content, plus persistent injections):
       skills     loaded skill / large instruction injections (isMeta) still in
-                 context — often the single largest item, and RECLAIMABLE (a
-                 loaded skill body, not fixed overhead). Measured exactly from
+                 context — often the single largest item, and persistent across
+                 compaction unless the skill is unloaded. Measured exactly from
                  the transcript, so trusted over the chars/4 estimates.
       summary    carried compaction summary still in context.
       base       residual = total - everything measured: system prompt + tool
@@ -147,7 +149,8 @@ def context_composition(st: TranscriptStats, context_tokens: int = -1) -> dict:
     total = max(total, 0)
     skills = max(int(getattr(st, "skill_chars", 0)), 0) / CHARS_PER_TOKEN
     summary = max(int(getattr(st, "summary_chars", 0)), 0) / CHARS_PER_TOKEN
-    tool = max(int(st.total_tool_chars), 0) / CHARS_PER_TOKEN
+    raw_tool_chars = max(int(st.total_tool_chars), 0)
+    tool = raw_tool_chars / CHARS_PER_TOKEN
     asst = max(int(getattr(st, "assistant_text_chars", 0)), 0) / CHARS_PER_TOKEN
     prompts = max(int(getattr(st, "user_prompt_chars", 0)), 0) / CHARS_PER_TOKEN
     if total and (skills + summary) > total:
@@ -173,6 +176,29 @@ def context_composition(st: TranscriptStats, context_tokens: int = -1) -> dict:
     base = max(total - r_skills - r_summary - r_tool - r_asst - r_prompts, 0)
     stale_frac = (st.stale_tool_chars / st.total_tool_chars
                   if st.total_tool_chars else 0.0)
+    tool_breakdown = []
+    raw_tool_tokens = raw_tool_chars / CHARS_PER_TOKEN
+    if raw_tool_tokens > 0 and tool > 0:
+        factor = tool / raw_tool_tokens
+        by_name = getattr(st, "tool_chars_by_name", {}) or {}
+        stale_by_name = getattr(st, "stale_tool_chars_by_name", {}) or {}
+        for name, chars in sorted(by_name.items(),
+                                  key=lambda kv: kv[1], reverse=True):
+            try:
+                c = max(int(chars), 0)
+            except (TypeError, ValueError):
+                continue
+            if c <= 0:
+                continue
+            tokens = int(round((c / CHARS_PER_TOKEN) * factor))
+            if tokens <= 0:
+                continue
+            stale_c = max(int(stale_by_name.get(name, 0) or 0), 0)
+            tool_breakdown.append({
+                "name": str(name or "tool"),
+                "tokens": tokens,
+                "stale_frac": round((stale_c / c) if c else 0.0, 4),
+            })
     return {
         "total": total,
         "base": base,
@@ -181,6 +207,7 @@ def context_composition(st: TranscriptStats, context_tokens: int = -1) -> dict:
         "summary": r_summary,
         "tool": r_tool,
         "tool_stale_frac": round(stale_frac, 4),
+        "tool_breakdown": tool_breakdown,
         "assistant": r_asst,
         "prompts": r_prompts,
     }
@@ -372,9 +399,13 @@ def build_context_state(st: TranscriptStats, window: float = 0.0,
     # Composition breakdown — where the tokens actually are (owner request a).
     try:
         from autocompactor import policy as _policy
-        comp_line = _policy.composition_line(
-            context_composition(st, st.context_tokens))
-        if comp_line:
+        comp = context_composition(st, st.context_tokens)
+        comp_line = _policy.composition_line(comp)
+        detail_lines = _policy.composition_detail_lines(comp)
+        if detail_lines:
+            lines.append("Composition:")
+            lines.extend("  • " + line for line in detail_lines)
+        elif comp_line:
             lines.append("Composition: " + comp_line)
     except Exception:
         pass
@@ -390,7 +421,7 @@ def build_context_state(st: TranscriptStats, window: float = 0.0,
     else:
         lines.append("Active signals: none")
     lines.append(f"Compaction count: {getattr(st, 'compaction_count', 0)}")
-    return " | ".join(lines)
+    return "\n".join(lines)
 
 
 def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:

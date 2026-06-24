@@ -300,6 +300,7 @@ def test_build_context_state_uses_window_harness_and_default_count(monkeypatch):
                             stale_tool_chars=60, total_tool_chars=100)
     out = tl.build_context_state(st, window=400_000, harness="pi")
     assert "Occupancy: 40%" in out
+    assert "Composition:" in out and "tool output" in out
     assert "Active signals: none" in out
     assert "Compaction count: 0" in out
 
@@ -332,6 +333,8 @@ def test_context_composition_reconciles_to_true_total():
     to the authoritative context_tokens; the residual 'base' absorbs error."""
     st = tl.TranscriptStats(context_tokens=209_000, total_tool_chars=480_000,
                             stale_tool_chars=437_000,
+                            tool_chars_by_name={"bash": 320_000, "read": 160_000},
+                            stale_tool_chars_by_name={"bash": 300_000, "read": 137_000},
                             assistant_text_chars=60_000,
                             user_prompt_chars=16_000)
     comp = tl.context_composition(st, st.context_tokens)
@@ -340,6 +343,9 @@ def test_context_composition_reconciles_to_true_total():
     assert 0.90 <= comp["tool_stale_frac"] <= 0.92
     line = policy.composition_line(comp)
     assert "floor" in line and "tool" in line and "stale" in line
+    detail = "\n".join(policy.composition_detail_lines(comp))
+    assert "tool output" in detail and "likely reclaimable" in detail
+    assert "top tools: bash" in detail and "read" in detail
 
 
 def test_context_composition_scales_when_estimate_overshoots():

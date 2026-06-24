@@ -66,6 +66,14 @@ const MIN_SAVINGS = num("AUTOCOMPACTOR_MIN_SAVINGS", cfgNum("MIN_SAVINGS", 30_00
 const POST_FLOOR = num("AUTOCOMPACTOR_POST_FLOOR", cfgNum("POST_FLOOR", 70_000))
 const COOLDOWN = num("AUTOCOMPACTOR_COOLDOWN", cfgNum("COOLDOWN", 25_000))
 const RESERVE_FALLBACK = num("AUTOCOMPACTOR_RESERVE", cfgNum("RESERVE", 40_000))
+const DETAIL_MIN_TOKENS = num(
+  "AUTOCOMPACTOR_DETAIL_MIN_TOKENS",
+  cfgNum("DETAIL_MIN_TOKENS", POST_FLOOR + MIN_SAVINGS),
+)
+const DETAIL_COOLDOWN = num(
+  "AUTOCOMPACTOR_DETAIL_COOLDOWN",
+  cfgNum("DETAIL_COOLDOWN", Math.max(COOLDOWN, 75_000)),
+)
 
 function num(name: string, dflt: number): number {
   const v = parseFloat(process.env[name] ?? "")
@@ -186,6 +194,26 @@ function errorText(err: unknown): string {
   return "unknown error"
 }
 
+function cleanBlock(value: unknown): string {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+function indentBlock(text: string): string {
+  return text.split("\n").map((line) => `  ${line}`).join("\n")
+}
+
+function withContextState(message: string, contextState: unknown): string {
+  const state = cleanBlock(contextState)
+  if (!state) return message
+  return `${message}\ncontext composition:\n${indentBlock(state)}`
+}
+
+function withStatsBlock(message: string, title: string, stats: unknown): string {
+  const body = cleanBlock(stats)
+  if (!body) return message
+  return `${message}\n${title}:\n${indentBlock(body)}`
+}
+
 // Fire-and-forget ctx.compact() that can never leave the reentrancy flag stuck.
 // ctx.compact reports completion via onComplete/onError callbacks, but if it
 // throws synchronously or returns a promise that rejects WITHOUT invoking a
@@ -247,6 +275,7 @@ export default function autocompactor(pi: ExtensionAPI) {
   let lastRecTokens = -Infinity
   let selfTriggered = false // reentrancy flag for actuate/intercept mode
   let compactionPreTokens = 0 // captured in session_before_compact for post summary
+  let lastDetailTokens = -Infinity // lower-cost context-composition notice cadence
   let bridgeWarned = false
   let lastAdvisory = "" // dedupe key for the recurring advise/reentrancy notice
 
@@ -264,7 +293,9 @@ export default function autocompactor(pi: ExtensionAPI) {
     }
   })
 
-  // agent_end: the boundary moment. Zero-spawn pre-gate, then bridge evaluate.
+  // agent_end: the boundary moment. Mostly zero-spawn pre-gate; once context
+  // is large enough to reclaim meaningful tokens, occasionally ask the bridge
+  // for a composition-only monitoring readout before the compaction gate.
   pi.on("agent_end", async (_event, ctx) => {
     try {
       const usage = ctx.getContextUsage()
@@ -283,18 +314,38 @@ export default function autocompactor(pi: ExtensionAPI) {
       // 0.40 would need 374K tokens (unreachable); WIDE (~0.25) fires at ~234K.
       const softPct = softPctFor(usage.contextWindow)
       const occupancy = usage.tokens / window
-      if (occupancy < softPct) {
-        setAcStatus(
-          ctx,
-          `autocompactor: monitoring — ${usage.tokens.toLocaleString()} tokens (${(occupancy * 100).toFixed(0)}% effective), below ${(softPct * 100).toFixed(0)}% gate.`,
-        )
-        return
-      }
       const estReclaim = usage.tokens - POST_FLOOR
       if (estReclaim < MIN_SAVINGS) {
         setAcStatus(
           ctx,
           `autocompactor: monitoring — estimated reclaim ~${Math.max(estReclaim, 0).toLocaleString()} tokens, below ${MIN_SAVINGS.toLocaleString()} minimum.`,
+        )
+        return
+      }
+      if (occupancy < softPct) {
+        if (
+          usage.tokens >= DETAIL_MIN_TOKENS &&
+          usage.tokens - lastDetailTokens >= DETAIL_COOLDOWN
+        ) {
+          const detail = await bridge(pi, ctx, "evaluate", [
+            "--tokens", String(usage.tokens),
+            "--context-window", String(usage.contextWindow),
+            "--reserve", String(RESERVE_FALLBACK),
+          ])
+          if (detail) {
+            lastDetailTokens = usage.tokens
+            const msg = withContextState(
+              `autocompactor: monitoring — ${detail.reason ?? `${usage.tokens.toLocaleString()} tokens`}; below compaction gate.`,
+              detail.contextState,
+            )
+            setAcStatus(ctx, msg)
+            notify(ctx, msg, "info")
+            return
+          }
+        }
+        setAcStatus(
+          ctx,
+          `autocompactor: monitoring — ${usage.tokens.toLocaleString()} tokens (${(occupancy * 100).toFixed(0)}% effective), below ${(softPct * 100).toFixed(0)}% gate.`,
         )
         return
       }
@@ -340,7 +391,10 @@ export default function autocompactor(pi: ExtensionAPI) {
         announce(
           pi,
           ctx,
-          `autocompactor: criteria met — ${reason}; running compaction now.`,
+          withContextState(
+            `autocompactor: criteria met — ${reason}; running compaction now.`,
+            verdict.contextState,
+          ),
           "info",
           true,
         )
@@ -367,7 +421,10 @@ export default function autocompactor(pi: ExtensionAPI) {
         const modeTag = effMode === "actuate"
           ? "compaction in progress"
           : "advise mode"
-        const advisory = `autocompactor: criteria met — ${reason} (${modeTag}).`
+        const advisory = withContextState(
+          `autocompactor: criteria met — ${reason} (${modeTag}).`,
+          verdict.contextState,
+        )
         setAcStatus(ctx, advisory)
         notify(ctx, advisory, "warning")
         if (advisory !== lastAdvisory) {
@@ -502,6 +559,7 @@ export default function autocompactor(pi: ExtensionAPI) {
       } else if (postTokens != null && postTokens > 0) {
         msg = `autocompactor: compaction completed — current context is ${postTokens.toLocaleString()} tokens.`
       }
+      msg = withStatsBlock(msg, "pre-compaction accounting", inj?.compactionStats)
       announce(pi, ctx, msg, "info", true)
       compactionPreTokens = 0 // reset for next compaction
     } catch {

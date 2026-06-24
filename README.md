@@ -69,6 +69,8 @@ needed. `config.local.json` is the gitignored site-local overlay, and any
 | `STALE_FRAC` | 0.90 | Stale-tool-output fraction that counts as a boundary signal. |
 | `POST_FLOOR` | 70000 | Estimated post-compaction context (measured ~69k median here). A compaction can only reclaim what sits above this. |
 | `MIN_SAVINGS` | 30000 | Min estimated reclaim (context − POST_FLOOR) to recommend; below it a compaction stalls 30–60s for almost nothing. |
+| `DETAIL_MIN_TOKENS` | 100000 | Start showing composition-only monitoring notices once context is large enough to make compaction meaningfully reclaimable, even before the compaction gate. |
+| `DETAIL_COOLDOWN` | 75000 | Min token growth between pre-gate composition monitoring notices. |
 | `MAX_FULL_PARSE_MB` | 8 | Above this transcript size, parse only the active segment after the last compaction boundary (bounds worst-case latency). |
 | `OBSERVE_ONLY` | `error_resolved,tests_pass,idle_gap` | Signals logged for telemetry but never allowed to justify a recommendation (defaults measured anti-predictive on real corpora). Set empty to restore full gating. |
 | `ARTIFACT_BUDGET` | 1500 | Token budget for the post-compaction artifact digest. |

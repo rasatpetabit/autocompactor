@@ -208,6 +208,15 @@ def _tool_result_text(message: dict) -> str:
     ).strip()
 
 
+def _record_tool_breakdown(st, tool_name: str, chars: int, is_recent: bool) -> None:
+    name = str(tool_name or "tool").strip().lower() or "tool"
+    st.tool_chars_by_name[name] = st.tool_chars_by_name.get(name, 0) + chars
+    if not is_recent:
+        st.stale_tool_chars_by_name[name] = (
+            st.stale_tool_chars_by_name.get(name, 0) + chars
+        )
+
+
 def _record_result_text(st, text: str, is_error: bool, is_recent: bool) -> None:
     st.total_tool_chars += len(text)
     if not is_recent:
@@ -298,6 +307,7 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
 
     edited, read = {}, {}
     pending_bash = {}
+    pending_tool_names = {}
     recent_result_flags = []
     prev_ts = None
     n = len(active)
@@ -330,6 +340,9 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
                 name = call["name"]
                 lname = name.lower()
                 args = call["arguments"]
+                call_id = call.get("id")
+                if call_id:
+                    pending_tool_names[call_id] = lname or "tool"
 
                 if lname in ("edit", "write"):
                     _remember_path(edited, args.get("path"), idx)
@@ -349,8 +362,11 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
         elif role == "toolResult":
             text = _tool_result_text(msg)
             is_error = bool(msg.get("isError"))
+            tool_call_id = msg.get("toolCallId")
+            tool_name = pending_tool_names.pop(tool_call_id, "tool")
             _record_result_text(st, text, is_error, is_recent)
-            cmd = pending_bash.pop(msg.get("toolCallId"), None)
+            _record_tool_breakdown(st, tool_name, len(text), is_recent)
+            cmd = pending_bash.pop(tool_call_id, None)
             if cmd and not is_error and cmd not in st.working_commands:
                 st.working_commands.append(cmd)
             if is_recent:
@@ -365,6 +381,7 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
             if is_recent and "git commit" in cmd:
                 st.recent_commit = True
             _record_result_text(st, text, is_error, is_recent)
+            _record_tool_breakdown(st, "bash", len(text), is_recent)
             if cmd and not is_error and cmd not in st.working_commands:
                 st.working_commands.append(cmd)
             if is_recent:

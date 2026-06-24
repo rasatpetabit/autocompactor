@@ -85,6 +85,7 @@ def test_evaluate_recommends_near_ceiling(tmp_path):
     assert data is not None
     assert data["recommend"] is True
     assert data["context_tokens"] == 150000
+    assert "Context: 150,000 tokens" in data["contextState"]
     assert isinstance(data["reason"], str) and len(data["reason"]) > 0
 
 
@@ -288,6 +289,9 @@ def test_reinject_after_prepare(tmp_path):
     assert data is not None
     assert isinstance(data["text"], str) and len(data["text"]) > 0
     assert data["customType"] == "autocompactor.digest"
+    assert "compactionStats" in data
+    assert "compaction #" in data["compactionStats"]
+    assert "pre-compaction composition" in data["text"]
 
 
 def test_reinject_without_prepare_is_quiet_or_json(tmp_path):
