@@ -293,3 +293,63 @@ def test_detail_lines_consume_verbatim_no_recompute():
     joined = "\n".join(lines)
     # The inventory's dormant_tokens is 8000 -> renders as ~8K
     assert "~8k" in joined
+
+
+# --- Task 7 (context-window-analysis): reducible-floor advisory renderer ---
+
+def test_reducible_floor_advisory_renders_ranking_order_unchanged():
+    """The advisory renders ReclaimEstimate.ranking in its exact order, verbatim
+    (never re-ranks/recomputes)."""
+    comp = {
+        "reclaim": {
+            "reclaimable_now": 1234, "post_floor_estimate": 70000,
+            "ranking": [
+                {"bucket": "unload pi-subagents", "tokens": 11229,
+                 "reducible_by": "unload package"},
+                {"bucket": "--exclude-tools context-mode", "tokens": 10973,
+                 "reducible_by": "--exclude-tools"},
+                {"bucket": "stale tool output", "tokens": 900,
+                 "reducible_by": "/compact"},
+            ],
+        }
+    }
+    lines = policy.reducible_floor_advisory(comp, min_tokens=500)
+    assert len(lines) == 3  # all three >= 500 floor
+    # Order preserved: pi-subagents before context-mode before stale
+    assert "unload pi-subagents" in lines[0]
+    assert "context-mode" in lines[1]
+    assert "stale tool output" in lines[2]
+    assert "11k" in lines[0]  # verbatim figure (~11k)
+    # Framing: /compact cannot unload packages
+    assert "unload the package; /compact cannot do this" in lines[0]
+    assert "--exclude-tools; /compact cannot do this" in lines[1]
+
+
+def test_reducible_floor_advisory_min_tokens_floor():
+    """Buckets below the min_tokens noise floor are not surfaced."""
+    comp = {"reclaim": {"ranking": [
+        {"bucket": "big", "tokens": 5000, "reducible_by": "unload package"},
+        {"bucket": "small", "tokens": 100, "reducible_by": "/compact"},
+    ]}}
+    lines = policy.reducible_floor_advisory(comp, min_tokens=1000)
+    assert len(lines) == 1
+    assert "big" in lines[0]
+
+
+def test_reducible_floor_advisory_returns_empty_when_no_ranking():
+    comp = {"reclaim": {"ranking": [], "reclaimable_now": 0,
+                        "post_floor_estimate": 0}}
+    assert policy.reducible_floor_advisory(comp) == []
+
+
+def test_reducible_floor_advisory_returns_empty_when_no_reclaim():
+    assert policy.reducible_floor_advisory({}) == []
+    assert policy.reducible_floor_advisory(None) == []
+
+
+def test_reducible_floor_advisory_max_lines_cap():
+    comp = {"reclaim": {"ranking": [
+        {"bucket": f"b{i}", "tokens": 10000, "reducible_by": "/compact"}
+        for i in range(10)]}}
+    lines = policy.reducible_floor_advisory(comp, min_tokens=1, max_lines=3)
+    assert len(lines) == 3

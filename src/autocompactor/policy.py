@@ -298,7 +298,49 @@ def composition_detail_lines(comp: dict) -> list[str]:
 # dominant (and persistent) consumer. Loaded skills do NOT shrink on /compact.
 SKILL_DOMINANCE_FRAC = 0.40
 
+def reducible_floor_advisory(comp: dict, *, min_tokens: int = 1000,
+                            max_lines: int = 4) -> list[str]:
+    """Render ReclaimEstimate.ranking as user-actionable guidance (spec §5/§7).
 
+    Surfaces [{bucket, tokens, reducible_by}] items from the inventory's
+    reclaim.ranking as lines like 'unload pi-subagents ~= 11k'. CONSUMES the
+    ranking verbatim — never re-ranks, never recomputes reclaim figures.
+    Content-free: token counts and bucket/package names only.
+
+    The advisory frames /compact cannot unload packages — the lever is not
+    loading them. Returns [] when no ranking/reclaim data is present or every
+    row is below `min_tokens` (noise floor)."""
+    reclaim = comp.get("reclaim") if isinstance(comp, dict) else None
+    if not isinstance(reclaim, dict):
+        return []
+    ranking = reclaim.get("ranking")
+    if not isinstance(ranking, list) or not ranking:
+        return []
+    lines = []
+    shown = 0
+    for r in ranking:
+        if shown >= max_lines:
+            break
+        try:
+            tokens = int(r.get("tokens", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if tokens < min_tokens:
+            continue
+        bucket = str(r.get("bucket", "") or "").strip()
+        lever = str(r.get("reducible_by", "") or "").strip()
+        if not bucket:
+            continue
+        # Frame so the user understands /compact cannot unload packages: the
+        # lever is 'unload package' (not loading them), not /compact.
+        hint = ""
+        if lever == "unload package":
+            hint = " (unload the package; /compact cannot do this)"
+        elif lever == "--exclude-tools":
+            hint = " (--exclude-tools; /compact cannot do this)"
+        lines.append(f"reducible: {bucket} ~= {_fmt_tokens(tokens)}{hint}")
+        shown += 1
+    return lines
 def skill_warning(comp: dict, threshold: float = SKILL_DOMINANCE_FRAC) -> str:
     """When loaded skills dominate the window, name them and warn that they are
     NOT reclaimable by /compact (skill bodies persist across compaction) — the
