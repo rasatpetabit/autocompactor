@@ -17,3 +17,5 @@ tasks: [{"id":1,"status":"done","wave":0,"files":["src/autocompactor/config_lib.
 active_run: null
 pending_gate: null
 worktree: /srv/dev/ras/autocompactor/.worktrees/context-window-analysis
+verified_sha: d51a7260782ade55ccd7c45721ca3c5574b1702e
+worktree_disposition: removed_after_merge

@@ -5,3 +5,6 @@
 {"type":"wave_recorded","ts":"2026-06-25T20:17:27.834Z","phase":"execute","note":"wave 2 record: 2 done, 0 failed/blocked, 0 qctl; reverted 1 out-of-scope"}
 {"type":"wave_recorded","ts":"2026-06-25T20:23:47.392Z","phase":"execute","note":"wave 3 record: 2 done, 0 failed/blocked, 0 qctl"}
 {"type":"wave_recorded","ts":"2026-06-25T20:34:29.517Z","phase":"execute","note":"wave 4 record: 2 done, 0 failed/blocked, 0 qctl; reverted 1 out-of-scope"}
+{"type":"adversary_review_defensively_armed","ts":"2026-06-25T20:37:25.067Z","summary":"adversary review defensively armed — legacy bundle missing state.review.adversary; finish-step gate would otherwise silently skip","data":{"sha":"d51a7260782ade55ccd7c45721ca3c5574b1702e"}}
+{"type":"adversary_review_skipped","ts":"2026-06-25T20:39:58.961Z","summary":"whole-branch adversary-review skipped (degraded) — adversary lane degraded (no healthy cross-vendor reviewers; agent-dispatch review --class adversary returned degraded)","data":{"sha":"d51a7260782ade55ccd7c45721ca3c5574b1702e"}}
+{"type":"branch_finish","ts":"2026-06-25T21:05:56.170Z","note":"merge"}
