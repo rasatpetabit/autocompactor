@@ -1,7 +1,7 @@
 ---
 schema_version: 8
 slug: context-window-analysis
-status: in-progress
+status: archived
 phase: execute
 topic: "add deeper analysis of what's in the context-window"
 complexity: high
