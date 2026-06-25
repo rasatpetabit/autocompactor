@@ -161,10 +161,10 @@ def test_render_report_consumes_ranking_verbatim():
     )
     out = ci.render_report(inv)
     assert "Context inventory" in out
-    assert "50,000t" in out  # token-count line renders
+    assert "50kt" in out  # token-count line renders (compact size)
     assert "unload pi-subagents" in out
-    assert "11,229t" in out  # ranking figures rendered verbatim
-    assert "70,000t" in out  # post_floor_estimate rendered verbatim
+    assert "11k t" in out.replace("\n", " ") or "11k" in out  # ranking figures
+    assert "70k t" in out.replace("\n", " ") or "70k" in out  # post_floor
     # ranking order preserved (pi-subagents 11229 before stale 900)
     assert out.index("unload pi-subagents") < out.index("stale tool output")
 
@@ -176,9 +176,9 @@ def test_report_over_fixture_renders_token_count_line():
     inv = ci.build_inventory(active, 60000, 200000)
     out = ci.render_report(inv)
     assert "Context inventory" in out
-    assert "t" in out  # token-count line present (e.g. "60,000t")
-    assert "Floor (fixed" in out
-    assert "Dynamic ledger" in out
+    assert "60kt" in out  # token-count line present (compact size)
+    assert "FLOOR" in out
+    assert "DYNAMIC" in out
 
 
 def test_main_runs_report_over_fixture(tmp_path, capsys, monkeypatch):
@@ -189,7 +189,7 @@ def test_main_runs_report_over_fixture(tmp_path, capsys, monkeypatch):
     assert rc == 0
     captured = capsys.readouterr()
     assert "Context inventory" in captured.out
-    assert "50,000t" in captured.out
+    assert "50kt" in captured.out
 
 
 # --- main()/CLI smoke (argparse path) ---------------------------------------

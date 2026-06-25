@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autocompactor"
+version = "1.0.0"
+description = "Pi context compactor — earlier, instruction-tailored compaction."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [{ name = "ras" }]
+dependencies = []
+
+[project.scripts]
+contextinventory = "autocompactor.context_inventory:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

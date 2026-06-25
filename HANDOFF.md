@@ -4,44 +4,34 @@ Project: a **Pi context compactor** — smarter, earlier, instruction-tailored
 compaction for the Pi coding agent. The core is harness-agnostic by design; Pi
 is the sole adapter that ships.
 
-> **NOTE (2026-06-21):** the dated session history below records how the project
-> was built and is preserved as the decision record — including the original
-> Claude Code adapter and the rationale for removing it (the Pi-only pivot). It
-> reads in past tense. For the *current* module layout and entrypoints, see
-> `AGENTS.md` (Architecture); the canonical components are
-> `transcript_lib.py`, `artifacts.py`, `llm_digest.py`, `pi_session_lib.py`,
-> `pi_bridge.py`, `nightly_eval.py`, `install_pi.py`, and `src/pi/autocompactor.ts`.
+> **NOTE (2026-06-21, updated 2026-06-25):** the dated history below is the
+> decision record — including the original Claude Code adapter and the
+> rationale for removing it (the Pi-only pivot). For the *current* module
+> layout and entrypoints, see `AGENTS.md` (Architecture); the canonical
+> components are `transcript_lib.py`, `artifacts.py`, `llm_digest.py`,
+> `pi_session_lib.py`, `pi_bridge.py`, `nightly_eval.py`, `install_pi.py`, and
+> `src/pi/autocompactor.ts`.
 
 ## Post-pivot follow-ups (open items, 2026-06-21)
 
 Deferred, owner-held cleanup from the Pi-only pivot merge (branch
 `docs/spec0-pi-only-pivot`, merged to `main` @ `495088e`). None block the merge.
-Persisted here from the (gitignored) SDD ledger so they survive `git clean`.
 
 **Owner-held (touch uncommitted/user-owned or out-of-tree state):**
-1. **WORKLOG entry** — not applied because `WORKLOG.md` had uncommitted work at
-   merge time. Verbatim text to add:
-   ```
-   ## 2026-06-21 — Pi-only pivot
-   Dropped the Claude Code adapter entirely; Pi is now the sole product. Why:
-   the Claude adapter's history was channel-fighting (systemMessage redraw,
-   additionalContext relay, PreCompact hookSpecificOutput rejection, cooldown
-   starvation) and Claude only ever advised — it cannot invoke /compact. Pi
-   actuates via ctx.compact(). Extracted llm_digest to a kept module; completed
-   the Pi parser's assistant/user/summary field-completion before any removal.
-   Full scaffolding flatten: single-namespace config, state under ~/.autocompactor/pi.
-   ```
-2. ~~**TS-shim dead-branch cleanup**~~ — **CLOSED (2026-06-22, this change set).**
-   `src/pi/autocompactor.ts:50-86`: the dead `CFG?.pi?.[key]` lookups in
-   `cfgNum` and the `AUTOCOMPACTOR_PI_*` env reads have been dropped.
-3. **`~/.claude/settings.json`** — deregister the now-deleted Claude hooks
-   (`context_monitor` UserPromptSubmit/PostToolUse, `precompact_analyzer`
-   PreCompact). They error non-fatally now that their scripts are gone. Outside
-   the repo tree; owner account.
+1. **WORKLOG entry** — **CLOSED (2026-06-25, this change set).** The verbatim
+   2026-06-21 Pi-only-pivot entry was folded into `WORKLOG.md` (compressed)
+   during the handoff/worklog compression pass.
+2. ~~**TS-shim dead-branch cleanup**~~ — **CLOSED (2026-06-22).** The dead
+   `CFG?.pi?.[key]` lookups in `cfgNum` and the `AUTOCOMPACTOR_PI_*` env reads
+   were dropped from `src/pi/autocompactor.ts:50-86`.
+3. **`~/.claude/settings.json`** — still OPEN. Deregister the now-deleted
+   Claude hooks (`context_monitor` UserPromptSubmit/PostToolUse,
+   `precompact_analyzer` PreCompact). They error non-fatally now that their
+   scripts are gone. Outside the repo tree; owner account.
 
 **Inert nits (safe post-merge sweep, no runtime effect):**
 - `transcript_lib.observe_only(harness="claude")` — inert dead `harness` param;
-  both callers (`pi_bridge.py`, `transcript_lib.py`) already call it arg-less.
+  both callers already call it arg-less.
 - `TranscriptStats.todo_step` / `todos_all_done` — dataclass fields the Pi
   parser never sets (default `False`); read under guards, dormant-by-construction.
 - F401 unused imports in `tests/test_llm_digest.py`; stale `analyze()` reference
@@ -49,506 +39,125 @@ Persisted here from the (gitignored) SDD ledger so they survive `git clean`.
 - `resolve_window` `cmd_prepare`/configured branch has no direct test pinning
   `effective_window == configured − reserve` (assertion still true; the hot
   `cmd_evaluate` path is covered). A 1-line regression pin would close it.
-- Optional: mark the historical `## Open items for the on-server session` header
-  as `(as of 2026-06-10; items 1–4 since closed)` to remove present-tense ambiguity.
 
-## Components (historical — see AGENTS.md Architecture for the current layout)
+## Historical decision record (pre-Pi-only-pivot, preserved)
 
-| File                   | Role |
-|------------------------|------|
-| `transcript_lib.py`    | Shared JSONL parsing; phase detection; instruction builder (structured-handoff schema + phase addenda + session anchors) |
-| `context_monitor.py`   | *(removed in the Pi-only pivot)* Claude `UserPromptSubmit` hook: occupancy + boundary-signal scoring, recommended `/compact`, staged tailored instructions |
-| `precompact_analyzer.py` | *(removed in the Pi-only pivot)* Claude `PreCompact` hook (manual+auto): transcript backup, injected `customInstructions` |
-| `artifacts.py`         | Mechanical extraction -> durable disk artifacts -> budgeted one-shot re-injection digest |
-| `stats.py`             | Local telemetry appender |
-| `analyze_corpus.py`    | *(removed in the Pi-only pivot)* Offline backtester + `--events` aggregator |
-| `install.py`           | *(removed in the Pi-only pivot)* Idempotent Claude hook registration |
-| `install_pi.py`        | Pi adapter installer (copy-with-rewrite TS shim, version-pin) |
-| `tests/`               | Fixtures + `smoke_test_pi.sh` (isolated-HOME, end-to-end) |
-| `README.md`            | Install, tunables, test matrix |
+The Claude Code adapter was removed in the 2026-06-21 Pi-only pivot (branch
+`docs/spec0-pi-only-pivot` → `main` @ `495088e`). Its history is preserved
+here as the decision record. Full per-session detail lives in `WORKLOG.md`
+and `git log`; this section keeps only what cannot be re-derived from disk.
 
-## Design decisions (and why)
+### Claude adapter removal rationale
 
-1. **Advisor/enricher split.** Hooks cannot invoke `/compact`; PreCompact
-   only fires once compaction is underway. So the monitor advises at cheap
-   boundaries and the analyzer enriches whatever compaction happens.
+The Claude adapter's history was channel-fighting (systemMessage redraw,
+additionalContext relay, PreCompact hookSpecificOutput rejection, cooldown
+starvation) and Claude only ever advised — it cannot invoke `/compact`. Pi
+actuates via `ctx.compact()`. Extracted `llm_digest` to a kept module;
+completed the Pi parser's assistant/user/summary field-completion before any
+removal. Full scaffolding flatten: single-namespace config, state under
+`~/.autocompactor/pi`.
+
+### Design decisions (and why) — still load-bearing on Pi
+
+1. **Advise/actuate split.** Hooks/bridges that cannot invoke compaction
+   advise at cheap boundaries; Pi actuates via `ctx.compact()` at its hard
+   line.
 2. **Occupancy from usage blocks.** Last assistant message's
    `input + cache_read + cache_creation + output` ≈ live context. Free to
    compute, no model calls.
-3. **Boundary signals**: recent `git commit`, test-pass markers in tool
-   output, all-TodoWrite-completed, stale tool-output fraction ≥ 50%.
+3. **Boundary signals**: `git commit`, test-pass markers in tool output,
+   all-TodoWrite-completed, stale tool-output fraction. Extended registry:
+   `todo_step`, `error_resolved`, `idle_gap`, `subagent_done`, `burn_rate`,
+   `topic_shift`. `active_signals()` in `transcript_lib.py` is the single
+   registry consumed by the Pi bridge.
 4. **Instructions are three-layered**: base structured-handoff schema
-   (verbatim-identifier rule + recoverability principle: keep what cannot
-   be re-derived from disk, drop what can, pointer when unsure) + phase
-   addendum (debugging / implementation / exploration / wrapup) +
-   session-specific anchors extracted from the transcript.
+   (verbatim-identifier rule + recoverability: keep what cannot be
+   re-derived from disk, drop what can, pointer when unsure) + phase addendum
+   (debugging / implementation / exploration / wrapup) + session anchors.
 5. **Telemetry is local-only** and content-free (counts, ratios, phases —
    no transcript text).
+6. **Mechanical extraction → disk artifacts** (`artifacts.py`). Facts a
+   regex can extract should never depend on a summarizer's goodwill; re-inject
+   a priority-trimmed, budgeted digest on the first prompt after compaction.
+   Adopted (adapted) from the `@davidorex/pi-custom-compactor` evaluation.
 
+### `pi-custom-compactor` evaluation (2026-06-09) — conclusion
 
-## Decision record: pi-custom-compactor evaluation (2026-06-09)
+**Complementary, not duplicative** — they own summary durability, we own
+timing and evaluation. Adopted: mechanical extraction → disk artifacts; per-
+artifact cost accounting + stats visibility. Not adopted: their YAML spec
+system (our phases are inferred from transcript behavior). Kept ours: boundary-
+timing engine and offline backtester (no counterpart exists; this is the
+differentiation).
 
-Evaluated `@davidorex/pi-custom-compactor` (npm) against autocompactor.
-Conclusion: **complementary, not duplicative** — they own summary
-durability, we own timing and evaluation. Decisions taken:
+### Signal precision results (14-day backtest, 1,684 sessions / 1,568 compactions)
 
-1. **Adopted (adapted): mechanical extraction -> disk artifacts.** Their
-   core insight — facts a regex can extract should never depend on an LLM
-   summarizer's goodwill — is now `artifacts.py`. At compaction we extract
-   corrections / error ledger / working commands / hex constants / file
-   lists mechanically (zero LLM cost), persist to
-   `~/.claude/autocompactor/artifacts/<session>.json`, tell the summarizer
-   NOT to duplicate them, and re-inject a priority-trimmed, budgeted
-   digest (`AUTOCOMPACTOR_ARTIFACT_BUDGET`, default ~1500 tok) on the
-   FIRST prompt after compaction. Deliberate difference from their design:
-   they re-inject per LLM call (possible in Pi's in-process extensions);
-   Claude Code hooks can't intercept every call, so we inject once into
-   the fresh post-compaction context — same durability, no per-call tax.
-2. **Adopted: per-artifact cost accounting + stats visibility.** The
-   precompact telemetry event now records per-artifact byte sizes; the
-   re-injection digest carries a one-line stats header (their
-   `<compaction-stats>` trick) so the model knows a compaction happened
-   and what it cost.
-3. **Not adopted: YAML spec system.** Their specs are explicit,
-   selected by workflow state; our phases are inferred from transcript
-   behavior. For the Pi port these compose (our detector can write their
-   `compactionSpec`); on Claude Code, inference stands alone.
-4. **Kept ours: boundary-timing engine and offline backtester.** No
-   counterpart exists in their package (or, as far as found, anywhere in
-   this niche). This is autocompactor's differentiation; expanded this
-   session — see below.
-5. **Engineering-maturity gap acknowledged**: they ship 189 tests and
-   error fallbacks; we have smoke tests. Porting to real pytest cases is
-   an open item for the on-server session.
+True median reduction per compaction: **88%** (from postTokens). Measured
+late-compaction waste: ~80.7M tokens / 14 days. Per-signal lift (vs baseline):
+`todo_step` 1.7× (best), `commit` 1.3×, `idle_gap` 1.3×, `subagent_done` 1.2×,
+`todos_done` 1.2×, `burn_rate` 1.1×, `stale_output` 1.0× (NO lift — hence
+`STALE_FRAC` 0.50→0.90), `tests_pass` 0.9×, `error_resolved` 0.6×
+(anti-predictive). A later (2026-06-17) corpus re-run reversed some thin-
+sample signals: `idle_gap` 7.5×, `tests_pass` 2.7× re-promoted; `burn_rate`
+0.9×, `subagent_done` 0.8× demoted; re-check before trusting as load-bearing.
 
-## Timing engine v2 (same session)
-
-`active_signals()` in `transcript_lib.py` is now the single registry
-shared by monitor and backtester. New signals beyond the original four
-(commit / tests_pass / todos_done / stale_output):
-
-| Signal | Fires when |
-|---|---|
-| `todo_step` | latest TodoWrite has >=1 completed AND >=1 pending — a plan step just closed |
-| `error_resolved` | errors occurred in the recent window but the trailing 3 results are clean — debug loop concluded |
-| `idle_gap` | >=30 min gap between recent entry timestamps — new sitting |
-| `subagent_done` | a Task (subagent) call returned recently — burst finished |
-| `burn_rate` | projected to hit autocompact within ~8 turns at the median per-turn context growth — predictive, fires even with no boundary |
-| `topic_shift` | the incoming prompt shares <20% content-word vocabulary with the recent window |
-
-`detect_phase` also updated: a concluded debug loop no longer classifies
-as `debugging`.
-
-Validation status: all of the above verified on synthetic transcripts
-only. The real-data backtest (open item #1) should now additionally
-report per-signal precision — which signals precede compactions that the
-user actually wanted vs. which nag.
-
-## Open items for the on-server session
-
-1. **Run the backtest on real data** (the step that was blocked):
-   `python3 analyze_corpus.py --root ~/.claude/projects --days 4 --json report.json`
-   Then apply its suggested `AUTOCOMPACTOR_SOFT_PCT` / `HARD_PCT`.
-2. **Verify schema assumptions against that machine's Claude Code
-   version**: usage-block field names, TodoWrite input shape, whether
-   compactions leave an explicit marker (the analyzer currently infers
-   them from >30% context drops; an explicit marker would be strictly
-   better). Also confirm `transcript_path` arrives non-empty in PreCompact
-   input — there are reported version-specific bugs.
-3. **Check signal hit rates**: the synthetic backtest flagged that
-   `todos_done` never fired — confirm whether that workflow actually uses
-   TodoWrite, and check the test-pass regex against the real test
-   runner's output format.
-4. **Settings registration on the target user account** — merge the
-   hooks stanza from README.md into `~/.claude/settings.json`. Do this
-   from the interactive session so the account owner sees and approves
-   what's being installed.
-5. **After a few days of live telemetry**: `analyze_corpus.py --events`
-   → look at `compaction_reduction_ratio` by phase to see which phase
-   addenda produce weak summaries, and tune.
-6. ~~Stretch: state-externalization~~ — superseded: built as the
-   artifact layer (`artifacts.py`), see decision record above. Remaining
-   refinement: continuous extraction via PostToolUse rather than
-   compaction-time-only, and project-local artifact storage option.
-7. Add per-signal precision to the backtest report (which new signals
-   are predictive vs. noisy on real sessions).
-8. Port smoke tests to pytest; add error-path tests (maturity gap vs.
-   pi-custom-compactor).
-
-## On-server session 2026-06-10 — status
-
-Open items 1–4 closed: real-data backtest ran (567 sessions, 633
-compactions, ~21M tokens late-compaction waste measured); schema verified
-(usage fields OK; compactions DO leave explicit `system/compact_boundary`
-+ `isCompactSummary` markers — backtester now uses them with drop-heuristic
-fallback); TodoWrite→TaskCreate/TaskUpdate and Task→Agent renames fixed in
-transcript_lib (todo_step/todos_done/subagent_done now fire on real data);
-hooks installed user-wide via install.py, legacy precompact-instructions.sh
-stanza removed (superseded). Thresholds applied in settings.json env per owner's spec (1M models,
-work at ~200k, ENFORCED 400k max): CLAUDE_CODE_AUTO_COMPACT_WINDOW
-lowered 650000→400000 so native autocompact enforces the ceiling;
-AUTOCOMPACTOR_WINDOW=400000, SOFT_PCT=0.5 (200k), HARD_PCT=0.75 (300k),
-STALE_FRAC=0.90.
-Trigger semantics confirmed from the CLI binary (2.1.170): the effective
-autocompact window is min(CLAUDE_CODE_AUTO_COMPACT_WINDOW, model max
-window), and it fires "approaching" that limit — observed floor on 200k
-models is ~135k (≈65k reserve), so a 400k ceiling should trigger
-~320-335k; HARD_PCT=0.75 (300k) keeps the hard nag ahead of it. Live
-precompact telemetry records context_tokens at each auto trigger —
-confirm with `analyze_corpus.py --events` after a few days.
-
-Item #7 (per-signal precision) DONE — backtester reports precision
-(compaction within 50k-token lead after firing) with a signal-agnostic
-baseline for lift, split by trigger via compactMetadata (which also
-provides authoritative preTokens/postTokens, now used). 14-day results
-(1,684 sessions, 1,568 compactions): todo_step 1.7x lift (best); commit
-1.3x; idle_gap 1.3x; subagent_done 1.2x; todos_done 1.2x; burn_rate 1.1x;
-stale_output 1.0x (NO lift — fires at 85% of evaluated points; hence
-STALE_FRAC 0.50→0.90); tests_pass 0.9x and error_resolved 0.6x
-(anti-predictive — debug conclusions precede continued work, not
-compaction; left in registry, candidates for demotion). True median
-reduction per compaction is 88% (from postTokens). Measured
-late-compaction waste: ~80.7M tokens / 14 days. Caveat: precision vs
-mostly-AUTO compactions measures context momentum, not boundary quality;
-the manual-compact column (n=81) is the truer wantedness label but thin.
-Smoke tests now scrub inherited AUTOCOMPACTOR_* env (live settings.json
-tuning leaks into child processes and broke fixture expectations).
-
-Item #8 (pytest port) DONE — tests/test_autocompactor.py, 27 cases:
-unit coverage for parsing/signals/phases/task-tool synthesis/artifacts/
-compaction detection plus the hook contract (hooks exit 0 on empty,
-malformed, and missing-transcript input — never raise into the hook
-path). smoke_test.sh kept as the zero-deps runner.
-
-Item #6 refinement (continuous artifact extraction) DONE — the monitor
-merge-persists artifacts on every prompt (artifacts.merge(): union with
-new-supersedes-old, max() on error counts), so mechanically extracted
-facts survive autocompacts that arrive with no warning. PreCompact also
-merges instead of overwriting.
-
-Per-session effective-window clamp added to the monitor: sessions whose
-peak observed context is <190k are evaluated against a 200k window even
-when AUTOCOMPACTOR_WINDOW is tuned to 400k for 1M models — first nightly
-eval caught that 53/53 of a day's auto-compactions fired on 200k-window
-sessions the 400k thresholds never engaged with.
-
-Nightly self-evaluation (nightly_eval.py) registered in crontab
-(03:30, marker `# autocompactor-nightly`, logs to
-~/.claude/autocompactor/nightly.log): runs pytest+smoke as a
-schema-drift canary, detects CLI version changes, backtests the last
-day, aggregates hook telemetry, checks the purpose metric (fraction of
-auto-compactions with no advance recommendation — flags >50%), checks
-ceiling enforcement, writes reports/nightly-YYYY-MM-DD.md +
-nightly_history.jsonl, prunes artifacts/backups/reports older than 30
-days. Verified under a cron-equivalent minimal environment.
-
-Remaining: topic_shift precision (needs prompt replay at sample
-points), possible demotion of error_resolved/tests_pass from the gating
-set (anti-predictive, but cheap at high occupancy). Review
-reports/nightly_history.jsonl trends after a week.
-
-## Session 2026-06-10 (later) — 200k ceiling, every-turn cheapness, floor audit
-
-Owner's directive: >80% of dollar spend is cached reads; compact far
-more often, keep context as low as possible, and make sure a hook
-evaluated every turn stays cheap when there's nothing to do.
-
-Ceiling lowered 400k→200k. CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000;
-monitor retuned to AUTOCOMPACTOR_WINDOW=200000, SOFT_PCT=0.5 (100k),
-HARD_PCT=0.62 (124k), COOLDOWN=20000. Trigger-model evidence from
-day-one nightly: yesterday's max auto preTokens was 336,512 ≈ 400,000 −
-63,488, confirming the absolute-reserve model (window − ~65k) at the
-one point where it diverges from the proportional model (0.675×window).
-Both models predict ~135k at a 200k ceiling, so HARD 124k stays ahead
-of native autocompact either way. Verify against tomorrow's nightly —
-the first clean read under the new ceiling.
-
-Every-turn cheapness, two mechanisms (both in context_monitor.py,
-tested):
-* Min-savings guard — est_reclaim = context − AUTOCOMPACTOR_POST_FLOOR
-  (70k default; measured post-compaction median here is 69,043, n=494).
-  Below AUTOCOMPACTOR_MIN_SAVINGS (30k) no recommendation fires: a
-  compaction below ~100k context stalls 30–60s to reclaim almost
-  nothing. This is why "compress as low as 100k" is the practical
-  floor — the post-compaction footprint plus minimum worthwhile
-  savings, not a tuning preference.
-* Bounded tail parsing — transcripts over AUTOCOMPACTOR_MAX_FULL_PARSE_MB
-  (8) parse only from the last compact_boundary
-  (find_last_boundary_offset: chunked reverse scan, JSON-verified so
-  transcripts that merely DISCUSS the marker don't match, 4096-byte
-  chunk overlap). peak_ctx is carried in the per-session state file so
-  the <190k → 200k window clamp survives tail-only views. Fixture
-  timing: rich fixture parse ~3ms; an 8MB full parse ~300ms; tail
-  parse returns that to single-digit ms.
-
-Nightly gained three watches (nightly_eval.py): (a) expected-trigger
-drift — auto preTokens median vs 0.675×min(ceiling,200k), note at
->25k deviation; (b) rapid-refill-breaker suspects — sessions with ≥2
-autos whose post-last-compaction peak exceeds trigger+40k with no
-further compaction (the tengu_auto_compact_rapid_refill_breaker
-symptom: autocompact silently disabled); (c) native microcompaction
-marker "[Old tool result content cleared]" scanned in <26h transcripts
-(statsig-gated off for this account today; the watch catches it
-turning on) — the autocompactor dev project dir is excluded because
-its sessions discuss the literal string. analyze_corpus.py records
-post_last_compaction_peak per session to feed (b). Day-one run: 131
-sessions, 83 compactions, breaker suspects 0, micro markers 0;
-trigger-drift and ceiling notes fired correctly-but-transitionally
-(yesterday's data ran under the 400k ceiling: median auto pre 171,831,
-max 336,512).
-
-Day-one signal precision (nightly backtest, n=83): subagent_done
-89%/3.8x lift, burn_rate 54%/2.3x, commit 42%/1.8x, todo_step
-38%/1.6x, todos_done 26%/1.1x, baseline 24%, stale_output 22%/0.9x
-(below baseline even at STALE_FRAC 0.90), tests_pass 9%/0.4x,
-error_resolved 3%/0.1x, idle_gap 0%. Demotion candidates firming up:
-error_resolved, tests_pass, idle_gap; watch stale_output.
-
-Context-floor audit (the biggest lever: interactive sessions START at
-~53k median, >half of every cached read at ~100k occupancy). Probes
-with `claude -p` in scratch dirs: A default = 35,184 first-call
-tokens; B empty --mcp-config = 41,162; D empty MCP + disableAllHooks =
-38,203. NON-monotonic (B>A) — theory: tool-schema deferral only
-engages above a tool-count threshold, so removing MCP servers inlines
-the remaining schemas; component-toggle probing is unreliable,
-direct file sizes are the audit basis. Clean deltas: hooks ≈ 2,959
-tokens (B→D); interactive-only surface (claude.ai remote MCPs etc.,
-absent headless) ≈ 12–18k. Measured files: ~/.claude/CLAUDE.md
-24,464B (~6.1k tok); subagent-models.md SessionStart injection
-12,944B (~3.2k tok); project CLAUDE.md 3,269B; RTK.md 964B. Cut list
-proposed to owner (global CLAUDE.md diet, injection→digest, serena
-disable-until-configured, plugin pruning); cuts are owner-approval
-gated. Probe leftovers to clean: /home/grojas/floor-probe-{b,c},
-~/.claude/projects/-home-grojas-floor-probe-*. Note --bare is
-unusable on this box (requires ANTHROPIC_API_KEY; OAuth-only here),
-and --mcp-config is variadic — pass a file path, never inline JSON
-followed by the prompt.
-
-Tests: 37 pytest cases + smoke green. New coverage: boundary-offset
-real-vs-mention/none/across-chunks, min-savings suppression, tail
-parse after boundary, carried-peak clamp. Fixture note: the rich
-fixture sits at ~84k context, below the default guard threshold —
-tests and smoke pin POST_FLOOR=50000/MIN_SAVINGS=20000; enlarge
-fixtures instead if that ever chafes.
-
-Signal demotion executed (owner-approved same day): error_resolved,
-tests_pass, idle_gap are observe-only — active_signals() still reports
-them (telemetry + backtester precision unchanged), but the monitor's
-recommendation gate and the backtester's recommendation replay filter
-them via transcript_lib.observe_only() (AUTOCOMPACTOR_OBSERVE_ONLY,
-default "error_resolved,tests_pass,idle_gap", empty = full gating).
-39 pytest cases + smoke green.
-
-Project moved 2026-06-10 to /srv/dev/ras/autocompactor (public repo
-github.com/rasatpetabit/autocompactor); settings.json hook paths and
-the nightly crontab entry updated to the new location. Local-only
-artifacts (report*.json, backtest logs, the handoff tgz, .serena/) are
-gitignored — backtest reports reference real session paths and must
-never be pushed.
-
-Floor cuts executed 2026-06-10 (all four owner-approved):
-
-* Serena disabled until configured: four serena-hooks groups removed
-  from ~/.claude/settings.json (backup
-  settings.json.bak-pre-serena-disable-20260610) and the MCP server
-  entry removed from ~/.claude.json (backup
-  .claude.json.bak-pre-serena-disable-20260610). Restore:
-  `claude mcp add serena -s user -- serena start-mcp-server
-  --context=claude-code --project-from-cwd` + restore the hooks from
-  the settings backup.
-* Global config SPLIT per owner directive: multi-agent standardizable
-  policy moved to ~/AGENTS.md (file-convention rule called out there
-  and in CLAUDE.md; hindsight block untouched); ~/.claude/CLAUDE.md is
-  now Claude-specific only (AUQ, masterplan contracts, fluffmods
-  block verbatim, Claude Code tooling) + @~/AGENTS.md import.
-  25,153 -> 12,401 B CLAUDE.md + 6,313 B AGENTS.md. Backups:
-  CLAUDE.md.bak-pre-diet-20260610, AGENTS.md.bak-pre-split-20260610.
-* Dispatch policy UPGRADED (owner correction 2026-06-10): sonnet is no
-  longer the fallback — Claude is reserved for Opus/Fable-tier work.
-  Sub-frontier routes to skynet-qwen (any tier) or codex-5.5 (medium
-  mechanical, high/xhigh demanding); if neither fits, that is an ERROR
-  CONDITION — halt and AskUserQuestion; sonnet only on explicit user
-  override. Applied to both refs/subagent-models.md and the digest.
-* Global CLAUDE.md diet: AUQ
-  enforcement sections kept at full strength (owner caveat: past diets
-  regressed AUQ) and EXTENDED with a "rejected AUQ = DISCUSS signal"
-  section — a declined/Esc'd AskUserQuestion ("The user doesn't want
-  to proceed with this tool use", 356 occurrences in transcripts) is a
-  talk request, not consent; batched answers alongside a rejection are
-  suspect (UI auto-advances); batch only independent questions. The
-  Stop hook (auq-guard.sh) already counts a rejected AUQ as an AUQ, so
-  no hook change was needed. fluffmods-managed block kept verbatim.
-* subagent-models SessionStart injection -> digest: full ref stays at
-  ~/.claude/refs/subagent-models.md; injection swapped to
-  refs/subagent-models-digest.md (12,944 -> 2,300 B, ~-2.7k tok),
-  rewritten as a mandatory numbered pre-dispatch checklist encoding
-  the upgraded policy (HAIKU FORBIDDEN; qwen/codex-5.5 for all
-  sub-frontier work; sonnet = ERROR CONDITION until user override;
-  enumerate-before-asserting-absence) per owner caveat "strengthen
-  without making them unnecessarily long".
-* Plugin prune: of 19 enabledPlugins, transcript-wide invocation
-  counts showed 6 in active use (superpowers, masterplan, codex,
-  feature-dev, context7, cloudflare) — kept; 12 with zero invocations
-  disabled (claude-code-setup, claude-md-management, code-review,
-  code-simplifier, commit-commands, frontend-design, github, gemini,
-  pragma, rust-analyzer-lsp, security-guidance, skill-creator);
-  playwright was already off. Re-enable = one settings.json flip.
-
-Combined CLAUDE.md+digest cut ~5.2k tok off the ~53k interactive
-floor (~10% of all cache-read volume) before plugin savings.
-
-Open: confirm ~135k auto trigger under the 200k ceiling (tomorrow's
-nightly); topic_shift precision via prompt replay; --events
-reduction-by-phase after a few live days.
-
-## Pi harness (2026-06-10) — architecture, actuate memo, deferrals
-
-### Architecture summary
-
-> **SUPERSEDED 2026-06-15 (v1.0.0 — `src/` package reorg):** the flat layout
-> described below was intentionally converted to a real `src/autocompactor/`
-> package with thin `src/*.py` entrypoint shims. Installed Claude hooks,
-> the nightly cron, and the Pi extension now point at `src/<entry>.py` and
-> must be re-registered on every host (`python3 src/install.py --cron`,
-> `python3 src/install_pi.py`). The original "zero moves / byte-stable"
-> invariant text is preserved below as the historical rationale for the
-> seam design that made this reorg mechanical.
-
-Additive adapters, zero moves of existing files — the Claude install base
-(settings.json hook entry points) stays byte-stable. `TranscriptStats` is
-the normalized model; everything downstream of it (`active_signals`,
-`detect_phase`, `build_preservation_instructions`, `artifacts.extract`)
-was already harness-agnostic, so Pi support is a new producer plus
-plumbing:
-
-* `statedir.py` — harness-namespaced state roots: `claude` →
-  `~/.claude/autocompactor` (unchanged), `pi` → `~/.autocompactor/pi`;
-  `AUTOCOMPACTOR_STATE_DIR` overrides all (tests pin it).
-* `pi_session_lib.py` — Pi v3 tree-format JSONL → `TranscriptStats`
-  (leaf-path walk, active segment = entries after the last
-  `type:"compaction"` on the path).
-* `pi_bridge.py` — never-raise JSON CLI (`evaluate`/`prepare`/`reinject`),
-  the ONE brain shared with the Claude hooks: same signal registry, same
-  decision model, judged against the Pi effective window
-  (`contextWindow − reserveTokens`). No stdin channel exists in
-  `pi.exec`, so all inputs are CLI flags.
-* `pi/autocompactor.ts` — logic-minimal shim: `agent_end` zero-spawn
-  pre-gate → bridge `evaluate` → advise or actuate;
-  `session_before_compact` → `prepare` fire-and-forget (backup +
-  artifacts + founding-goal restatement); `session_compact` → `reinject`
-  digest via `pi.sendMessage(..., {deliverAs:"nextTurn"})`. Every handler
-  try/caught — a broken bridge can never break a Pi compaction.
-* `install_pi.py` — copy-with-rewrite (NOT symlink: the
-  `__AUTOCOMPACTOR_BRIDGE_PATH__` placeholder is baked to this checkout's
-  `pi_bridge.py`) into `~/.pi/agent/extensions/`, plus a version pin and
-  a `--status` doctor.
-
-Telemetry: `stats.log_event(..., harness="pi")` routes to the pi state
-dir; rows stay content-free. Pi thresholds read `AUTOCOMPACTOR_PI_<NAME>`
-first, then `AUTOCOMPACTOR_<NAME>`, then the Claude defaults — do NOT
-tune Pi-specific values until live Pi telemetry exists.
+**Pi signal gating** (`OBSERVE_ONLY`) is the conservative set: because Pi
+actuates, it retains `subagent_done`/`commit` as strong gates (design trap
+#4). `error_resolved`/`tests_pass`/`idle_gap` are observe-only (anti-
+predictive on real corpora); `active_signals()` still reports them for
+telemetry, but they never justify a recommendation.
 
 ### Verified ground-truth pins (do not re-derive)
 
-* Validated against `@earendil-works/pi-coding-agent` **0.79.9**
-  (installed at `~/.npm-global/lib/node_modules/`); every API name in the
-  shim was checked against its `dist/core/extensions/types.d.ts` before
-  writing. Original validation baseline was 0.79.1; live-validated pin is
-  now 0.79.9. `install_pi.py` re-pins the version observed at install time.
-* This host pins Pi reserveTokens to **40,000** in `~/.pi/agent/settings.json`
-  (Pi default is 16,384). The bridge's `RESERVE_FALLBACK = 40_000`
-  mirrors the host pin; the shim passes the live `contextWindow` through
-  and the effective window is `contextWindow − reserve`.
-* `pi.exec` has NO stdin channel — bridge inputs are flags only.
+- Validated against `@earendil-works/pi-coding-agent` **0.79.9**
+  (`~/.npm-global/lib/node_modules/`); every API name in the shim was checked
+  against its `dist/core/extensions/types.d.ts`. `install_pi.py` re-pins the
+  version observed at install time.
+- This host pins Pi `reserveTokens` to **40,000** in
+  `~/.pi/agent/settings.json` (Pi default is 16,384). The bridge's
+  `RESERVE_FALLBACK = 40_000` mirrors the host pin; effective window is
+  `contextWindow − reserve`.
+- `pi.exec` has NO stdin channel — bridge inputs are flags only.
+- The ~69k post-compaction floor is WINDOW-INDEPENDENT (small windows are
+  physics-protected; the target curve lands at ≥256k).
+- `native_ceiling` is a CAP (`effective=min(resolved, native_ceiling)`), not a
+  full window replacement — chose cap over replacement so a deliberate
+  aggressive WINDOW is not loosened.
 
-### Flip-to-actuate decision memo
+### Founding-goal directive (commits 0fc80d3 + 94ee3a8)
 
-> **SUPERSEDED (2026-06-22):** `actuate` is now the shipped default
-> (`MODE=actuate` in `config.json`; `AUTOCOMPACTOR_PI_MODE` defaults to
-> `actuate`). The two bugs that previously gated actuation behind a telemetry
-> burn-in — a native-compaction artifact race and a sticky reentrancy flag —
-> were fixed in the same change set. The historical memo below is preserved as
-> the decision record for why a burn-in was originally required and how the
-> decision was reached.
+Compaction instructions preserve user input prompts VERBATIM (especially
+initial ones). `TranscriptStats.initial_user_prompts` captures the first 3
+genuine human prompts; the FOUNDING GOAL section leads every post-compaction
+artifact digest (top of PRIORITY, old-wins merge so it survives unlimited
+passes); `BASE_SCHEMA` carries prior summaries' GOAL/CONSTRAINTS forward
+unchanged; Pi capture walks the full leaf path pre-compaction. Owner
+directive: restate and reinforce the founding goal during compression to
+prevent high-end models from forgetting their original purpose after many
+passes.
 
-**[Historical — as of 2026-06-10, superseded above]** Advise shipped first;
-the flip-to-actuate was deferred pending Pi telemetry burn-in.
-`AUTOCOMPACTOR_PI_MODE=advise` (default at the time) only posted an
-`autocompactor.advice` message; `actuate` lets the shim call
-`ctx.compact({customInstructions})` itself — Pi is the first harness
-where we hold an actuator, so it earned a burn-in: flip only after ≥1 day
-of `monitor_eval` rows (harness `"pi"`) showed sane occupancy/recommend
-behavior at the 40k reserve. Reentrancy: a `selfTriggered` flag blocks a
-concurrent second compact while one is in flight (verified by
-`pi/test/extension.test.mjs` — the second boundary degrades to advice;
-`onComplete`/`onError` reset the flag). Native-auto interception
-(cancel-and-retrigger in `session_before_compact`) is separately gated
-`AUTOCOMPACTOR_PI_INTERCEPT=1`, default OFF, and auto-disables when
-`@davidorex/pi-custom-compactor` appears in Pi settings `packages[]`
-(coexist passively). Even with both gates off, `prepare` still runs
-fire-and-forget on every native compaction, so backups + artifacts +
-founding-goal restatement are never lost.
+### Config: single source of truth
 
-### Deferred / out of scope (recorded, not scheduled)
-
-* Claude Code plugin packaging (Workstream B stage 2) — revisit now that
-  the Pi file layout is settled.
-* Native-auto interception default-on — needs actuate burn-in first.
-* Pi backtester (`analyze_corpus.py --harness pi`) — the Pi trigger is
-  exact (`contextWindow − reserve`), so the backtester adds value only
-  after live telemetry accumulates.
-* pi-custom-compactor `compactionSpec` integration — package not
-  installed here; passive coexistence (skip interception) is implemented.
-* Nightly Pi-version canary — extend `nightly_eval.py` to diff the
-  `install_pi.py` version pin against the live package and flag drift,
-  as it already does for the Claude CLI version.
-* Pi founding-capture parity test — `tests/test_pi_session_lib.py` is
-  wave-2 scoped; MAIN gained `initial_user_prompts` capture (94ee3a8)
-  after the worktree forked. `pi_bridge.py` uses getattr-safe access, so
-  the merge is safe either way; add the test post-merge.
-
-## Session 2026-06-10 (later still) — pi-harness merged + live Pi tuning
-
-* masterplan `pi-harness` finished: merge commit e3301c4 on main, bundle
-  archived, worktree removed. Finish verify: 45 commands, 44 pass; the
-  single red was the known-broken literal `node --test pi/test` (node 22
-  resolves a positional directory as CJS → MODULE_NOT_FOUND); its
-  file-explicit equivalent passed 9/9 in the same list. Full matrix on
-  merged main: 81 pytest + both smokes + 9/9 node tests green.
-* Live shim repointed: `python3 install_pi.py` re-run from MAIN —
-  baked bridge path now `/srv/dev/ras/autocompactor/pi_bridge.py`,
-  `--status` all-OK, pin 0.79.1.
-* Owner directive: Pi runs the SAME parameters as Claude. Pi has no
-  settings-level env, so a managed `# >>> autocompactor-pi >>>` block in
-  `~/.bashrc` exports the Claude-tuned set as `AUTOCOMPACTOR_PI_*`
-  (SOFT_PCT 0.5, HARD_PCT 0.62, STALE_FRAC 0.90, COOLDOWN 20000, plus
-  the default-equal keys pinned explicitly: POST_FLOOR 70000,
-  MIN_SAVINGS 30000, MAX_FULL_PARSE_MB 8, OBSERVE_ONLY defaults,
-  ARTIFACT_BUDGET 1500). WINDOW deliberately NOT exported — Pi derives
-  the exact effective window from `ctx` (contextWindow − reserveTokens
-  = 160k here), better than the static 200000. If the Claude tuning in
-  `~/.claude/settings.json` changes, update the bashrc block to match
-  (two sources, manual sync — candidate for install_pi.py --env later).
-* Verified live: probe `pi -p` through an interactive shell with inline
-  PI overrides → fresh `monitor_eval` row via the MAIN bridge with
-  `est_reclaim = context − POST_FLOOR(0)`, proving shell→Pi→bridge env
-  inheritance end-to-end.
+`config.json` owns all tuning (single namespace; `config.local.json` is the
+gitignored site-local overlay). `config_lib.py` reads env-first with
+`AUTOCOMPACTOR_*` overrides; harness sections wholly outrank top-level keys.
+`AUTOCOMPACTOR_CONFIG` env var: alternate config path, or empty for none
+(tests/smokes use it for hermeticity). The `target(W)` SOFT curve
+(`F + a[profile]·sqrt(W − F)`, `_A={economy:130, balanced:188, lazy:266}`)
+replaces flat `SOFT_PCT` on the Claude main path; Pi stays on pinned flat
+soft (actuate, conservative).
 
 ## Known limitations
 
 * Transcript JSONL schema is not a public API; re-run smoke tests after
-  Claude Code upgrades.
-* Occupancy estimate ignores the fixed system-prompt share; thresholds
-  are approximate by design — `/context` is ground truth.
-* Compaction detection in the backtester is heuristic (usage-drop);
-  eyeball a few detections against raw JSONL before trusting aggregates.
-* On subscription billing this saves quota, not dollars; on API billing
-  both.
+  Claude Code / Pi upgrades.
+* Occupancy estimate ignores the fixed system-prompt share; thresholds are
+  approximate by design — `/context` is ground truth.
+* Compaction detection in the backtester is heuristic (usage-drop); eyeball a
+  few detections against raw JSONL before trusting aggregates.
+* On subscription billing this saves quota, not dollars; on API billing both.
 
 ## Smoke test (run after any change)
-
-The Claude hook smoke commands recorded here originally were removed in the
-Pi-only pivot. The current gate is:
 
 ```bash
 python3 -m pytest tests/ -q              # Python core (100 cases)

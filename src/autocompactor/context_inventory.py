@@ -50,9 +50,11 @@ class ContextItem:
     tokens: int          # chars/4 estimate
     age_turns: int        # turns since this item was appended
     last_read_turn: int  # last turn a read/grep touched a path in this item (-1 never)
+    headline: str = ""   # short first-line summary for the deep readout
     dormant: bool = False
     redundant: bool = False
     reclaimable: bool = False
+    is_error: bool = False
 
 
 @dataclass
@@ -63,6 +65,8 @@ class FloorBreakdown:
     tools_system: int = 0    # probe-decomposed per-package sum when include_probe,
                              # else the honest single "tools+system (fixed)" bucket
     true_residual: int = 0   # total − everything attributed (honesty bucket)
+    per_package: dict = field(default_factory=dict)  # {pkg: tokens} from probe
+    measured_at: str = ""    # ISO-8601 the probe was measured (readout)
 
 
 @dataclass
@@ -84,6 +88,8 @@ class ContextInventory:
     dynamic: list = field(default_factory=list)        # [ContextItem]
     dynamic_dormant_tokens: int = 0
     categories: dict = field(default_factory=dict)     # {tool,assistant,prompts,summary}
+    tool_rollup: list = field(default_factory=list)    # [{name,tokens,stale,items,largest}]
+    skill_names: list = field(default_factory=list)    # loaded skill names (readout)
     reclaim: ReclaimEstimate = field(default_factory=ReclaimEstimate)
     degraded: bool = False   # True when the never-raise fallback built this
     note: str = ""           # observable fallback label
@@ -117,11 +123,13 @@ def build_inventory(active_prefix, total_tokens, window, *, include_probe=True):
         st = pi_session_lib.analyze_active_prefix(active_prefix, active_prefix,
                                                    recent_window=30,
                                                    compaction_count=0)
-        dynamic = _build_dynamic_ledger(active_prefix)
+        dynamic, _tnid = _build_dynamic_ledger(active_prefix)
         floor = _build_floor(st, total, include_probe=include_probe)
         cats = _rollup_categories(st)
         dormant_tokens = sum(it.tokens for it in dynamic if it.dormant)
         reclaim = _build_reclaim(dynamic, cats, total, floor)
+        tool_rollup = _rollup_tools(st, dynamic)
+        skill_names = list(getattr(st, "skill_names", []) or [])
         return ContextInventory(
             total_tokens=total,
             window=win,
@@ -130,6 +138,8 @@ def build_inventory(active_prefix, total_tokens, window, *, include_probe=True):
             dynamic=dynamic,
             dynamic_dormant_tokens=dormant_tokens,
             categories=cats,
+            tool_rollup=tool_rollup,
+            skill_names=skill_names,
             reclaim=reclaim,
             degraded=False,
             note="",
@@ -245,14 +255,18 @@ def _build_dynamic_ledger(active_prefix):
             kind = "assistant"
             tool_name = ""
             text = ""
+            is_error = False
             if role == "toolResult":
                 kind = "tool_result"
                 tool_name = str(tool_name_by_id.get(msg.get("toolCallId"), "tool") or "tool")
                 text = pi_session_lib._tool_result_text(msg)
+                is_error = bool(msg.get("isError"))
             elif role == "bashExecution":
                 kind = "tool_result"
                 tool_name = "bash"
                 text = str(msg.get("output", "") or "")
+                is_error = bool(msg.get("cancelled")) or (
+                    msg.get("exitCode") not in (None, 0))
             elif role == "user":
                 kind = "user"
                 text = pi_session_lib._message_text(msg)
@@ -286,12 +300,40 @@ def _build_dynamic_ledger(active_prefix):
             items.append(ContextItem(
                 kind=kind, tool_name=tool_name, tokens=tokens,
                 age_turns=age, last_read_turn=last_read,
+                headline=_headline_for(kind, tool_name, text, is_error=is_error),
+                is_error=is_error,
             ))
         except Exception:
             continue
     # Classify dormancy/redundancy/reclaimability from config thresholds.
     _classify(items, total_turns=n)
-    return items
+    return items, tool_name_by_id
+
+
+def _headline_for(kind, tool_name, text, *, is_error=False):
+    """Short first-line summary for the deep readout (spec §5/§11). Content-free
+    for tool_result (path/cmd only), one short clause for assistant/user."""
+    if not text:
+        return ""
+    t = text.strip()
+    # tool_result: prefer the structural hint — file path, command, or first
+    # non-empty line — never raw content bytes.
+    if kind == "tool_result":
+        first = ""
+        for ln in t.splitlines():
+            s = ln.strip()
+            if s and not s.startswith(("```", "---", "+++", "@@")):
+                first = s
+                break
+        if is_error:
+            return ("ERR: " + first)[:72]
+        return (first or "")[:72]
+    # assistant/user: first non-empty line, trimmed.
+    for ln in t.splitlines():
+        s = ln.strip()
+        if s:
+            return s[:72]
+    return ""
 
 
 def _classify(items, *, total_turns):
@@ -323,12 +365,17 @@ def _classify(items, *, total_turns):
 
 def _build_floor(st, total, *, include_probe):
     """LIVE-measure context_files + skills_meta; read tools_system from
-    floor-probe.json when include_probe, else the honest single bucket."""
+    floor-probe.json when include_probe, else the honest single bucket.
+    Also surfaces per_package + measured_at on the floor for the deep readout."""
     context_files = _measure_context_files_chars() // CHARS_PER_TOKEN
     skills_meta = max(int(getattr(st, "skill_chars", 0)), 0) // CHARS_PER_TOKEN
     tools_system = 0
+    per_package = {}
+    measured_at = ""
     if include_probe:
         tools_system = _read_probe_tools_tokens()
+        per_package = _probe_per_package()
+        measured_at = _probe_measured_at()
     # If no probe data, leave tools_system=0; true_residual absorbs it as the
     # honest single "tools+system (fixed)" bucket (spec §4/§7).
     attributed = context_files + skills_meta + tools_system
@@ -347,6 +394,8 @@ def _build_floor(st, total, *, include_probe):
         skills_meta=skills_meta,
         tools_system=tools_system,
         true_residual=true_residual,
+        per_package=per_package,
+        measured_at=measured_at,
     )
 
 
@@ -399,6 +448,31 @@ def _rollup_categories(st):
         "prompts": prompts,
         "summary": summary,
     }
+
+
+def _rollup_tools(st, dynamic):
+    """Per-tool rollup from the live dynamic ledger: {name, tokens, stale,
+    items, largest_tokens}. Reuses ContextItem tokens (chars/4) so the rollup
+    reconciles to the dynamic ledger, not to transcript_lib's separate
+    tool_chars_by_name counters (which double-count nested error text)."""
+    by_name = {}
+    for it in dynamic:
+        if it.kind != "tool_result":
+            continue
+        name = (it.tool_name or "tool").strip().lower() or "tool"
+        rec = by_name.setdefault(name, {"name": name, "tokens": 0,
+                                          "stale": 0, "items": 0,
+                                          "largest_tokens": 0,
+                                          "largest_headline": ""})
+        rec["tokens"] += it.tokens
+        rec["items"] += 1
+        if it.dormant:
+            rec["stale"] += it.tokens
+        if it.tokens > rec["largest_tokens"]:
+            rec["largest_tokens"] = it.tokens
+            rec["largest_headline"] = it.headline
+    return [by_name[k] for k in sorted(by_name,
+            key=lambda k: by_name[k]["tokens"], reverse=True)]
 
 
 def _build_reclaim(dynamic, cats, total, floor):
@@ -466,49 +540,152 @@ def _degraded_inventory(total_tokens, window, note):
 # ---------------------------------------------------------------------------
 
 
+def _k(n: int) -> str:
+    """Compact size: 56k / 1.2k / 0."""
+    if n >= 1000:
+        return f"{round(n/1000)}k"
+    if n >= 100:
+        return f"{n}"
+    return f"{n}"
+
+
+def _bar(tok: int, total: int, width: int = 24) -> str:
+    """1-block-per-~1% bar capped at `width`. For the floor/dynamic share."""
+    if total <= 0:
+        return "" * width
+    frac = min(tok / total, 1.0)
+    filled = round(frac * width)
+    return "█" * filled + "░" * (width - filled)
+
+
 def render_report(inv: ContextInventory) -> str:
-    """Content-free report: token counts + category/tool/package names only.
-    CONSUMES ReclaimEstimate.ranking verbatim — never re-ranks/recomputes."""
-    lines = []
-    lines.append(f"Context inventory  total={inv.total_tokens:,}t  "
-                 f"window={inv.window:,}t  occupancy={inv.occupancy:.0%}")
+    """Deep, aligned context-window breakdown (spec §5/§11).
+
+    Three layers, column-aligned, compact "56k" sizing on every figure:
+      1. FLOOR (fixed, survives /compact) — per-package tool schema list when
+         probe data exists, else the honest residual bucket.
+      2. DYNAMIC (per /compact) — per-tool rollup then per-item ledger with
+         dormancy/reclaim flags and a one-line headline for each item.
+      3. RECLAIM — verbatim ranking + post_floor_estimate.
+    Content-free: counts + category/tool/package/skill names + first-line
+    hints only. CONSUMES ReclaimEstimate.ranking verbatim — never re-ranks."""
+    L = []
+    total = inv.total_tokens
+    L.append(f"Context inventory   total {_k(total)}t   "
+             f"window {_k(inv.window)}t   occupancy {inv.occupancy:.0%}")
     if inv.degraded:
-        lines.append(f"  (degraded: {inv.note})")
+        L.append(f"  (degraded: {inv.note})")
+    L.append("")
+
+    # --- FLOOR ----------------------------------------------------------
     f = inv.floor
-    lines.append("Floor (fixed, survives /compact):")
-    lines.append(f"  context_files  {f.context_files:,}t  (measured live)")
-    lines.append(f"  skills_meta    {f.skills_meta:,}t  (measured live)")
-    if f.tools_system > 0:
-        lines.append(f"  tools_system   {f.tools_system:,}t  (probe)")
+    floor_total = (f.context_files + f.skills_meta + f.tools_system
+                   + f.true_residual)
+    L.append(f"FLOOR  {_k(floor_total)}t fixed — survives /compact")
+    rows = []
+    if f.per_package or f.tools_system > 0:
+        # tools_system decomposed into per-package schema rows when the probe
+        # supplied per_package; otherwise show the single tools+system total.
+        if f.per_package:
+            for pkg in sorted(f.per_package, key=lambda k: f.per_package[k],
+                              reverse=True):
+                rows.append((f"  tools+system · {pkg}", f.per_package[pkg],
+                            f"tool-schema package"))
+            # probe may clamp below the per-package sum; show the residual tools
+            # block only if there's headroom above the named packages.
+            pkg_sum = sum(f.per_package.values())
+            if f.tools_system > pkg_sum:
+                rows.append(("  tools+system · (other)",
+                             f.tools_system - pkg_sum,
+                             "probe residual; unnamed packages"))
+        else:
+            rows.append(("  tools+system (probe)", f.tools_system,
+                         "probe total; per-package names absent"))
+        if f.true_residual:
+            rows.append(("  true_residual (honesty)", f.true_residual,
+                         "unattributed fixed outside the probe"))
     else:
-        lines.append("  tools_system   (no probe — in true_residual)")
-    lines.append(f"  true_residual  {f.true_residual:,}t  "
-                 "(honesty bucket; tools+system fixed when no probe)")
-    lines.append("Dynamic ledger:")
-    if not inv.dynamic:
-        lines.append("  (no items)")
-    for it in inv.dynamic:
-        fl = []
-        if it.dormant:
-            fl.append("dormant")
-        if it.redundant:
-            fl.append("redundant")
-        if it.reclaimable:
-            fl.append("reclaimable")
-        tag = (" [" + ",".join(fl) + "]") if fl else ""
-        name = f" ({it.tool_name})" if it.tool_name else ""
-        lines.append(f"  {it.kind}{name}  {it.tokens:,}t  age={it.age_turns}{tag}")
-    lines.append(f"Dynamic dormant tokens: {inv.dynamic_dormant_tokens:,}t")
-    lines.append(f"Reclaim now: {inv.reclaim.reclaimable_now:,}t  "
-                 f"post_floor_estimate: {inv.reclaim.post_floor_estimate:,}t")
+        rows.append(("  tools+system (fixed)", f.tools_system,
+                     "probe missing; in true_residual if 0"))
+        rows.append(("  true_residual (honesty)", f.true_residual,
+                     "unattributed fixed; tools+system live here w/o probe"))
+    rows.append(("  context_files (AGENTS.md etc.)", f.context_files,
+                 "measured live"))
+    rows.append(("  skills_meta", f.skills_meta, "measured live"))
+    rows.append(("  carried summary", inv.categories.get("summary", 0),
+                 "prior /compact carry"))
+    w = max((len(r[0]) for r in rows), default=0)
+    for label, tok, note in rows:
+        L.append(f"{label:<{w}}  {_k(tok):>5}t  {_bar(tok, total)}  {note}")
+    if inv.skill_names:
+        L.append(f"  loaded skills ({len(inv.skill_names)}): "
+                 + ", ".join(inv.skill_names))
+    if f.measured_at:
+        L.append(f"  probe measured {f.measured_at[:10]}")
+    L.append("")
+
+    # --- DYNAMIC --------------------------------------------------------
+    dyn_total = sum(it.tokens for it in inv.dynamic)
+    L.append(f"DYNAMIC  {_k(dyn_total)}t per /compact — "
+             f"{len(inv.dynamic)} items · dormant {inv.dynamic_dormant_tokens}t")
+
+    # per-tool rollup
+    if inv.tool_rollup:
+        L.append("")
+        L.append("  per-tool output:")
+        w = max(len(r["name"]) for r in inv.tool_rollup)
+        for r in inv.tool_rollup:
+            stale_pct = (r["stale"] / r["tokens"] * 100) if r["tokens"] else 0.0
+            L.append(f"    {r['name']:<{w}}  {_k(r['tokens']):>5}t  "
+                     f"{_bar(r['tokens'], dyn_total or 1)}  "
+                     f"{r['items']:>3} items · {stale_pct:2.0f}% dormant")
+            if r["largest_headline"]:
+                L.append(f"      largest {r['largest_headline'][:60]}")
+
+    # category summary
+    cats = inv.categories
+    L.append("")
+    L.append("  by category:")
+    for k in ("tool", "assistant", "prompts", "summary"):
+        v = cats.get(k, 0)
+        L.append(f"    {k:<10} {_k(v):>5}t  {_bar(v, total)}")
+
+    # per-item ledger (compact, top-N by tokens)
+    if inv.dynamic:
+        L.append("")
+        L.append("  per-item ledger (top by tokens):")
+        ordered = sorted(inv.dynamic, key=lambda it: it.tokens, reverse=True)
+        for it in ordered[:25]:
+            fl = []
+            if it.dormant:
+                fl.append("dorm")
+            if it.redundant:
+                fl.append("dup")
+            if it.reclaimable:
+                fl.append("reclaim")
+            if it.is_error:
+                fl.append("ERR")
+            tag = f" [{','.join(fl)}]" if fl else ""
+            name = f"{it.kind}" + (f"/{it.tool_name}" if it.tool_name else "")
+            age = f"age{it.age_turns}"
+            L.append(f"    {name:<22} {_k(it.tokens):>5}t {age:>5}{tag}")
+            if it.headline:
+                L.append(f"      → {it.headline[:70]}")
+        if len(ordered) > 25:
+            L.append(f"    … {len(ordered)-25} more item(s)")
+    else:
+        L.append("  (no dynamic items)")
+    L.append("")
+
+    # --- RECLAIM --------------------------------------------------------
+    L.append(f"RECLAIM  ~{_k(inv.reclaim.reclaimable_now)}t reclaimable now "
+             f"· post-floor estimate {_k(inv.reclaim.post_floor_estimate)}t")
     if inv.reclaim.ranking:
-        lines.append("Reclaim ranking (consumed verbatim; readout advisory):")
+        w = max(len(r["bucket"]) for r in inv.reclaim.ranking)
         for r in inv.reclaim.ranking:
-            lines.append(f"  {r['bucket']:<28} {r['tokens']:>10,}t   "
-                         f"lever: {r['reducible_by']}")
-    else:
-        lines.append("Reclaim ranking: (none)")
-    return "\n".join(lines)
+            L.append(f"  {r['bucket']:<{w}}  {_k(r['tokens']):>5}t   "
+                     f"lever: {r['reducible_by']}")
+    return "\n".join(L)
 
 
 def _parse(argv):
