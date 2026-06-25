@@ -254,3 +254,58 @@ def test_summary_chars_single_source():
 def test_skills_remain_zero_spec0():
     st = pi_session_lib.analyze(os.path.join(FIX, "pi", "linear.jsonl"))
     assert st.skill_chars == 0 and st.skill_names == []
+
+
+# --- Task 2 (context-window-analysis): per-item primitives hoisted to the
+# neutral home so context_inventory can reuse them with no import cycle. ---
+def test_interval_tokens_lives_in_pi_session_lib():
+    assert callable(pi_session_lib._interval_tokens)
+
+
+def test_compute_turn_flags_lives_in_pi_session_lib():
+    assert callable(pi_session_lib.compute_turn_flags)
+    # back-compat private alias also exposed
+    assert pi_session_lib._compute_flags is pi_session_lib.compute_turn_flags
+
+
+def test_compute_turn_flags_works_on_duck_typed_records():
+    """The neutral engine must NOT import TurnRecord (no cycle): it operates
+    on any object exposing the TurnRecord attribute surface."""
+
+    class T:
+        def __init__(self):
+            self.flags = []
+            self.tools_called = []
+            self.thinking_tokens = 0
+            self.output_tokens = 0
+            self.fed_by = []
+            self.wall_seconds = None
+            self.tool_call_args = []
+            self.is_error_turn = False
+
+    a, b = T(), T()
+    a.is_error_turn = True
+    b.is_error_turn = True
+    a.fed_by = [{"tokens": 8000, "is_error": False}]
+    pi_session_lib.compute_turn_flags([a, b],
+                                      large_output=5000, redundant_window=10)
+    assert "large-output" in a.flags
+    # 2 consecutive error turns -> error-retry on b
+    assert "error-retry" in b.flags
+
+
+def test_turn_profile_uses_hoisted_primitives():
+    """turn_profile re-exports the neutral-home primitives (no local copy)."""
+    import autocompactor.turn_profile as tp
+    assert tp._interval_tokens is pi_session_lib._interval_tokens
+    assert tp._compute_flags is pi_session_lib.compute_turn_flags
+
+
+def test_no_import_cycle_pi_session_lib_does_not_import_turn_profile():
+    import autocompactor.turn_profile as tp
+    # The neutral home must not import turn_profile (that would be a cycle:
+    # turn_profile already imports pi_session_lib). Check the loaded module
+    # dict, not the source text (which legitimately mentions the move in a
+    # docstring).
+    assert "turn_profile" not in vars(pi_session_lib)
+    assert tp.pi_session_lib is pi_session_lib

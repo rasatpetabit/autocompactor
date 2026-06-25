@@ -83,6 +83,12 @@ def _env_chain_windowed(name: str, ctx_window: int) -> list[str]:
     return keys
 
 
+def _truthy(value) -> bool:
+    """Truthiness rule shared by env and config bools."""
+    s = str(value).strip().lower()
+    return s in ("1", "true", "yes", "on")
+
+
 def _try_float(name: str, ctx_window: int = 0) -> float | None:
     """Try env chain first (runtime override), then config.json, return None if not found."""
     cfg = _load_config()
@@ -129,6 +135,29 @@ class Config:
                        harness: str = "pi", default: float = 0.0) -> float:
         """Float with _WIDE suffix auto-selection for ctx_window >= 300k."""
         return self.float(name, default=default, ctx_window=ctx_window)
+
+    def bool(self, name: str, harness: str = "pi",
+            default: bool = False) -> bool:
+        """Bool with the standard precedence (env > config > default).
+
+        Env: any of '1','true','yes','on' (case-insensitive) -> True;
+        '0','false','no','off','' -> False. Bool-typed config values
+        are honored directly; strings fall through to the same truthiness
+        rule as env."""
+        for key in _env_chain(name):
+            raw = os.environ.get(key)
+            if raw is not None:
+                return _truthy(raw)
+        cfg = _load_config()
+        if name in cfg:
+            val = cfg[name]
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, (int, float)):
+                return bool(val)
+            if isinstance(val, str):
+                return _truthy(val)
+        return default
 
     def str(self, name: str, harness: str = "pi", default: str = "") -> str:
         # Env vars first (runtime override), matching the float path.

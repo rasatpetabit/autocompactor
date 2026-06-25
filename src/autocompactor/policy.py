@@ -233,6 +233,64 @@ def composition_detail_lines(comp: dict) -> list[str]:
     if prompts > 0:
         lines.append(f"user prompts: ~{_fmt_tokens(prompts)} "
                      f"({_fmt_pct(prompts, total)}; constraints to preserve)")
+
+    # --- ContextInventory additive fields (Task 6) ---
+    # Floor decomposition (readout only; CONSUME the comp dict's inventory_floor
+    # verbatim - never re-rank/recompute). Per-package tool-schema breakdown
+    # labeled 'measured <date>' when probe data exists, else the honest single
+    # 'tools+system (fixed)' bucket (true_residual absorbs it).
+    inv_floor = comp.get("inventory_floor")
+    if isinstance(inv_floor, dict):
+        cf = int(inv_floor.get("context_files", 0) or 0)
+        sm = int(inv_floor.get("skills_meta", 0) or 0)
+        ts = int(inv_floor.get("tools_system", 0) or 0)
+        tr = int(inv_floor.get("true_residual", 0) or 0)
+        per_pkg = inv_floor.get("per_package") or {}
+        measured = inv_floor.get("measured_at", "") or ""
+        if cf > 0:
+            lines.append(f"context files: ~{_fmt_tokens(cf)} "
+                         f"({_fmt_pct(cf, total)}; measured live; persists)")
+        if sm > 0:
+            lines.append(f"skills meta: ~{_fmt_tokens(sm)} "
+                         f"({_fmt_pct(sm, total)}; measured live; persists)")
+        if ts > 0 and per_pkg:
+            date_label = measured.split("T")[0] if measured else ""
+            pkg_str = ", ".join(f"{k} {_fmt_tokens(int(v))}" for k, v in
+                                sorted(per_pkg.items(),
+                                       key=lambda kv: int(kv[1]), reverse=True)
+                                [:4])
+            lines.append(f"tool schemas (measured {date_label}): "
+                         f"~{_fmt_tokens(ts)} ({pkg_str})")
+        elif tr > 0:
+            lines.append(f"tools+system (fixed): ~{_fmt_tokens(tr)} "
+                         f"({_fmt_pct(tr, total)}; not compactable; "
+                         "no probe data)")
+    # Dynamic per-item highlights + dormant rollup (CONSUME verbatim).
+    ledger = comp.get("dynamic_ledger")
+    if isinstance(ledger, list) and ledger:
+        top = sorted(ledger, key=lambda it: int(it.get("tokens", 0) or 0),
+                     reverse=True)[:5]
+        for it in top:
+            kind = str(it.get("kind", ""))
+            tn = str(it.get("tool_name", "") or "")
+            tok = int(it.get("tokens", 0) or 0)
+            age = int(it.get("age_turns", 0) or 0)
+            tags = []
+            if it.get("dormant"):
+                tags.append("dormant")
+            if it.get("redundant"):
+                tags.append("redundant")
+            if it.get("reclaimable"):
+                tags.append("reclaimable")
+            name = f" ({tn})" if tn else ""
+            tagstr = (" [" + ",".join(tags) + "]") if tags else ""
+            lines.append(f"{kind}{name}: ~{_fmt_tokens(tok)} "
+                         f"(age {age} turns{tagstr})")
+        dormant = int(comp.get("dormant_tokens", 0) or 0)
+        if dormant > 0:
+            lines.append(f"dormant items: ~{_fmt_tokens(dormant)} "
+                         f"({_fmt_pct(dormant, total)}; "
+                         "/compact reclaims if unreferenced)")
     return lines
 
 
@@ -240,7 +298,49 @@ def composition_detail_lines(comp: dict) -> list[str]:
 # dominant (and persistent) consumer. Loaded skills do NOT shrink on /compact.
 SKILL_DOMINANCE_FRAC = 0.40
 
+def reducible_floor_advisory(comp: dict, *, min_tokens: int = 1000,
+                            max_lines: int = 4) -> list[str]:
+    """Render ReclaimEstimate.ranking as user-actionable guidance (spec §5/§7).
 
+    Surfaces [{bucket, tokens, reducible_by}] items from the inventory's
+    reclaim.ranking as lines like 'unload pi-subagents ~= 11k'. CONSUMES the
+    ranking verbatim — never re-ranks, never recomputes reclaim figures.
+    Content-free: token counts and bucket/package names only.
+
+    The advisory frames /compact cannot unload packages — the lever is not
+    loading them. Returns [] when no ranking/reclaim data is present or every
+    row is below `min_tokens` (noise floor)."""
+    reclaim = comp.get("reclaim") if isinstance(comp, dict) else None
+    if not isinstance(reclaim, dict):
+        return []
+    ranking = reclaim.get("ranking")
+    if not isinstance(ranking, list) or not ranking:
+        return []
+    lines = []
+    shown = 0
+    for r in ranking:
+        if shown >= max_lines:
+            break
+        try:
+            tokens = int(r.get("tokens", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if tokens < min_tokens:
+            continue
+        bucket = str(r.get("bucket", "") or "").strip()
+        lever = str(r.get("reducible_by", "") or "").strip()
+        if not bucket:
+            continue
+        # Frame so the user understands /compact cannot unload packages: the
+        # lever is 'unload package' (not loading them), not /compact.
+        hint = ""
+        if lever == "unload package":
+            hint = " (unload the package; /compact cannot do this)"
+        elif lever == "--exclude-tools":
+            hint = " (--exclude-tools; /compact cannot do this)"
+        lines.append(f"reducible: {bucket} ~= {_fmt_tokens(tokens)}{hint}")
+        shown += 1
+    return lines
 def skill_warning(comp: dict, threshold: float = SKILL_DOMINANCE_FRAC) -> str:
     """When loaded skills dominate the window, name them and warn that they are
     NOT reclaimable by /compact (skill bodies persist across compaction) — the

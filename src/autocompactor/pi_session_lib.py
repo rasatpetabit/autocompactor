@@ -238,6 +238,95 @@ def _record_result_text(st, text: str, is_error: bool, is_recent: bool) -> None:
             st.recent_tests_pass = True
 
 
+
+def _interval_tokens(entries, tool_name_by_id):
+    """Sum chars/4 over a slice of active entries (the fed-by interval),
+    returning (total_tokens, [{role, tool, tokens, is_error}]).
+
+    Neutral home for the per-interval tool-breakdown family shared by
+    turn_profile and (later) context_inventory: it walks a slice of the
+    active segment and attributes tokens per role/tool. Never raises -
+    callers wrap exceptions as they see fit. (Hoisted from turn_profile.py
+    per context-window-analysis Task 2; pi_session_lib <- transcript_lib
+    only, so there is no import cycle.)"""
+    total = 0
+    breakdown = []
+    for e in entries:
+        msg = _message(e)
+        role = msg.get("role", "")
+        is_error = bool(msg.get("isError")) or (
+            role == "bashExecution"
+            and msg.get("exitCode") not in (None, 0))
+        if role == "toolResult":
+            text = _tool_result_text(msg)
+            tool = tool_name_by_id.get(msg.get("toolCallId"), "unknown")
+        elif role == "bashExecution":
+            text = str(msg.get("output", "") or "")
+            tool = "bash"
+        elif role == "custom":
+            text = _message_text(msg)
+            tool = "custom"
+        elif role == "user":
+            text = _message_text(msg)
+            tool = "user"
+        elif role == "assistant":
+            text = _message_text(msg, include_thinking=True)
+            tool = "assistant"
+        else:
+            text = _message_text(msg)
+            tool = role or "other"
+        if not text:
+            continue
+        tok = len(text) // transcript_lib.CHARS_PER_TOKEN
+        total += tok
+        breakdown.append({"role": role, "tool": tool, "tokens": tok,
+                          "is_error": is_error})
+    return total, breakdown
+
+
+def compute_turn_flags(turns, *, large_output=5000, redundant_window=10,
+                        think_bloat_x=5, idle_gap_min=30):
+    """Per-turn behavior-flag engine (neutral home).
+
+    Operates on a list of duck-typed turn records whose attributes match
+    turn_profile.TurnRecord; it never imports TurnRecord, so there is no
+    cycle (pi_session_lib <- transcript_lib only). Mutates `t.flags` in
+    place. Shared by turn_profile (diagnostics) and context_inventory
+    (per-item classification). Renamed from `_compute_flags` so external
+    callers can reach the neutral home; turn_profile keeps a back-compat
+    alias."""
+    seen_reads = []  # list of (turn_index, path)
+    for j, t in enumerate(turns):
+        if len(t.tools_called) > 1:
+            t.flags.append("parallel-tools")
+        if t.thinking_tokens > think_bloat_x * max(t.output_tokens, 1) and t.thinking_tokens > 0:
+            t.flags.append("think-bloat")
+        if any(fb["is_error"] for fb in t.fed_by):
+            t.flags.append("error-retry")
+        if any(fb["tokens"] >= large_output for fb in t.fed_by):
+            t.flags.append("large-output")
+        if t.wall_seconds is not None and t.wall_seconds >= idle_gap_min * 60:
+            t.flags.append("idle-gap")
+        # redundant read: same path read within the last redundant_window turns
+        for ca in t.tool_call_args:
+            name = ca.get("name", "")
+            args = ca.get("arguments", {})
+            if name.lower() in ("read", "grep"):
+                p = args.get("path")
+                if p and any(p == sp for k, sp in seen_reads
+                             if j - k <= redundant_window and k != j):
+                    t.flags.append("redundant-read")
+                if p:
+                    seen_reads.append((j, p))
+        # error-retry: 2+ consecutive error turns
+        if j >= 1 and t.is_error_turn and turns[j - 1].is_error_turn                 and "error-retry" not in t.flags:
+            t.flags.append("error-retry")
+
+
+# Back-compat alias matching the original private name in turn_profile.
+_compute_flags = compute_turn_flags
+
+
 def active_path(path: str) -> tuple[list, list, int]:
     """Extract the live conversation path and its post-compaction active segment.
 

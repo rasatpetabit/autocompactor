@@ -189,3 +189,167 @@ def test_resolve_soft_pct_override_disables_curve(monkeypatch):
     cfg = policy.resolve_policy_config("claude", 512_000, profile="balanced")
     assert cfg.soft == 0.35
     assert cfg.target_tokens == 0
+
+
+# --- Task 6 (context-window-analysis): composition_detail_lines renders the
+#     ContextInventory additive fields (floor + dynamic + dormant), consumed
+#     verbatim from the comp dict; back-compat when the fields are absent. ---
+
+def _legacy_comp():
+    """A comp dict that has ONLY today's 55cdfef keys (no inventory fields)."""
+    return {
+        "total": 50000, "base": 49892, "skills": 0, "skill_names": [],
+        "summary": 0, "tool": 48, "tool_stale_frac": 0.0,
+        "tool_breakdown": [{"name": "read", "stale_frac": 0.0, "tokens": 25}],
+        "assistant": 46, "prompts": 14,
+    }
+
+
+def _inventory_comp():
+    """A comp dict WITH the new additive inventory fields."""
+    return {
+        "total": 50000, "base": 46000, "skills": 0, "skill_names": [],
+        "summary": 0, "tool": 48, "tool_stale_frac": 0.0,
+        "tool_breakdown": [{"name": "read", "stale_frac": 0.0, "tokens": 25}],
+        "assistant": 46, "prompts": 14,
+        "inventory_floor": {
+            "context_files": 2000, "skills_meta": 0,
+            "tools_system": 22000, "true_residual": 0,
+            "per_package": {"pi-subagents": 11229, "context-mode": 10973},
+            "measured_at": "2026-06-09T00:00:00Z",
+        },
+        "dynamic_ledger": [
+            {"kind": "tool_result", "tool_name": "read", "tokens": 8000,
+             "age_turns": 25, "dormant": True, "redundant": False,
+             "reclaimable": False},
+            {"kind": "assistant", "tool_name": "", "tokens": 1000,
+             "age_turns": 5, "dormant": False, "redundant": False,
+             "reclaimable": True},
+        ],
+        "dormant_tokens": 8000,
+        "reclaim": {"reclaimable_now": 1000, "post_floor_estimate": 0,
+                    "ranking": []},
+        "inventory_degraded": False,
+    }
+
+
+def test_detail_lines_back_compat_when_inventory_absent():
+    """When the inventory fields are absent, today's 55cdfef output stands
+    unchanged (no inventory rows rendered, no exception)."""
+    comp = _legacy_comp()
+    lines = policy.composition_detail_lines(comp)
+    joined = "\n".join(lines)
+    assert "context files" not in joined
+    assert "dormant items" not in joined
+    # Legacy rows still render
+    assert any("tool output" in l for l in lines)
+    assert any("user prompts" in l for l in lines)
+
+
+def test_detail_lines_render_floor_decomposition_with_probe():
+    comp = _inventory_comp()
+    lines = policy.composition_detail_lines(comp)
+    joined = "\n".join(lines)
+    assert "context files: ~2K" in joined or "context files:" in joined
+    # Per-package tool schemas labeled 'measured <date>' (the date from
+    # floor-probe.json's frozen measured_at key)
+    assert "tool schemas (measured 2026-06-09)" in joined
+    assert "pi-subagents" in joined
+    assert "context-mode" in joined
+
+
+def test_detail_lines_render_no_probe_fallback_bucket():
+    """When no probe data, the honest single 'tools+system (fixed)' bucket
+    renders (true_residual absorbs the unattributed floor)."""
+    comp = _legacy_comp()
+    comp["inventory_floor"] = {
+        "context_files": 2000, "skills_meta": 0, "tools_system": 0,
+        "true_residual": 46000, "per_package": {}, "measured_at": "",
+    }
+    comp["dynamic_ledger"] = []
+    comp["dormant_tokens"] = 0
+    lines = policy.composition_detail_lines(comp)
+    joined = "\n".join(lines)
+    assert "tools+system (fixed)" in joined
+    assert "no probe data" in joined
+
+
+def test_detail_lines_render_dynamic_highlights_and_dormant_rollup():
+    comp = _inventory_comp()
+    lines = policy.composition_detail_lines(comp)
+    joined = "\n".join(lines)
+    # Dynamic per-item highlights (kind/tool_name/tokens/age_turns)
+    assert "tool_result (read)" in joined
+    assert "dormant" in joined  # dormant flag tag
+    # Dormant rollup line
+    assert "dormant items:" in joined
+
+
+def test_detail_lines_consume_verbatim_no_recompute():
+    """The figures are consumed verbatim: the dormant rollup equals the
+    comp dict's dormant_tokens (no recompute)."""
+    comp = _inventory_comp()
+    lines = policy.composition_detail_lines(comp)
+    joined = "\n".join(lines)
+    # The inventory's dormant_tokens is 8000 -> renders as ~8K
+    assert "~8k" in joined
+
+
+# --- Task 7 (context-window-analysis): reducible-floor advisory renderer ---
+
+def test_reducible_floor_advisory_renders_ranking_order_unchanged():
+    """The advisory renders ReclaimEstimate.ranking in its exact order, verbatim
+    (never re-ranks/recomputes)."""
+    comp = {
+        "reclaim": {
+            "reclaimable_now": 1234, "post_floor_estimate": 70000,
+            "ranking": [
+                {"bucket": "unload pi-subagents", "tokens": 11229,
+                 "reducible_by": "unload package"},
+                {"bucket": "--exclude-tools context-mode", "tokens": 10973,
+                 "reducible_by": "--exclude-tools"},
+                {"bucket": "stale tool output", "tokens": 900,
+                 "reducible_by": "/compact"},
+            ],
+        }
+    }
+    lines = policy.reducible_floor_advisory(comp, min_tokens=500)
+    assert len(lines) == 3  # all three >= 500 floor
+    # Order preserved: pi-subagents before context-mode before stale
+    assert "unload pi-subagents" in lines[0]
+    assert "context-mode" in lines[1]
+    assert "stale tool output" in lines[2]
+    assert "11k" in lines[0]  # verbatim figure (~11k)
+    # Framing: /compact cannot unload packages
+    assert "unload the package; /compact cannot do this" in lines[0]
+    assert "--exclude-tools; /compact cannot do this" in lines[1]
+
+
+def test_reducible_floor_advisory_min_tokens_floor():
+    """Buckets below the min_tokens noise floor are not surfaced."""
+    comp = {"reclaim": {"ranking": [
+        {"bucket": "big", "tokens": 5000, "reducible_by": "unload package"},
+        {"bucket": "small", "tokens": 100, "reducible_by": "/compact"},
+    ]}}
+    lines = policy.reducible_floor_advisory(comp, min_tokens=1000)
+    assert len(lines) == 1
+    assert "big" in lines[0]
+
+
+def test_reducible_floor_advisory_returns_empty_when_no_ranking():
+    comp = {"reclaim": {"ranking": [], "reclaimable_now": 0,
+                        "post_floor_estimate": 0}}
+    assert policy.reducible_floor_advisory(comp) == []
+
+
+def test_reducible_floor_advisory_returns_empty_when_no_reclaim():
+    assert policy.reducible_floor_advisory({}) == []
+    assert policy.reducible_floor_advisory(None) == []
+
+
+def test_reducible_floor_advisory_max_lines_cap():
+    comp = {"reclaim": {"ranking": [
+        {"bucket": f"b{i}", "tokens": 10000, "reducible_by": "/compact"}
+        for i in range(10)]}}
+    lines = policy.reducible_floor_advisory(comp, min_tokens=1, max_lines=3)
+    assert len(lines) == 3

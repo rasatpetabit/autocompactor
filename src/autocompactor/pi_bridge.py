@@ -42,7 +42,7 @@ import os
 import shutil
 import sys
 
-from autocompactor import (artifacts, pi_session_lib, policy,  # noqa: E402
+from autocompactor import (artifacts, context_inventory, pi_session_lib, policy,  # noqa: E402
                            statedir, transcript_lib, window_resolver)
 from autocompactor.config_lib import cfg                          # noqa: E402
 from autocompactor.llm_digest import llm_digest                 # noqa: E402
@@ -51,6 +51,8 @@ from autocompactor.stats import log_event                         # noqa: E402
 HARNESS = "pi"
 DIGEST_CUSTOM_TYPE = "autocompactor.digest"
 RESERVE_FALLBACK = 40_000
+
+PROBE_NEVER_READ_NOTE = "decision path never reads floor-probe.json (T9 boundary)"
 
 
 def _parse_args(argv: list) -> dict:
@@ -104,6 +106,100 @@ def _save_state(session_id: str, state: dict) -> None:
     except Exception:
         pass
 
+def _summary_term_median(session_id, *, window_size=None):
+    """Telemetry median of historical (post_total - (base + skills)) — the
+    SUMMARY-TERM only, far more config-stable than the whole post-total (spec
+    §6.1). Read by parsing the raw events.jsonl under statedir.state_root()/stats
+    (no stats.py read API exists — raw-log read is the intended path; we do NOT
+    edit stats.py). Returns None when no telemetry history exists (caller falls
+    back to the static POST_FLOOR_FALLBACK). Never raises."""
+    import json
+    import os
+    try:
+        if window_size is None:
+            window_size = int(cfg.float("POST_FLOOR_CALIBRATION", default=10))
+        # The reinject event carries post_total/base/skills (persisted by
+        # cmd_reinject). events.jsonl lives under the stats subdir.
+        root = statedir.state_root()
+        stats_path = os.path.join(os.path.dirname(root), "stats",
+                                  "events.jsonl")
+        # Fall back to the legacy <state_root>/stats path if the layout differs.
+        if not os.path.isfile(stats_path):
+            stats_path = os.path.join(root, "stats", "events.jsonl")
+        if not os.path.isfile(stats_path):
+            return None
+        terms = []
+        with open(stats_path) as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("type") != "reinject":
+                    continue
+                post_total = obj.get("post_total")
+                base = obj.get("base")
+                skills = obj.get("skills")
+                if (isinstance(post_total, (int, float))
+                        and isinstance(base, (int, float))
+                        and isinstance(skills, (int, float))):
+                    term = post_total - (base + skills)
+                    if term >= 0:
+                        terms.append(int(term))
+        if not terms:
+            return None
+        terms = terms[-window_size:] if window_size > 0 else terms
+        terms_sorted = sorted(terms)
+        n = len(terms_sorted)
+        mid = n // 2
+        if n % 2:
+            return int(terms_sorted[mid])
+        return int((terms_sorted[mid - 1] + terms_sorted[mid]) // 2)
+    except Exception:
+        return None
+
+
+def _config_aware_post_floor(active_prefix, context_tokens, session_id):
+    """post_floor = live_fixed_floor + summary_term (spec §6.1).
+
+    live_fixed_floor = base + skills for THIS session, from
+    context_inventory.decision_floor_terms() (DECISION-SAFE: include_probe=False
+    by construction; this path NEVER opens floor-probe.json — T9 boundary).
+    base = total - measured already reflects whatever tool schemas/packages are
+    loaded NOW (no telemetry, no probe, no staleness).
+
+    summary_term = telemetry median of historical post_total - (base + skills)
+    (the summary size only); static POST_FLOOR_FALLBACK (70000) when no history.
+
+    Returns (post_floor, degraded_note). degraded_note is '' on the config-
+    aware path; on inventory failure it is the observable note AND post_floor
+    falls back to the static POST_FLOOR (the INPUT only — the corrected policy
+    formula still applies: the hard line is never gated by min_savings)."""
+    static_floor = int(cfg.float("POST_FLOOR", default=70_000))
+    try:
+        terms = context_inventory.decision_floor_terms(active_prefix,
+                                                        context_tokens)
+        if terms.get("note"):
+            # Decision inventory degraded — swap INPUTS only (static floor),
+            # never the formula. Visible via the note.
+            return static_floor, terms["note"]
+        base = int(terms.get("base", 0))
+        skills = int(terms.get("skills", 0))
+        summary_term = _summary_term_median(session_id)
+        if summary_term is None:
+            summary_term = int(cfg.float("POST_FLOOR_FALLBACK",
+                                          default=static_floor))
+            # When there is no telemetry, fold the live base+skills into the
+            # static floor so post_floor is config-aware even on the no-history
+            # path: post_floor = max(base + skills + summary_term, static).
+            live_floor = base + skills + summary_term
+            return max(live_floor, static_floor), "no telemetry: static fallback"
+        live = base + skills + summary_term
+        return live, ""
+    except Exception as exc:
+        # Inventory failure — degraded INPUTS only; the corrected rule still
+        # applies (hard line never gated by min_savings even on the fallback).
+        return static_floor, f"inventory degraded: {exc}"
 
 def _analyze(session: str):
     if session and os.path.exists(os.path.expanduser(session)):
@@ -144,8 +240,19 @@ def cmd_evaluate(opts: dict) -> dict:
     soft_t, hard_t = int(soft * window), int(hard * window)
     cooldown = cfg.float("COOLDOWN", default=25_000)
     stale_frac_thr = cfg.float("STALE_FRAC", default=0.50)
-    post_floor = cfg.float("POST_FLOOR", default=70_000)
     min_savings = cfg.float("MIN_SAVINGS", default=30_000)
+    # Config-aware post_floor (spec §6.1): live_fixed_floor (base + skills for
+    # THIS session, via the DECISION-SAFE entry — never opens floor-probe.json,
+    # T9 boundary) + summary_term (telemetry median of historical
+    # post_total - (base + skills); static fallback when no telemetry).
+    # On inventory failure the INPUT swaps to static floor only; the
+    # CORRECTED policy formula still applies (hard line never gated by
+    # min_savings even on the fallback path, spec §8). The visible fallback
+    # note is emitted in the telemetry event below.
+    active_prefix = list(getattr(st, "entries", []) or [])
+    post_floor, floor_note = _config_aware_post_floor(
+        active_prefix, context_tokens, session_id)
+    fallback_inputs = bool(floor_note)
 
     state = _load_state(session_id)
     last_reco = state.get("last_reco_tokens", -10**9)
@@ -172,7 +279,13 @@ def cmd_evaluate(opts: dict) -> dict:
 
     recommend = (occupancy >= hard or (occupancy >= soft and bool(gating)))
     est_reclaim = int(context_tokens - post_floor)
-    if est_reclaim < min_savings:
+    # GUARD CORRECTION (spec §6.1, the cross-vendor-fought line): min_savings
+    # suppresses ONLY the opportunistic soft path (occupancy < hard) and is
+    # NEVER applied at/above the hard line — a hard-line compaction always
+    # proceeds. (Today's code blanket-suppressed at all bands; that could let
+    # an estimate suppress a needed safety compaction. Estimating error in the
+    # soft band only shifts opportunistic timing, never misses the safety one.)
+    if occupancy < hard and est_reclaim < min_savings:
         recommend = False
 
     log_event({
@@ -182,6 +295,9 @@ def cmd_evaluate(opts: dict) -> dict:
         "signals": signals, "stale_frac": round(stale_frac, 4),
         "phase": transcript_lib.detect_phase(st),
         "est_reclaim": est_reclaim,
+        "post_floor": int(post_floor),
+        "floor_degraded": fallback_inputs,
+        "floor_note": floor_note,
         "tail_parse": False,
         "recommended": recommend and not suppressed,
         "suppressed_by_cooldown": recommend and suppressed,
@@ -215,7 +331,7 @@ def cmd_evaluate(opts: dict) -> dict:
         reason += " — triggered by: " + "; ".join(gating)
     if recommend and suppressed:
         reason += " (suppressed: cooldown)"
-    elif not recommend and est_reclaim < min_savings:
+    elif not recommend and occupancy < hard and est_reclaim < min_savings:
         reason = (f"est. reclaim ~{max(est_reclaim, 0):,} tokens is below "
                   f"the {int(min_savings):,}-token minimum")
 
@@ -363,10 +479,31 @@ def cmd_reinject(opts: dict) -> dict:
     post_state = transcript_lib.build_context_state(
         post_st, window=resolution.effective_window)
 
+    # Persist post_total/base/skills on the reinject event so the decision's
+    # telemetry summary-term median (post_total - (base + skills)) can be read
+    # back by future cmd_evaluate calls (spec §6.1). Schema-free log_event (no
+    # stats.py edit). The decision-floor terms are computed on the
+    # POST-compaction active prefix via the DECISION-SAFE entry that never
+    # opens floor-probe.json (T9 boundary).
+    post_total = int(post_st.context_tokens)
+    post_active_prefix = list(getattr(post_st, "entries", []) or [])
+    try:
+        floor_terms = context_inventory.decision_floor_terms(
+            post_active_prefix, post_total)
+        reinject_base = int(floor_terms.get("base", post_total))
+        reinject_skills = int(floor_terms.get("skills", 0))
+        floor_note = str(floor_terms.get("note", "") or "")
+    except Exception:
+        reinject_base, reinject_skills, floor_note = post_total, 0, "reinject floor terms degraded"
+
     log_event({"type": "reinject", "session_id": session_id,
                "digest_tokens": len(digest) // 4,
                "artifact_keys": list(arts.keys()),
                "post_tokens": post_st.context_tokens,
+               "post_total": post_total,
+               "base": reinject_base,
+               "skills": reinject_skills,
+               "floor_note": floor_note,
                "post_phase": transcript_lib.detect_phase(post_st)},
               )
     out = {"contextState": post_state}

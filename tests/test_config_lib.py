@@ -173,3 +173,67 @@ def test_flat_config_preserves_effective_pi_values(monkeypatch):
 def test_no_harness_sections_or_pi_env_prefix():
     data = json.load(open(config_lib._CONFIG))
     assert "claude" not in data and "pi" not in data
+
+
+# --- Inventory config surface (context-window-analysis bundle) ---
+# Pins the new keys added in spec §10: inventory enable flag, dormancy
+# age + token thresholds with a deadband/hysteresis margin, probe-staleness
+# window, post_floor calibration window, and the static 70000 fallback.
+INVENTORY_FLOAT_DEFAULTS = {
+    "DORMANT_AGE_TURNS": 20,
+    "DORMANT_MIN_TOKENS": 500,
+    "DORMANT_TOKEN_THRESHOLD": 30000,
+    "DORMANT_DEADBAND": 0.2,
+    "PROBE_STALENESS_SECONDS": 14 * 86400,
+    "POST_FLOOR_CALIBRATION": 10,
+    "POST_FLOOR_FALLBACK": 70000,
+}
+
+
+def test_bool_truthy_env(temp_config, monkeypatch):
+    temp_config({"INVENTORY_ENABLED": False})
+    for truthy in ("1", "true", "True", "yes", "ON"):
+        monkeypatch.setenv("AUTOCOMPACTOR_INVENTORY_ENABLED", truthy)
+        assert config_lib.cfg.bool("INVENTORY_ENABLED") is True, truthy
+    for falsy in ("0", "false", "no", "off", ""):
+        monkeypatch.setenv("AUTOCOMPACTOR_INVENTORY_ENABLED", falsy)
+        assert config_lib.cfg.bool("INVENTORY_ENABLED") is False, falsy
+
+
+def test_bool_config_bool_value_honored(temp_config):
+    temp_config({"INVENTORY_ENABLED": True})
+    assert config_lib.cfg.bool("INVENTORY_ENABLED") is True
+    temp_config({"INVENTORY_ENABLED": False})
+    assert config_lib.cfg.bool("INVENTORY_ENABLED") is False
+
+
+def test_bool_default_when_absent(temp_config):
+    temp_config({})
+    assert config_lib.cfg.bool("INVENTORY_ENABLED", default=True) is True
+    assert config_lib.cfg.bool("INVENTORY_ENABLED", default=False) is False
+
+
+def test_inventory_float_defaults_in_shipped_config(monkeypatch):
+    _shipped_config(monkeypatch)
+    for k, v in INVENTORY_FLOAT_DEFAULTS.items():
+        assert config_lib.cfg.float(k, default=-1) == v, k
+
+
+def test_inventory_enabled_defaults_true_in_shipped_config(monkeypatch):
+    _shipped_config(monkeypatch)
+    assert config_lib.cfg.bool("INVENTORY_ENABLED", default=False) is True
+
+
+def test_inventory_keys_do_not_collide_with_existing_pi_values(monkeypatch):
+    _shipped_config(monkeypatch)
+    # Existing compaction thresholds unchanged alongside the new keys.
+    assert config_lib.cfg.float("POST_FLOOR") == 70000
+    assert config_lib.cfg.float("MIN_SAVINGS") == 30000
+
+
+def test_inventory_env_overrides_shipped(monkeypatch):
+    _shipped_config(monkeypatch)
+    monkeypatch.setenv("AUTOCOMPACTOR_DORMANT_AGE_TURNS", "40")
+    assert config_lib.cfg.float("DORMANT_AGE_TURNS") == 40
+    monkeypatch.setenv("AUTOCOMPACTOR_INVENTORY_ENABLED", "false")
+    assert config_lib.cfg.bool("INVENTORY_ENABLED") is False
