@@ -216,11 +216,58 @@ def do_status() -> int:
         print(f"state dir: {state_root} (error: {exc})")
         problems += 1
 
+    # Floor-probe freshness (readout-only artifact; written by nightly_eval's
+    # floor-probe subsystem). Read-only consumer of floor-probe.json; does NOT
+    # touch statedir.py or write anything. Reports fresh/stale/missing against
+    # the probe-staleness budget stored in the artifact. Informational only:
+    # never flips the --status exit code.
+    probe_line = _floor_probe_status_line(state_root)
+    print(probe_line)
+
     if problems:
         print(f"STATUS: {problems} problem(s)")
         return 1
     print("STATUS: OK")
     return 0
+
+
+def _floor_probe_status_line(state_root):
+    """Read-only floor-probe freshness line for the --status health block.
+
+    Reads floor-probe.json (the frozen T9 artifact) under the pi state root and
+    compares measured_at against the recorded staleness_budget. Reports
+    fresh/stale/missing. Never raises; a missing/parse error yields a
+    'missing' line (informational, not a problem that flips --status exit).
+
+    Reads the artifact at os.path.join(state_root, 'floor-probe.json') so the
+   AUTOCOMPACTOR_STATE_DIR override is honored at call time, not import time."""
+    try:
+        import json as _json
+        import datetime as _dt
+        from autocompactor import config_lib as _cfg
+        probe_path = os.path.join(state_root, "floor-probe.json")
+        with open(probe_path) as _fh:
+            data = _json.load(_fh)
+        measured = str(data.get("measured_at", "") or "")
+        budget = int(data.get("staleness_budget") or
+                     _cfg.cfg.float("PROBE_STALENESS_SECONDS",
+                                     default=14 * 86400))
+        age = _probe_age_seconds(measured)
+        state = "fresh" if (age is None or age <= budget) else "stale"
+        return f"floor probe: {state} (measured {measured})"
+    except Exception:
+        return "floor probe: (missing - run nightly_eval to populate)"
+
+
+def _probe_age_seconds(measured_at):
+    if not measured_at:
+        return None
+    try:
+        ts = datetime.datetime.fromisoformat(measured_at.replace("Z", "+00:00"))
+        return max(int((datetime.datetime.now(datetime.timezone.utc) - ts)
+                       .total_seconds()), 0)
+    except Exception:
+        return None
 
 
 # ------------- main

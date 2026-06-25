@@ -125,6 +125,70 @@ CHARS_PER_TOKEN = 4   # chars ~ tokens*4 heuristic (matches artifacts.py)
 
 
 def context_composition(st: TranscriptStats, context_tokens: int = -1) -> dict:
+    """Thin adapter over the ContextInventory model (context-window-analysis).
+
+    The EXISTING 55cdfef keys (total/base/skills/skill_names/summary/tool/
+    tool_stale_frac/tool_breakdown/assistant/prompts) are produced by the
+    frozen `_legacy_composition` body and remain byte-identical (golden-baseline
+    parity). The new inventory fields are ADDITIVE on top:
+      inventory_floor   {context_files, skills_meta, tools_system, true_residual,
+                         per_package, measured_at}  (readout decomposition)
+      dynamic_ledger     [{kind, tool_name, tokens, age_turns, dormant,
+                           redundant, reclaimable}, ...]  (per-item highlights)
+      dormant_tokens     int rollup
+      reclaim            {reclaimable_now, post_floor_estimate, ranking}
+    Consumers (T6/T7) render the new keys; the legacy readout keeps the old.
+
+    Spec §8 recursion break: on inventory failure the adapter falls back to
+    `_legacy_composition` ONLY (its own frozen legacy) — it never re-enters the
+    inventory, so the never-raise path cannot recurse. The inventory's own
+    fallback never calls this adapter (context_inventory is read-only on this
+    module's symbols via pi_session_lib, never via context_composition)."""
+    comp = _legacy_composition(st, context_tokens)
+    try:
+        total = comp["total"]
+        active_prefix = list(getattr(st, "entries", []) or [])
+        # Lazy import to avoid a module-load cycle (context_inventory imports
+        # pi_session_lib which imports this module).
+        from autocompactor import context_inventory as _ci
+        inv = _ci.build_inventory(active_prefix, total, 0, include_probe=True)
+        if inv.degraded:
+            # Honest degraded path: keep the legacy keys, add a flag, do NOT
+            # synthesize inventory figures from total alone at this layer (the
+            # inventory's own degraded inventory already holds that).
+            comp["inventory_degraded"] = True
+            comp["inventory_note"] = inv.note
+            return comp
+        f = inv.floor
+        comp["inventory_floor"] = {
+            "context_files": f.context_files,
+            "skills_meta": f.skills_meta,
+            "tools_system": f.tools_system,
+            "true_residual": f.true_residual,
+            "per_package": _ci._probe_per_package(),
+            "measured_at": _ci._probe_measured_at(),
+        }
+        comp["dynamic_ledger"] = [
+            {"kind": it.kind, "tool_name": it.tool_name, "tokens": it.tokens,
+             "age_turns": it.age_turns, "dormant": it.dormant,
+             "redundant": it.redundant, "reclaimable": it.reclaimable}
+            for it in inv.dynamic
+        ]
+        comp["dormant_tokens"] = inv.dynamic_dormant_tokens
+        comp["reclaim"] = {
+            "reclaimable_now": inv.reclaim.reclaimable_now,
+            "post_floor_estimate": inv.reclaim.post_floor_estimate,
+            "ranking": list(inv.reclaim.ranking),
+        }
+        comp["inventory_degraded"] = False
+    except Exception as _exc:
+        # Never-raise: legacy keys stand; new keys absent. Visible via the flag.
+        comp["inventory_degraded"] = True
+        comp["inventory_note"] = f"adapter fallback: {_exc}"
+    return comp
+
+
+def _legacy_composition(st: TranscriptStats, context_tokens: int = -1) -> dict:
     """Estimate the per-category token breakdown of the CURRENT context window,
     reconciled to the authoritative total. Answers owner request (a): not "how
     full" but "where are the tokens, and how much is reclaimable".
