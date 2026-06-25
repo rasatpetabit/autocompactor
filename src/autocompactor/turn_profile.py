@@ -15,6 +15,12 @@ from dataclasses import dataclass, field
 
 from autocompactor import pi_session_lib, policy, transcript_lib
 
+# Hoisted to the neutral home (pi_session_lib) per context-window-analysis
+# Task 2 so context_inventory can reuse them with no import cycle. These
+# re-exports keep the private names this module historically exposed stable.
+_interval_tokens = pi_session_lib._interval_tokens
+_compute_flags = pi_session_lib.compute_turn_flags
+
 
 @dataclass
 class TurnRecord:
@@ -96,44 +102,6 @@ class ProfileResult:
 
 
 # ---- per-turn walk -------------------------------------------------------
-
-def _interval_tokens(entries, tool_name_by_id):
-    """Sum chars/4 over a slice of active entries (the fed-by interval),
-    returning (total_tokens, [{role, tool_or_unknown, tokens, is_error}])."""
-    total = 0
-    breakdown = []
-    for e in entries:
-        msg = pi_session_lib._message(e)
-        role = msg.get("role", "")
-        is_error = bool(msg.get("isError")) or (
-            role == "bashExecution"
-            and msg.get("exitCode") not in (None, 0))
-        if role == "toolResult":
-            text = pi_session_lib._tool_result_text(msg)
-            tool = tool_name_by_id.get(msg.get("toolCallId"), "unknown")
-        elif role == "bashExecution":
-            text = str(msg.get("output", "") or "")
-            tool = "bash"
-        elif role == "custom":
-            text = pi_session_lib._message_text(msg)
-            tool = "custom"
-        elif role == "user":
-            text = pi_session_lib._message_text(msg)
-            tool = "user"
-        elif role == "assistant":
-            text = pi_session_lib._message_text(msg, include_thinking=True)
-            tool = "assistant"
-        else:
-            text = pi_session_lib._message_text(msg)
-            tool = role or "other"
-        if not text:
-            continue
-        tok = len(text) // transcript_lib.CHARS_PER_TOKEN
-        total += tok
-        breakdown.append({"role": role, "tool": tool, "tokens": tok,
-                          "is_error": is_error})
-    return total, breakdown
-
 
 def _thinking_only(message: dict) -> str:
     parts = []
@@ -230,35 +198,6 @@ def profile_turns(session: str, recent_window: int = 30) -> ProfileResult:
     return res
 
 
-def _compute_flags(turns, *, large_output=5000, redundant_window=10,
-                   think_bloat_x=5, idle_gap_min=30):
-    seen_reads = []  # list of (turn_index, path)
-    for j, t in enumerate(turns):
-        if len(t.tools_called) > 1:
-            t.flags.append("parallel-tools")
-        if t.thinking_tokens > think_bloat_x * max(t.output_tokens, 1) and t.thinking_tokens > 0:
-            t.flags.append("think-bloat")
-        if any(fb["is_error"] for fb in t.fed_by):
-            t.flags.append("error-retry")
-        if any(fb["tokens"] >= large_output for fb in t.fed_by):
-            t.flags.append("large-output")
-        if t.wall_seconds is not None and t.wall_seconds >= idle_gap_min * 60:
-            t.flags.append("idle-gap")
-        # redundant read: same path read within the last redundant_window turns
-        for ca in t.tool_call_args:
-            name = ca.get("name", "")
-            args = ca.get("arguments", {})
-            if name.lower() in ("read", "grep"):
-                p = args.get("path")
-                if p and any(p == sp for k, sp in seen_reads
-                             if j - k <= redundant_window and k != j):
-                    t.flags.append("redundant-read")
-                if p:
-                    seen_reads.append((j, p))
-        # error-retry: 2+ consecutive error turns
-        if j >= 1 and t.is_error_turn and turns[j - 1].is_error_turn \
-                and "error-retry" not in t.flags:
-            t.flags.append("error-retry")
 
 
 _SPARK = "▁▂▃▄▅▆▇█"
