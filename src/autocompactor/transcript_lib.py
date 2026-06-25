@@ -466,6 +466,34 @@ def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:
     return "\n".join(lines)
 
 
+def resolve_next_step(st: "TranscriptStats") -> tuple:
+    """Resolve the most actionable next step from the PRE-compaction transcript.
+
+    Priority chain (first non-empty wins):
+      1. First pending TodoWrite item -- explicit, user-authored plan.
+      2. The latest genuine user task (last_user_task) -- the live goal.
+      3. The most recent user correction -- what to do differently now.
+
+    Returns (next_step, source_tag) where source_tag is a short stable
+    label used for telemetry/reinject ("todo:pending[0]" | "last_user_task"
+    | "correction[-1]" | ""). Empty step yields ("", "").
+
+    MUST be called at prepare time (rich pre-compaction transcript). The
+    post-compaction transcript reinject sees is truncated to an opaque
+    summary, so resolving there would return empty.
+    """
+    pending = [t.get("content", "").strip()
+              for t in (st.todos or [])
+              if t.get("status") != "completed" and t.get("content", "").strip()]
+    if pending:
+        return pending[0], "todo:pending[0]"
+    if st.last_user_task.strip():
+        return st.last_user_task.strip(), "last_user_task"
+    if st.corrections:
+        return st.corrections[-1].replace("\n", " ").strip(), "correction[-1]"
+    return "", ""
+
+
 def append_artifact_restatement(instructions: str, arts: dict) -> str:
     """Append the founding-goal restatement + the on-disk-artifacts NOTE.
 

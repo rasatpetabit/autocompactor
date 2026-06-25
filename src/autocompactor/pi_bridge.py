@@ -267,6 +267,12 @@ def cmd_prepare(opts: dict) -> dict:
     state["pending_reinject"] = True
     state["compaction_count"] = state.get("compaction_count", 0) + 1
     phase = transcript_lib.detect_phase(st)
+    # Capture the next step from the RICH pre-compaction transcript. The
+    # post-compaction transcript reinject sees is truncated to an opaque
+    # summary, so resolving there would return empty. Persist for reinject.
+    next_step, next_step_src = transcript_lib.resolve_next_step(st)
+    state["staged_next_step"] = next_step
+    state["staged_next_step_src"] = next_step_src
     comp = transcript_lib.context_composition(st, st.context_tokens)
     art_kept, art_dropped = artifacts.budget_plan(arts)
     state["last_compaction_stats"] = " | ".join([
@@ -368,6 +374,19 @@ def cmd_reinject(opts: dict) -> dict:
         out["compactionStats"] = stats_line
     if digest:
         out.update({"text": digest, "customType": DIGEST_CUSTOM_TYPE})
+    # Recover the next step staged at prepare time (pre-compaction transcript
+    # was rich; post-compaction is truncated). Surface for an optional
+    # next-step extension to act on. Kept (not popped) so it survives a
+    # reinject race where the next-step listener runs after this reinject and
+    # re-reads state; it is overwritten on the next prepare.
+    next_step = state.get("staged_next_step", "")
+    next_step_src = state.get("staged_next_step_src", "")
+    if next_step:
+        out["nextStep"] = next_step[:1500]
+        out["nextStepSource"] = next_step_src
+    # Surface the configured NEXTSTEP mode so the TS shim gates surfacing
+    # consistently with config.json (single source of truth).
+    out["nextStepMode"] = cfg.str("NEXTSTEP", default="off").lower()
     return out
 
 

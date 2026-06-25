@@ -537,6 +537,49 @@ export default function autocompactor(pi: ExtensionAPI) {
         )
       }
 
+      // Optional post-compaction next-step surfacing (advisory by default).
+      // Sourced at prepare time from the rich pre-compaction transcript
+      // (pending todo → last user task → last correction) and staged in
+      // bridge state; recovered here on reinject. Gated by NEXTSTEP mode:
+      //   "off"    — never surface (default)
+      //   "advisory" — surface a ready-to-run brief the user can confirm
+      //   "autonomous" — surface + inject as a model-visible task hint to continue
+      // Config: top-level NEXTSTEP in config.json, overridable by
+      // AUTOCOMPACTOR_NEXTSTEP env var. Off keeps the classic behavior.
+      const nextStepMode =
+        (process.env.AUTOCOMPACTOR_NEXTSTEP ?? "") ||
+        String(inj?.nextStepMode ?? "") || "off"
+      const step = ((inj?.nextStep as string | undefined) ?? "").trim()
+      const stepSrc = ((inj?.nextStepSource as string | undefined) ?? "").trim()
+      if (step && nextStepMode === "advisory") {
+        pi.sendMessage(
+          {
+            customType: "autocompactor.nextstep.advisory",
+            content:
+              `autocompactor-nextstep: recovered next step (${stepSrc || "unknown"}) —\n` +
+              `${step}\n\n` +
+              `Reply "go" to dispatch via dispatch_task, or ignore.`,
+            display: true,
+          },
+          { deliverAs: "nextTurn" },
+        )
+      } else if (step && nextStepMode === "autonomous") {
+        // Model-visible task hint delivered next-turn; the assistant picks it
+        // up and routes through dispatch_task/subagent. Not a headless auto-run
+        // (that would need a separate worker extension to avoid acting in the
+        // compaction event path). Kept terse so it reads as a nudge, not a command.
+        pi.sendMessage(
+          {
+            customType: "autocompactor.nextstep.task",
+            content:
+              `[autocompactor-nextstep] Resuming after compaction. Next step (${stepSrc || "unknown"}):\n${step}\n\n` +
+              `Verify prior state (git status) before editing; route via dispatch_task.`,
+            display: true,
+          },
+          { deliverAs: "nextTurn" },
+        )
+      }
+
       // Visible post-compaction status is both a UI notification/status and a
       // persistent displayed custom message. tokensBefore from the compaction
       // entry survives runtime reloads better than closure state.
