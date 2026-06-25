@@ -609,4 +609,69 @@ export default function autocompactor(pi: ExtensionAPI) {
       /* never break Pi */
     }
   })
+
+  // /contextinventory — on-demand deep context-window breakdown (spec §5/§11).
+  // Renders the ContextInventory report as a widget above the editor, using the
+  // REAL aggregate token total from ctx.getContextUsage() (not the chars/4
+  // fallback the standalone shim uses when --total is absent). Surfaces
+  // per-package tool schemas in the floor (via floor-probe.json) and the
+  // per-tool/per-item dynamic ledger with dormancy/reclaim flags.
+  //   /contextinventory            — with floor probe (per-package schemas)
+  //   /contextinventory no-probe   — honest residual bucket, no probe read
+  pi.registerCommand("contextinventory", {
+    description: "Deep context-window breakdown (floor + dynamic + reclaim)",
+    handler: async (args, ctx) => {
+      try {
+        if (!ctx.hasUI) {
+          notify(ctx, "contextinventory: requires an interactive UI.", "info")
+          return
+        }
+        const session = ctx.sessionManager.getSessionFile()
+        if (!session) {
+          notify(ctx, "contextinventory: no active session to analyze.", "warning")
+          return
+        }
+        const shim = path.join(path.dirname(BRIDGE), "context_inventory.py")
+        const cmdArgs: string[] = [shim, "--session", session]
+        const usage = ctx.getContextUsage()
+        if (usage && usage.tokens != null && usage.tokens > 0) {
+          cmdArgs.push("--total", String(usage.tokens))
+        }
+        if (usage && usage.contextWindow) {
+          cmdArgs.push("--window", String(usage.contextWindow))
+        }
+        // "/contextinventory no-probe" skips the floor probe.
+        if (String(args ?? "").includes("no-probe")) {
+          cmdArgs.push("--no-probe")
+        }
+        setAcStatus(ctx, "autocompactor: building context inventory…")
+        const res = await pi.exec("python3", cmdArgs, {
+          timeout: 15_000,
+          cwd: ctx.cwd,
+        })
+        const out = (res.stdout ?? "").trimEnd()
+        if (res.code !== 0 || !out) {
+          setAcStatus(ctx, "autocompactor: context inventory failed.")
+          notify(
+            ctx,
+            "contextinventory: inventory returned no output (check the bridge).",
+            "warning",
+          )
+          return
+        }
+        const lines = out.split("\n")
+        const header =
+          "contextinventory · " +
+          (session.split(path.sep).pop() ?? session)
+        // setWidget replaces any prior inventory render; re-invoking the
+        // command refreshes it. Clear with the same name + undefined.
+        ctx.ui.setWidget("autocompactor-inventory", [header, ...lines])
+        setAcStatus(ctx, "autocompactor: context inventory shown above.")
+        notify(ctx, "contextinventory: breakdown shown above the editor.", "info")
+      } catch (err) {
+        setAcStatus(ctx, "autocompactor: context inventory errored.")
+        notify(ctx, `contextinventory: ${errorText(err)}`, "error")
+      }
+    },
+  })
 }

@@ -62,6 +62,7 @@ function makeHarness() {
       return { code: 0, stdout: payload ? JSON.stringify(payload) : "" }
     },
     sendMessage() {},
+    registerCommand(_name: string, _def: any) {},
   }
   const prepareCalls = () => execCalls.filter((c) => c.args[1] === "prepare")
   return { pi, ctx, handlers, execCalls, prepareCalls }
