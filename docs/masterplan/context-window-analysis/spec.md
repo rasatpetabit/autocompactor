@@ -170,8 +170,12 @@ That is the honest, provable property — not "estimates never matter."
   and `context_inventory.py` reuse them with no circular import.
 - **Never-raise, but VISIBLE.** Inventory build never throws; on any failure it falls back to
   today's `context_composition` AND **emits a telemetry/log event** — the fallback is
-  observable, not a silent policy-regime switch. The decision then degrades to static
-  `post_floor` + aggregate `stale_output` (today's behavior).
+  observable, not a silent policy-regime switch.
+- **Fallback swaps INPUTS, never the policy formula.** On inventory failure the decision uses
+  *degraded inputs* — static `post_floor` + aggregate `stale_output` — but **still runs the
+  corrected policy**: the hard line is never gated by `min_savings` (§6.1). It must NOT revert to
+  the pre-fix formula (which AND-gated the hard trigger with `min_savings`) — that would
+  reintroduce the suppress-at-hard bug via the never-raise path.
 
 ## 9. Testing
 
@@ -186,8 +190,10 @@ That is the honest, provable property — not "estimates never matter."
   `stale_output` firing); dormancy threshold deadband/hysteresis damps noise. The provable
   property under test is **band-limited**: the exact hard line + native ceiling always compact;
   estimate error only shifts opportunistic soft-band timing.
-- Visible-fallback test: a forced inventory error emits the telemetry event and the decision
-  matches today's behavior.
+- Visible-fallback test: a forced inventory error emits the telemetry event and degrades to
+  **static inputs while keeping the corrected policy** — assert that with occupancy ≥ hard and
+  estimated savings < `min_savings`, compaction is STILL recommended (the hard line is not
+  gated by `min_savings` even on the fallback path).
 
 ## 10. Config
 
@@ -224,3 +230,13 @@ redundancy's natural consumer — the inventory is built decision-ready for it).
   floor configs (floor can swing ~22k). Resolution: `post_floor` uses the **live** residual
   `base` (config-correct for this session) + a telemetry **summary-term** only; and `min_savings`
   no longer gates the hard line — §6.1.
+
+**Pass 3** (same lane, on the twice-hardened spec) — REVISE, one small must-fix (all pass-2
+fixes verified holding):
+- The never-raise fallback (§8/§9) said it "matches today's behavior," which would reintroduce
+  the suppress-at-hard bug (today's formula AND-gated the hard line with `min_savings`).
+  Resolution: fallback swaps **inputs only** (static `post_floor` + aggregate `stale_output`),
+  never the policy formula — the corrected hard-line rule always applies; the visible-fallback
+  test asserts compaction at hard even when estimated savings < `min_savings` (§8, §9).
+- Residual risks to monitor in implementation (not blockers): chars/4 soft-band noise;
+  summary-term drift by workload/model; cooldown semantics at the hard line.
