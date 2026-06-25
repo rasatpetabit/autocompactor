@@ -189,3 +189,107 @@ def test_resolve_soft_pct_override_disables_curve(monkeypatch):
     cfg = policy.resolve_policy_config("claude", 512_000, profile="balanced")
     assert cfg.soft == 0.35
     assert cfg.target_tokens == 0
+
+
+# --- Task 6 (context-window-analysis): composition_detail_lines renders the
+#     ContextInventory additive fields (floor + dynamic + dormant), consumed
+#     verbatim from the comp dict; back-compat when the fields are absent. ---
+
+def _legacy_comp():
+    """A comp dict that has ONLY today's 55cdfef keys (no inventory fields)."""
+    return {
+        "total": 50000, "base": 49892, "skills": 0, "skill_names": [],
+        "summary": 0, "tool": 48, "tool_stale_frac": 0.0,
+        "tool_breakdown": [{"name": "read", "stale_frac": 0.0, "tokens": 25}],
+        "assistant": 46, "prompts": 14,
+    }
+
+
+def _inventory_comp():
+    """A comp dict WITH the new additive inventory fields."""
+    return {
+        "total": 50000, "base": 46000, "skills": 0, "skill_names": [],
+        "summary": 0, "tool": 48, "tool_stale_frac": 0.0,
+        "tool_breakdown": [{"name": "read", "stale_frac": 0.0, "tokens": 25}],
+        "assistant": 46, "prompts": 14,
+        "inventory_floor": {
+            "context_files": 2000, "skills_meta": 0,
+            "tools_system": 22000, "true_residual": 0,
+            "per_package": {"pi-subagents": 11229, "context-mode": 10973},
+            "measured_at": "2026-06-09T00:00:00Z",
+        },
+        "dynamic_ledger": [
+            {"kind": "tool_result", "tool_name": "read", "tokens": 8000,
+             "age_turns": 25, "dormant": True, "redundant": False,
+             "reclaimable": False},
+            {"kind": "assistant", "tool_name": "", "tokens": 1000,
+             "age_turns": 5, "dormant": False, "redundant": False,
+             "reclaimable": True},
+        ],
+        "dormant_tokens": 8000,
+        "reclaim": {"reclaimable_now": 1000, "post_floor_estimate": 0,
+                    "ranking": []},
+        "inventory_degraded": False,
+    }
+
+
+def test_detail_lines_back_compat_when_inventory_absent():
+    """When the inventory fields are absent, today's 55cdfef output stands
+    unchanged (no inventory rows rendered, no exception)."""
+    comp = _legacy_comp()
+    lines = policy.composition_detail_lines(comp)
+    joined = "\n".join(lines)
+    assert "context files" not in joined
+    assert "dormant items" not in joined
+    # Legacy rows still render
+    assert any("tool output" in l for l in lines)
+    assert any("user prompts" in l for l in lines)
+
+
+def test_detail_lines_render_floor_decomposition_with_probe():
+    comp = _inventory_comp()
+    lines = policy.composition_detail_lines(comp)
+    joined = "\n".join(lines)
+    assert "context files: ~2K" in joined or "context files:" in joined
+    # Per-package tool schemas labeled 'measured <date>' (the date from
+    # floor-probe.json's frozen measured_at key)
+    assert "tool schemas (measured 2026-06-09)" in joined
+    assert "pi-subagents" in joined
+    assert "context-mode" in joined
+
+
+def test_detail_lines_render_no_probe_fallback_bucket():
+    """When no probe data, the honest single 'tools+system (fixed)' bucket
+    renders (true_residual absorbs the unattributed floor)."""
+    comp = _legacy_comp()
+    comp["inventory_floor"] = {
+        "context_files": 2000, "skills_meta": 0, "tools_system": 0,
+        "true_residual": 46000, "per_package": {}, "measured_at": "",
+    }
+    comp["dynamic_ledger"] = []
+    comp["dormant_tokens"] = 0
+    lines = policy.composition_detail_lines(comp)
+    joined = "\n".join(lines)
+    assert "tools+system (fixed)" in joined
+    assert "no probe data" in joined
+
+
+def test_detail_lines_render_dynamic_highlights_and_dormant_rollup():
+    comp = _inventory_comp()
+    lines = policy.composition_detail_lines(comp)
+    joined = "\n".join(lines)
+    # Dynamic per-item highlights (kind/tool_name/tokens/age_turns)
+    assert "tool_result (read)" in joined
+    assert "dormant" in joined  # dormant flag tag
+    # Dormant rollup line
+    assert "dormant items:" in joined
+
+
+def test_detail_lines_consume_verbatim_no_recompute():
+    """The figures are consumed verbatim: the dormant rollup equals the
+    comp dict's dormant_tokens (no recompute)."""
+    comp = _inventory_comp()
+    lines = policy.composition_detail_lines(comp)
+    joined = "\n".join(lines)
+    # The inventory's dormant_tokens is 8000 -> renders as ~8K
+    assert "~8k" in joined

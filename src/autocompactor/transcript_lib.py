@@ -285,6 +285,96 @@ def topic_shift(prompt: str, st: TranscriptStats) -> bool:
     overlap = len(pw & st.recent_words) / len(pw)
     return overlap < 0.2
 
+DORMANT_DEADBAND_NAME = "dormant-deadband.json"
+
+
+def _dormant_deadband_path() -> str:
+    """Path to the persisted deadband on/off state under the pi state root.
+    Uses statedir as a read-only path helper (does NOT edit statedir.py)."""
+    from autocompactor import statedir
+    import os
+    return os.path.join(statedir.state_root("pi"), DORMANT_DEADBAND_NAME)
+
+
+def _read_deadband_state() -> dict:
+    """Read the persisted deadband on/off state. Returns {} on any failure."""
+    import json
+    import os
+    try:
+        with open(_dormant_deadband_path()) as fh:
+            return json.load(fh) or {}
+    except Exception:
+        return {}
+
+
+def _write_deadband_state(state: dict) -> None:
+    """Persist the deadband on/off state. Never raises (best-effort)."""
+    import json
+    import os
+    try:
+        path = _dormant_deadband_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(state, fh)
+    except Exception:
+        pass
+
+
+def _dormant_output_signal(st: TranscriptStats, window: float) -> tuple:
+    """Compute the dormant_output signal (spec §6.2).
+
+    Returns (dormant_tokens, human_description_or_empty). Fires when
+    dynamic_dormant_tokens >= DORMANT_TOKEN_THRESHOLD. A deadband/hysteresis
+    (DORMANT_DEADBAND fraction of the threshold) keeps the signal 'on' once
+    fired until dormant_tokens drops below threshold*(1 - deadband), damping
+    chars/4 estimate noise across evaluate calls. The persisted on/off state
+    lives in a small JSON under statedir.state_root('pi').
+
+    ADDITIVE-only: this signal never suppresses stale_output (it OR-combines
+    additively in pi_bridge's gating pipeline via the existing sig_pairs).
+
+    Uses a decision-safe inventory path (include_probe=False): the readout-only
+    floor probe is never opened here (T9 boundary)."""
+    from autocompactor import config_lib
+    from autocompactor import pi_session_lib
+    try:
+        inv_enabled = config_lib.cfg.bool("INVENTORY_ENABLED", default=True)
+        if not inv_enabled:
+            return 0, ""
+        active_prefix = list(getattr(st, "entries", []) or [])
+        if not active_prefix:
+            return 0, ""
+        # Lazy import to avoid a module-load cycle (context_inventory imports
+        # pi_session_lib which imports this module).
+        from autocompactor import context_inventory as _ci
+        inv = _ci.build_inventory(active_prefix, st.context_tokens, window,
+                                  include_probe=False)
+        if inv.degraded:
+            return 0, ""
+        dormant_tokens = int(inv.dynamic_dormant_tokens)
+        thr = int(config_lib.cfg.float("DORMANT_TOKEN_THRESHOLD", default=30000))
+        if thr <= 0:
+            return dormant_tokens, ""
+        deadband = float(config_lib.cfg.float("DORMANT_DEADBAND",
+                                                default=0.2))
+        lower = int(thr * (1.0 - deadband))
+        prior = _read_deadband_state()
+        was_on = bool(prior.get("dormant_on", False))
+        # Hysteresis: turn ON at >= thr; turn OFF only below the lower band.
+        if was_on:
+            on = dormant_tokens >= lower
+        else:
+            on = dormant_tokens >= thr
+        _write_deadband_state({"dormant_on": on, "dormant_tokens": dormant_tokens,
+                               "threshold": thr, "lower": lower})
+        if on:
+            return dormant_tokens, (
+                f"{dormant_tokens:,} dormant tokens in context "
+                f"(additive gate; never suppresses stale_output)")
+        return dormant_tokens, ""
+    except Exception:
+        return 0, ""
+
 
 def active_signals(st: TranscriptStats, prompt: str = "",
                    window: float = 200_000.0,
@@ -315,6 +405,21 @@ def active_signals(st: TranscriptStats, prompt: str = "",
     if stale >= stale_frac_thr:
         sigs.append(("stale_output",
                      f"{stale:.0%} of tool output in context is stale"))
+    # dormant_output: medium-tier ADDITIVE gate (spec §6.2). Computed from the
+    # ContextInventory dynamic_dormant_tokens vs the config threshold. NEVER
+    # suppresses stale_output (it OR-combines additively in pi_bridge's
+    # gating logic via the existing sig_pairs pipeline). A deadband/hysteresis
+    # on the threshold (DORMANT_DEADBAND) damps chars/4 estimate noise so the
+    # signal doesn't chatter on/off across evaluate calls. Persisted across
+    # calls in a small JSON under statedir.state_root('pi') (read-only path
+    # helper; statedir.py is NOT edited by this task). The signal is
+    # estimate-based (chars/4 dormant_tokens) — acceptable precisely because
+    # it is additive (a false positive triggers at most an EXTRA soft-band
+    # compaction, never suppresses a needed one) and band-limited (the exact
+    # hard line is unaffected).
+    dormant_tok, dormant_desc = _dormant_output_signal(st, window)
+    if dormant_desc:
+        sigs.append(("dormant_output", dormant_desc))
     br = burn_rate(st)
     if br > 0 and st.context_tokens > 0:
         target = hard_tokens if hard_tokens and hard_tokens > 0 else window * 0.85
