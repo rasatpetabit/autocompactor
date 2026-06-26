@@ -4,7 +4,7 @@
 <!-- agentic-dispatch:central-pointer v2 -->
 ## Central agent policy
 
-Cross-repo AskUserQuestion/ask_user_question (AUQ), RTK, Serena, Hindsight,
+Cross-repo AskUserQuestion/ask_user_question (AUQ), Serena, Hindsight,
 context-mode, and subagent/model-dispatch policy is centralized in the
 agent-dispatch repo. Read it via `agent-dispatch where` (repo root) or
 `agent-dispatch digest` (live routing policy). Do not duplicate or override
