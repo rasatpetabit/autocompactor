@@ -523,7 +523,7 @@ def cmd_reinject(opts: dict) -> dict:
         out["nextStepSource"] = next_step_src
     # Surface the configured NEXTSTEP mode so the TS shim gates surfacing
     # consistently with config.json (single source of truth).
-    out["nextStepMode"] = cfg.str("NEXTSTEP", default="off").lower()
+    out["nextStepMode"] = cfg.str("NEXTSTEP", default="autonomous").lower()
     return out
 
 

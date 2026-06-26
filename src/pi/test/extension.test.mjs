@@ -55,6 +55,7 @@ function makePi({ exec } = {}) {
       return { stdout: "", stderr: "", code: 1, killed: false }
     },
     sendMessage(message, opts) { sent.push({ message, opts }) },
+    registerCommand(_name, _def) {},
   }
 }
 
@@ -95,7 +96,7 @@ const CONTEXT_STATE = "Context: 150,000 tokens\nComposition:\n  • tool output:
 const COMPACTION_STATS = "compaction #1 (auto) | 150k before | pre-compaction composition: ≈ 80k tool (95% stale)\n  └ preserved verbatim → disk (survive the summary): 2 files"
 
 const RECOMMEND = {
-  evaluate: { recommend: true, reason: "test boundary", context_tokens: 150_000, contextState: CONTEXT_STATE },
+  evaluate: { recommend: true, mode: "advise", reason: "test boundary", context_tokens: 150_000, contextState: CONTEXT_STATE },
   prepare: { customInstructions: "PRESERVE THESE THINGS", contextState: CONTEXT_STATE },
   reinject: { text: "digest body", customType: "autocompactor.digest", compactionStats: COMPACTION_STATS },
 }

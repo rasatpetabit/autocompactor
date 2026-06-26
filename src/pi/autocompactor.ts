@@ -96,7 +96,26 @@ function softPctFor(ctxWindow: number): number {
 function mode(verdictMode?: unknown): "advise" | "actuate" {
   const env = process.env.AUTOCOMPACTOR_PI_MODE
   if (env === "actuate" || env === "advise") return env
-  return verdictMode === "actuate" ? "actuate" : "advise"
+  if (verdictMode === "actuate" || verdictMode === "advise") return verdictMode
+  return CFG?.MODE === "actuate" ? "actuate" : "advise"
+}
+
+function configuredNextStepMode(value?: unknown): "off" | "advisory" | "autonomous" {
+  const raw = (
+    process.env.AUTOCOMPACTOR_NEXTSTEP ??
+    String(value ?? CFG?.NEXTSTEP ?? "autonomous")
+  ).trim().toLowerCase()
+  if (raw === "off" || raw === "advisory" || raw === "autonomous") return raw
+  return "autonomous"
+}
+
+type AutoResumePayload = {
+  compactionId: string
+  digestText?: string
+  digestType?: string
+  statusText: string
+  step: string
+  stepSrc: string
 }
 
 function interceptEnabled(): boolean {
@@ -225,6 +244,8 @@ function safeCompact(
   ctx: ExtensionContext,
   customInstructions: string | undefined,
   clear: () => void,
+  afterComplete?: () => void,
+  afterError?: () => void,
 ): void {
   let settled = false
   const finish = (errMsg?: string): void => {
@@ -232,6 +253,8 @@ function safeCompact(
     settled = true
     if (errMsg) announce(pi, ctx, `autocompactor: compaction failed — ${errMsg}.`, "error", true)
     clear()
+    if (errMsg) afterError?.()
+    else afterComplete?.()
   }
   try {
     const ret: any = ctx.compact({
@@ -278,6 +301,60 @@ export default function autocompactor(pi: ExtensionAPI) {
   let lastDetailTokens = -Infinity // lower-cost context-composition notice cadence
   let bridgeWarned = false
   let lastAdvisory = "" // dedupe key for the recurring advise/reentrancy notice
+  let pendingAutoResume: AutoResumePayload | null = null
+  let lastAutoResumeCompactionId = ""
+
+  const flushAutoResume = (ctx: ExtensionContext): void => {
+    const payload = pendingAutoResume
+    if (!payload) return
+    pendingAutoResume = null
+    if (payload.compactionId && payload.compactionId === lastAutoResumeCompactionId) return
+    lastAutoResumeCompactionId = payload.compactionId
+    try {
+      const idle = typeof ctx.isIdle === "function" ? ctx.isIdle() : true
+      const queuedOptions = idle ? undefined : ({ deliverAs: "followUp" } as const)
+      if (payload.digestText) {
+        pi.sendMessage(
+          {
+            customType: payload.digestType ?? "autocompactor.digest",
+            content: payload.digestText,
+            display: false,
+          },
+          queuedOptions,
+        )
+      }
+      if (payload.statusText) {
+        pi.sendMessage(
+          {
+            customType: "autocompactor.status",
+            content: payload.statusText,
+            display: true,
+          },
+          queuedOptions,
+        )
+      }
+      const taskMessage =
+        `[autocompactor-nextstep] Continuing automatically after compaction. Recovered next step (${payload.stepSrc || "unknown"}):\n` +
+        `${payload.step}\n\n` +
+        "Verify the current repository/session state before editing, then continue executing the active task using the available tools."
+      pi.sendMessage(
+        {
+          customType: "autocompactor.nextstep.task",
+          content: taskMessage,
+          display: true,
+          details: {
+            autonomous: true,
+            compactionId: payload.compactionId,
+            source: payload.stepSrc,
+          },
+        },
+        idle ? { triggerTurn: true } : { deliverAs: "followUp" },
+      )
+      setAcStatus(ctx, "autocompactor: autonomous next step queued after compaction.")
+    } catch {
+      /* never break Pi */
+    }
+  }
 
   pi.on("session_start", async (_event, ctx) => {
     try {
@@ -409,7 +486,14 @@ export default function autocompactor(pi: ExtensionAPI) {
             true,
           )
         }
-        safeCompact(pi, ctx, prep?.customInstructions, () => { selfTriggered = false })
+        safeCompact(
+          pi,
+          ctx,
+          prep?.customInstructions,
+          () => { selfTriggered = false },
+          () => flushAutoResume(ctx),
+          () => { pendingAutoResume = null },
+        )
       } else {
         // Advise mode OR actuate mode with reentrancy guard (compaction in
         // flight): RECURRING advisory — fires on every qualifying agent_end
@@ -505,7 +589,14 @@ export default function autocompactor(pi: ExtensionAPI) {
         "info",
         true,
       )
-      safeCompact(pi, ctx, prep.customInstructions, () => { selfTriggered = false })
+      safeCompact(
+        pi,
+        ctx,
+        prep.customInstructions,
+        () => { selfTriggered = false },
+        () => flushAutoResume(ctx),
+        () => { pendingAutoResume = null },
+      )
       return { cancel: true }
     } catch {
       /* fall through to native compaction untouched */
@@ -524,33 +615,45 @@ export default function autocompactor(pi: ExtensionAPI) {
         ? ["--context-window", String(postUsage.contextWindow)]
         : []
       const inj = await bridge(pi, ctx, "reinject", reinjectArgs)
-      if (inj?.text) {
+      const digestText = typeof inj?.text === "string" ? inj.text : ""
+      const digestType = typeof inj?.customType === "string" ? inj.customType : "autocompactor.digest"
+
+      // Optional post-compaction next-step surfacing. Sourced at prepare time
+      // from the rich pre-compaction transcript (pending todo → last user task
+      // → last correction) and staged in bridge state; recovered here on
+      // reinject. Gated by NEXTSTEP mode:
+      //   "off"        — never surface
+      //   "advisory"   — surface a ready-to-run brief for the next human turn
+      //   "autonomous" — immediately trigger a model turn after compaction
+      // Config: top-level NEXTSTEP in config.json, overridable by
+      // AUTOCOMPACTOR_NEXTSTEP env var. Default is autonomous.
+      const nextStepMode = configuredNextStepMode(inj?.nextStepMode)
+      const step = ((inj?.nextStep as string | undefined) ?? "").trim()
+      const stepSrc = ((inj?.nextStepSource as string | undefined) ?? "").trim()
+      const compactionId = String(
+        event?.compactionEntry?.id ??
+        `${event?.reason ?? "unknown"}:${event?.compactionEntry?.timestamp ?? ""}:${stepSrc}:${step.slice(0, 80)}`,
+      )
+      const autoResume = Boolean(
+        step && nextStepMode === "autonomous" && !event?.willRetry &&
+        (selfTriggered || event?.reason !== "manual"),
+      )
+
+      if (digestText && !autoResume) {
         // Artifact digest (persisted in context for the model — display: false
-        // keeps it out of the user-facing chat history)
+        // keeps it out of the user-facing chat history). Autonomous mode flushes
+        // this explicitly with the triggered resume turn; nextTurn would wait
+        // for another human prompt and miss the resumed turn.
         pi.sendMessage(
           {
-            customType: inj.customType ?? "autocompactor.digest",
-            content: inj.text,
+            customType: digestType,
+            content: digestText,
             display: false,
           },
           { deliverAs: "nextTurn" },
         )
       }
 
-      // Optional post-compaction next-step surfacing (advisory by default).
-      // Sourced at prepare time from the rich pre-compaction transcript
-      // (pending todo → last user task → last correction) and staged in
-      // bridge state; recovered here on reinject. Gated by NEXTSTEP mode:
-      //   "off"    — never surface (default)
-      //   "advisory" — surface a ready-to-run brief the user can confirm
-      //   "autonomous" — surface + inject as a model-visible task hint to continue
-      // Config: top-level NEXTSTEP in config.json, overridable by
-      // AUTOCOMPACTOR_NEXTSTEP env var. Off keeps the classic behavior.
-      const nextStepMode =
-        (process.env.AUTOCOMPACTOR_NEXTSTEP ?? "") ||
-        String(inj?.nextStepMode ?? "") || "off"
-      const step = ((inj?.nextStep as string | undefined) ?? "").trim()
-      const stepSrc = ((inj?.nextStepSource as string | undefined) ?? "").trim()
       if (step && nextStepMode === "advisory") {
         pi.sendMessage(
           {
@@ -558,22 +661,7 @@ export default function autocompactor(pi: ExtensionAPI) {
             content:
               `autocompactor-nextstep: recovered next step (${stepSrc || "unknown"}) —\n` +
               `${step}\n\n` +
-              `Reply "go" to dispatch via dispatch_task, or ignore.`,
-            display: true,
-          },
-          { deliverAs: "nextTurn" },
-        )
-      } else if (step && nextStepMode === "autonomous") {
-        // Model-visible task hint delivered next-turn; the assistant picks it
-        // up and routes through dispatch_task/subagent. Not a headless auto-run
-        // (that would need a separate worker extension to avoid acting in the
-        // compaction event path). Kept terse so it reads as a nudge, not a command.
-        pi.sendMessage(
-          {
-            customType: "autocompactor.nextstep.task",
-            content:
-              `[autocompactor-nextstep] Resuming after compaction. Next step (${stepSrc || "unknown"}):\n${step}\n\n` +
-              `Verify prior state (git status) before editing; route via dispatch_task.`,
+              `Continue with this step manually, or set AUTOCOMPACTOR_NEXTSTEP=autonomous to resume automatically after future compactions.`,
             display: true,
           },
           { deliverAs: "nextTurn" },
@@ -603,7 +691,20 @@ export default function autocompactor(pi: ExtensionAPI) {
         msg = `autocompactor: compaction completed — current context is ${postTokens.toLocaleString()} tokens.`
       }
       msg = withStatsBlock(msg, "pre-compaction accounting", inj?.compactionStats)
-      announce(pi, ctx, msg, "info", true)
+      if (autoResume) {
+        pendingAutoResume = {
+          compactionId,
+          digestText,
+          digestType,
+          statusText: msg,
+          step,
+          stepSrc,
+        }
+        announce(pi, ctx, msg, "info", false)
+        if (!selfTriggered) setTimeout(() => flushAutoResume(ctx), 0)
+      } else {
+        announce(pi, ctx, msg, "info", true)
+      }
       compactionPreTokens = 0 // reset for next compaction
     } catch {
       /* never break Pi */

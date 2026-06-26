@@ -58,6 +58,7 @@ needed. `config.local.json` is the gitignored site-local overlay, and any
 | Key | Default | Meaning |
 |---|---|---|
 | `MODE` | `actuate` | `advise` only posts an `autocompactor.advice` message; `actuate` lets the shim call `ctx.compact()` itself. Overridden by `AUTOCOMPACTOR_PI_MODE` env var. |
+| `NEXTSTEP` | `autonomous` | Post-compaction continuation mode: `autonomous` immediately triggers a model turn with the recovered next step, `advisory` shows the step for the next human turn, `off` disables it. Overridden by `AUTOCOMPACTOR_NEXTSTEP`. |
 | `PROFILE` | `economy` | Compaction profile passed to the summarizer. |
 | `WINDOW` | 200000 | Fallback context window in tokens. Pi normally derives the exact effective window from `ctx` (`contextWindow − reserveTokens`), better than this static value. |
 | `RESERVE` | 40000 | Reserve tokens subtracted from `contextWindow` when Pi does not report one. Mirrors the Pi host pin in `~/.pi/agent/settings.json`. |
@@ -78,6 +79,7 @@ needed. `config.local.json` is the gitignored site-local overlay, and any
 | `AUTOCOMPACTOR_LLM` | unset | `1` = `prepare` also runs a configured cheap-model LLM over the transcript tail for a smarter must-preserve digest. Adds latency and its own token cost. |
 | `AUTOCOMPACTOR_LLM_PROVIDER` | `claude` | Optional digest provider for the `AUTOCOMPACTOR_LLM` path. This is a *model provider* choice (Anthropic API), independent of the harness. |
 | `AUTOCOMPACTOR_PI_MODE` | `actuate` | Env override for `MODE`. `advise` only posts an `autocompactor.advice` message; `actuate` lets the shim call `ctx.compact()` itself. |
+| `AUTOCOMPACTOR_NEXTSTEP` | `autonomous` | Env override for `NEXTSTEP` (`autonomous`, `advisory`, or `off`). |
 | `AUTOCOMPACTOR_PI_INTERCEPT` | unset | `1` = cancel a native auto-compaction and re-trigger it with our enriched instructions. Default off; auto-disabled when `pi-custom-compactor` is configured. |
 | `AUTOCOMPACTOR_STATE_DIR` | `~/.autocompactor/pi` | Override the state root (used by tests). Pi is the sole adapter. |
 

@@ -1,7 +1,7 @@
 {
   "_comment": "autocompactor config (Pi sole adapter). Flat single-namespace; AUTOCOMPACTOR_* env overrides; site-local in config.local.json.",
   "MODE": "actuate",
-  "NEXTSTEP": "advisory",
+  "NEXTSTEP": "autonomous",
   "PROFILE": "economy",
   "WINDOW": 200000,
   "RESERVE": 40000,
