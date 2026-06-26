@@ -356,21 +356,7 @@ export default function autocompactor(pi: ExtensionAPI) {
     }
   }
 
-  pi.on("session_start", async (_event, ctx) => {
-    try {
-      announce(
-        pi,
-        ctx,
-        `autocompactor: loaded (mode=${mode()}, bridge=${BRIDGE}).`,
-        "info",
-        true,
-      )
-    } catch {
-      /* never break Pi */
-    }
-  })
-
-  // agent_end: the boundary moment. Mostly zero-spawn pre-gate; once context
+// agent_end: the boundary moment. Mostly zero-spawn pre-gate; once context
   // is large enough to reclaim meaningful tokens, occasionally ask the bridge
   // for a composition-only monitoring readout before the compaction gate.
   pi.on("agent_end", async (_event, ctx) => {
