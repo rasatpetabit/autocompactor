@@ -14,6 +14,7 @@ dependencies = []
 
 [project.scripts]
 contextinventory = "autocompactor.context_inventory:main"
+mdinventory = "autocompactor.md_inventory:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
