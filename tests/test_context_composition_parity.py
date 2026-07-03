@@ -12,8 +12,6 @@ Golden baseline captured 2026-06-25 from the pre-refactor main, over all 7
 fixture sessions at context_tokens=60000. If this baseline drifts, the adapter
 broke parity and the readout regressed.
 """
-import json
-import os
 import pathlib
 import sys
 

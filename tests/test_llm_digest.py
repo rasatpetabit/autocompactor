@@ -1,4 +1,4 @@
-import os, tempfile
+import os
 from autocompactor import llm_digest
 
 

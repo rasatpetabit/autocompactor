@@ -590,7 +590,7 @@ def render_report(inv: ContextInventory) -> str:
             for pkg in sorted(f.per_package, key=lambda k: f.per_package[k],
                               reverse=True):
                 rows.append((f"  tools+system · {pkg}", f.per_package[pkg],
-                            f"tool-schema package"))
+                            "tool-schema package"))
             # probe may clamp below the per-package sum; show the residual tools
             # block only if there's headroom above the named packages.
             pkg_sum = sum(f.per_package.values())

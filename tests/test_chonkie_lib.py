@@ -1,9 +1,7 @@
 """Unit tests for chonkie_lib — all fail-closed paths, bounds, and rendering."""
-import json
 import os
 import sys
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 

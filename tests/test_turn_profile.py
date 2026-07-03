@@ -6,7 +6,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(REPO, "tests", "fixtures")
 sys.path.insert(0, os.path.join(REPO, "src"))
 
-from autocompactor import pi_session_lib, transcript_lib  # noqa: E402
+from autocompactor import pi_session_lib  # noqa: E402
 
 
 def _write_jsonl(path, entries):

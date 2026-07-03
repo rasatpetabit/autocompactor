@@ -292,14 +292,11 @@ def _dormant_deadband_path() -> str:
     """Path to the persisted deadband on/off state under the pi state root.
     Uses statedir as a read-only path helper (does NOT edit statedir.py)."""
     from autocompactor import statedir
-    import os
     return os.path.join(statedir.state_root("pi"), DORMANT_DEADBAND_NAME)
 
 
 def _read_deadband_state() -> dict:
     """Read the persisted deadband on/off state. Returns {} on any failure."""
-    import json
-    import os
     try:
         with open(_dormant_deadband_path()) as fh:
             return json.load(fh) or {}
@@ -309,7 +306,6 @@ def _read_deadband_state() -> dict:
 
 def _write_deadband_state(state: dict) -> None:
     """Persist the deadband on/off state. Never raises (best-effort)."""
-    import json
     import os
     try:
         path = _dormant_deadband_path()
@@ -336,7 +332,6 @@ def _dormant_output_signal(st: TranscriptStats, window: float) -> tuple:
     Uses a decision-safe inventory path (include_probe=False): the readout-only
     floor probe is never opened here (T9 boundary)."""
     from autocompactor import config_lib
-    from autocompactor import pi_session_lib
     try:
         inv_enabled = config_lib.cfg.bool("INVENTORY_ENABLED", default=True)
         if not inv_enabled:

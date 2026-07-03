@@ -9,12 +9,9 @@ Pins context_inventory.py (context-window-analysis Task 3):
  - ReclaimEstimate.ranking consumed verbatim, never re-ranked/recomputed
 """
 import json
-import os
 import pathlib
 import sys
-import tempfile
 
-import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))

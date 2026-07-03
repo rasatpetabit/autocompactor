@@ -243,7 +243,6 @@ def _floor_probe_status_line(state_root):
    AUTOCOMPACTOR_STATE_DIR override is honored at call time, not import time."""
     try:
         import json as _json
-        import datetime as _dt
         from autocompactor import config_lib as _cfg
         probe_path = os.path.join(state_root, "floor-probe.json")
         with open(probe_path) as _fh:

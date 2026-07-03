@@ -16,7 +16,6 @@ import os
 import subprocess
 import sys
 
-import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(REPO, "tests", "fixtures")

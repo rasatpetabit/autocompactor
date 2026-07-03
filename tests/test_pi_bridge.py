@@ -10,7 +10,6 @@ import pathlib
 import subprocess
 import sys
 
-import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 BRIDGE = REPO_ROOT / "src" / "pi_bridge.py"
