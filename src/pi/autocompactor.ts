@@ -325,6 +325,11 @@ const COMPACT_RETRY_BASE_MS = Math.max(
 function isTransientCompactError(errMsg: string): boolean {
   const m = (errMsg || "").toLowerCase()
   if (!m) return false
+  // Never retry intentional cancel (user abort or our intercept of a
+  // *different* compact). Retrying cancel just loops.
+  if (m.includes("cancelled") || m.includes("canceled") || m.includes("aborted")) {
+    return false
+  }
   return (
     m.includes("connection error") ||
     m.includes("connection reset") ||
@@ -418,6 +423,13 @@ async function bridge(
 export default function autocompactor(pi: ExtensionAPI) {
   // In-memory cooldown: token reading at the last recommendation.
   let lastRecTokens = -Infinity
+  // Count of in-flight ctx.compact() calls we started with our own
+  // customInstructions (actuate or intercept re-trigger). Boolean selfTriggered
+  // alone races: prepare(LLM) can take tens of seconds, and a concurrent
+  // native compact's session_before_compact must still see "we own a compact"
+  // so it does NOT return {cancel:true} and abort our in-flight call with
+  // Pi's "Compaction cancelled" error.
+  let enrichedCompactsInFlight = 0
   let selfTriggered = false // reentrancy flag for actuate/intercept mode
   let compactionPreTokens = 0 // captured in session_before_compact for post summary
   let lastDetailTokens = -Infinity // lower-cost context-composition notice cadence
@@ -428,6 +440,20 @@ export default function autocompactor(pi: ExtensionAPI) {
   let waitPoll: WaitPollState | null = null
   // Bound for tests / host overrides; production uses ExtensionContext.
   let waitPollCtx: ExtensionContext | null = null
+
+  const beginEnrichedCompact = (): void => {
+    enrichedCompactsInFlight += 1
+    selfTriggered = true
+  }
+  const endEnrichedCompact = (): void => {
+    enrichedCompactsInFlight = Math.max(0, enrichedCompactsInFlight - 1)
+    if (enrichedCompactsInFlight === 0) selfTriggered = false
+  }
+  const ownsCompaction = (event?: any): boolean => {
+    if (enrichedCompactsInFlight > 0 || selfTriggered) return true
+    const instr = event?.customInstructions
+    return typeof instr === "string" && instr.trim().length > 0
+  }
 
   const clearWaitPoll = (): void => {
     if (waitPoll?.timer) {
@@ -710,9 +736,9 @@ export default function autocompactor(pi: ExtensionAPI) {
       const reason = verdict.reason ?? `${usage.tokens?.toLocaleString() ?? "?"} tokens`
 
       if (effMode === "actuate" && !selfTriggered) {
-        // Set selfTriggered BEFORE the prepare call to block overlapping
-        // agent_end handlers from both triggering compaction.
-        selfTriggered = true
+        // Mark ownership BEFORE prepare so concurrent native compact hooks
+        // see ownsCompaction() and never cancel our in-flight enriched path.
+        beginEnrichedCompact()
         compactionPreTokens = usage.tokens
         announce(
           pi,
@@ -739,7 +765,7 @@ export default function autocompactor(pi: ExtensionAPI) {
           pi,
           ctx,
           prep?.customInstructions,
-          () => { selfTriggered = false },
+          () => { endEnrichedCompact() },
           () => flushAutoResume(ctx),
           () => {
             // Failed compact must not lock the session behind cooldown.
@@ -776,17 +802,24 @@ export default function autocompactor(pi: ExtensionAPI) {
   })
 
   // session_before_compact: prepare fire-and-forget (backup + artifacts);
-  // optional cancel-and-retrigger enrichment, default OFF.
-  pi.on("session_before_compact", async (_event, ctx) => {
+  // optional cancel-and-retrigger enrichment when PI_INTERCEPT is on.
+  //
+  // CRITICAL: Pi throws "Compaction cancelled" when ANY handler returns
+  // {cancel:true} for the compact that is currently starting. That includes
+  // OUR own actuate ctx.compact({customInstructions}) — so we must NEVER
+  // cancel a compact we already own / already enriched. See ownsCompaction().
+  pi.on("session_before_compact", async (event, ctx) => {
     try {
-      // Self-triggered (actuate mode): agent_end already ran prepare
-      // (trigger=actuate), captured pre-tokens, and passed its
-      // customInstructions into ctx.compact(). Let that compaction run
-      // untouched — a second prepare(trigger=native) here is redundant
-      // (its result is discarded) and, with the optional LLM digest on,
-      // would double the digest cost per self-triggered compaction.
-      if (selfTriggered) {
-        setAcStatus(ctx, "autocompactor: compaction already in progress; letting self-triggered compaction continue.")
+      // Self-triggered / already-enriched: agent_end (or a prior intercept
+      // re-trigger) already ran prepare and passed customInstructions into
+      // ctx.compact(). Let that compaction run untouched — a second
+      // prepare(trigger=native) here is redundant and, worse, returning
+      // {cancel:true} aborts the in-flight compact with "Compaction cancelled".
+      if (ownsCompaction(event)) {
+        setAcStatus(
+          ctx,
+          "autocompactor: enriched compaction in progress; not cancelling.",
+        )
         return
       }
       const usage = ctx.getContextUsage()
@@ -814,8 +847,9 @@ export default function autocompactor(pi: ExtensionAPI) {
         await bridge(pi, ctx, "prepare", ["--trigger", "native", "--skip-llm", "1"], PREPARE_TIMEOUT_MS)
         return
       }
-      // Intercept mode: cancel native compaction and re-trigger with
-      // our customInstructions.
+      // Intercept mode: cancel *native* (unenriched) compaction and re-trigger
+      // with our customInstructions. Only cancel if we successfully arm a
+      // replacement compact — otherwise let native proceed.
       announce(
         pi,
         ctx,
@@ -825,6 +859,15 @@ export default function autocompactor(pi: ExtensionAPI) {
       )
       const prep = await bridge(
         pi, ctx, "prepare", ["--trigger", "native"], PREPARE_TIMEOUT_MS)
+      // Re-check ownership after the (possibly long) prepare: another actuate
+      // may have started while we awaited the bridge.
+      if (ownsCompaction(event)) {
+        setAcStatus(
+          ctx,
+          "autocompactor: enriched compaction started during prepare; not cancelling.",
+        )
+        return
+      }
       if (!prep?.customInstructions) {
         announce(
           pi,
@@ -835,7 +878,7 @@ export default function autocompactor(pi: ExtensionAPI) {
         )
         return
       }
-      selfTriggered = true
+      beginEnrichedCompact()
       announce(
         pi,
         ctx,
@@ -847,7 +890,7 @@ export default function autocompactor(pi: ExtensionAPI) {
         pi,
         ctx,
         prep.customInstructions,
-        () => { selfTriggered = false },
+        () => { endEnrichedCompact() },
         () => flushAutoResume(ctx),
         () => {
           lastRecTokens = -Infinity

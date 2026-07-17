@@ -529,3 +529,16 @@ worktree removed. 81 pytest on merged main. Live shim re-installed from MAIN;
   exponential backoff from `COMPACT_RETRY_MS` (default 2000ms).
 - Final failure clears `lastRecTokens` so cooldown does not block a later
   attempt. Env: `AUTOCOMPACTOR_COMPACT_RETRIES`, `AUTOCOMPACTOR_COMPACT_RETRY_MS`.
+
+## 2026-07-17 — fix "Compaction cancelled" self-cancel under PI_INTERCEPT
+
+- Symptom: actuate announced criteria met then immediately
+  `autocompactor: compaction failed — Compaction cancelled.`
+- Root cause: with `PI_INTERCEPT=true` (config.local), `session_before_compact`
+  returned `{cancel:true}` for *our own* actuate `ctx.compact()` when
+  `selfTriggered` was not yet visible (prepare race) or concurrent native
+  compact fired. Pi throws `Compaction cancelled` on any cancel return.
+- Fix: track `enrichedCompactsInFlight` + `ownsCompaction(event)` (also
+  treats non-empty `event.customInstructions` as already-enriched). Never
+  cancel an owned/enriched compact. Re-check ownership after prepare.
+  Do not retry cancel as transient.

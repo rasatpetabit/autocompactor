@@ -292,3 +292,82 @@ describe("compact transient retry", () => {
     }
   })
 })
+
+describe("enriched compact cancel guard", () => {
+  test("session_before_compact does not cancel when actuate compact is in flight", async () => {
+    const mod = await freshShim()
+    const handlers: Record<string, (e: any, ctx: any) => any> = {}
+    let compactStarted = false
+    const ctx: any = {
+      cwd: "/tmp",
+      hasUI: false,
+      sessionManager: { getSessionFile: () => "/tmp/sess.jsonl" },
+      compactCalls: 0,
+      compact(opts?: any) {
+        compactStarted = true
+        ctx.compactCalls++
+        // Do NOT complete yet — leave in-flight so before_compact can race.
+        // Return a never-settling promise so safeCompact keeps ownership.
+        return new Promise(() => {
+          // hang
+        })
+      },
+      getContextUsage: () => ({ tokens: 250000, contextWindow: 500000 }),
+      isIdle: () => true,
+      ui: { notify: () => {}, setStatus: () => {} },
+    }
+    const pi: any = {
+      on(ev: string, h: any) { handlers[ev] = h },
+      async exec(_cmd: string, args: string[]) {
+        const sub = args[1]
+        const payload: any = {
+          evaluate: {
+            recommend: true, mode: "actuate",
+            reason: "test cancel guard", context_tokens: 250000,
+          },
+          prepare: { customInstructions: "OWNED-INSTR" },
+          reinject: { text: "DIGEST", customType: "autocompactor.digest" },
+        }[sub]
+        return { code: 0, stdout: payload ? JSON.stringify(payload) : "" }
+      },
+      sendMessage() {},
+      registerCommand() {},
+    }
+    mod.default(pi)
+    // Start actuate compact (hangs in-flight)
+    await handlers["agent_end"]?.({}, ctx)
+    expect(compactStarted).toBe(true)
+    // Concurrent session_before_compact (as if native also fired) must not cancel.
+    const ret = await handlers["session_before_compact"]?.(
+      { reason: "threshold", customInstructions: "OWNED-INSTR" },
+      ctx,
+    )
+    expect(ret?.cancel).not.toBe(true)
+  })
+
+  test("session_before_compact does not cancel when event already has customInstructions", async () => {
+    const mod = await freshShim()
+    const handlers: Record<string, (e: any, ctx: any) => any> = {}
+    const ctx: any = {
+      cwd: "/tmp",
+      hasUI: false,
+      sessionManager: { getSessionFile: () => "/tmp/sess.jsonl" },
+      getContextUsage: () => ({ tokens: 250000, contextWindow: 500000 }),
+      isIdle: () => true,
+      ui: { notify: () => {}, setStatus: () => {} },
+      compact() {},
+    }
+    const pi: any = {
+      on(ev: string, h: any) { handlers[ev] = h },
+      async exec() { return { code: 0, stdout: "{}" } },
+      sendMessage() {},
+      registerCommand() {},
+    }
+    mod.default(pi)
+    const ret = await handlers["session_before_compact"]?.(
+      { reason: "manual", customInstructions: "already-enriched" },
+      ctx,
+    )
+    expect(ret?.cancel).not.toBe(true)
+  })
+})
