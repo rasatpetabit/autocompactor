@@ -445,6 +445,14 @@ function withHermeticHome(fn) {
     })
 }
 
+async function waitForDeferredCompact(ctx, n = 1, ms = 50) {
+  const start = Date.now()
+  while (ctx.compactCalls.length < n && Date.now() - start < ms) {
+    await new Promise((r) => setTimeout(r, 0))
+  }
+  assert.equal(ctx.compactCalls.length, n, `expected ${n} deferred compact call(s)`)
+}
+
 test("intercept via config.json PI_INTERCEPT: cancels native and re-triggers enriched", async () => {
   delete process.env.AUTOCOMPACTOR_PI_INTERCEPT
   const { mod } = await loadShimWithConfig({ PI_INTERCEPT: true })
@@ -454,7 +462,9 @@ test("intercept via config.json PI_INTERCEPT: cancels native and re-triggers enr
     const ctx = makeCtx({ tokens: 150_000 })
     const result = await pi.handlers.session_before_compact({}, ctx)
     assert.deepEqual(result, { cancel: true }, "native compaction is cancelled")
-    assert.equal(ctx.compactCalls.length, 1, "re-triggered with our compact call")
+    // Re-trigger is setTimeout(0)-deferred so Pi can unwind native auto-compact first.
+    assert.equal(ctx.compactCalls.length, 0, "re-trigger not yet scheduled inline")
+    await waitForDeferredCompact(ctx, 1)
     assert.equal(ctx.compactCalls[0].customInstructions, "PRESERVE THESE THINGS")
     const prep = pi.execCalls.find((c) => c.args[1] === "prepare")
     assert.ok(prep.args.includes("--trigger") && prep.args.includes("native"))
@@ -491,10 +501,48 @@ test("env AUTOCOMPACTOR_PI_INTERCEPT=1 enables intercept with no config key", as
       const ctx = makeCtx({ tokens: 150_000 })
       const result = await pi.handlers.session_before_compact({}, ctx)
       assert.deepEqual(result, { cancel: true })
-      assert.equal(ctx.compactCalls.length, 1)
+      await waitForDeferredCompact(ctx, 1)
     })
   } finally {
     delete process.env.AUTOCOMPACTOR_PI_INTERCEPT
+  }
+})
+
+test("concurrent native while enriched in flight: cancel native, no second re-trigger", async () => {
+  // Regression: actuate starts enriched compact, then native auto-compact fires.
+  // Old ownsCompaction() treated ANY event as owned and let native proceed →
+  // nested compact() raced _compactionAbortController → reading 'signal'.
+  process.env.AUTOCOMPACTOR_PI_MODE = "actuate"
+  delete process.env.AUTOCOMPACTOR_PI_INTERCEPT
+  try {
+    const { mod } = await loadShimWithConfig({ PI_INTERCEPT: true })
+    await withHermeticHome(async () => {
+      const pi = makePi({ exec: bridgeResponder(RECOMMEND) })
+      mod(pi)
+      const ctxActuate = makeCtx({ tokens: 150_000 })
+      await pi.handlers.agent_end({}, ctxActuate)
+      assert.equal(ctxActuate.compactCalls.length, 1, "actuate armed one enriched compact")
+
+      // Concurrent native (threshold, no customInstructions) while enriched in flight.
+      const ctxNative = makeCtx({ tokens: 150_000 })
+      const result = await pi.handlers.session_before_compact(
+        { reason: "threshold", customInstructions: undefined },
+        ctxNative,
+      )
+      assert.deepEqual(result, { cancel: true }, "concurrent native is cancelled")
+      assert.equal(ctxNative.compactCalls.length, 0, "no second re-trigger")
+
+      // Our enriched event (manual + instructions) must still be allowed through.
+      const ctxOurs = makeCtx({ tokens: 150_000 })
+      const ours = await pi.handlers.session_before_compact(
+        { reason: "manual", customInstructions: "PRESERVE THESE THINGS" },
+        ctxOurs,
+      )
+      assert.equal(ours, undefined, "our enriched compact is not cancelled")
+      assert.equal(ctxOurs.compactCalls.length, 0, "no extra re-trigger for our event")
+    })
+  } finally {
+    delete process.env.AUTOCOMPACTOR_PI_MODE
   }
 })
 

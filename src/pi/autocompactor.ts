@@ -449,10 +449,21 @@ export default function autocompactor(pi: ExtensionAPI) {
     enrichedCompactsInFlight = Math.max(0, enrichedCompactsInFlight - 1)
     if (enrichedCompactsInFlight === 0) selfTriggered = false
   }
-  const ownsCompaction = (event?: any): boolean => {
-    if (enrichedCompactsInFlight > 0 || selfTriggered) return true
+  const hasEnrichedInFlight = (): boolean =>
+    enrichedCompactsInFlight > 0 || selfTriggered
+  // True when THIS session_before_compact event is our actuate/intercept
+  // re-trigger (must not cancel). Distinct from "we have something in
+  // flight" — a concurrent *native* auto-compact while we own an enriched
+  // one must be cancelled, or Pi nests two AgentSession.compact() calls on
+  // one _compactionAbortController and throws
+  // "Cannot read properties of undefined (reading 'signal')".
+  const isEnrichedEvent = (event?: any): boolean => {
     const instr = event?.customInstructions
-    return typeof instr === "string" && instr.trim().length > 0
+    if (typeof instr === "string" && instr.trim().length > 0) return true
+    // Actuate "compact anyway" path: manual compact, empty instructions,
+    // while we still hold the in-flight claim.
+    if (hasEnrichedInFlight() && event?.reason === "manual") return true
+    return false
   }
 
   const clearWaitPoll = (): void => {
@@ -737,7 +748,7 @@ export default function autocompactor(pi: ExtensionAPI) {
 
       if (effMode === "actuate" && !selfTriggered) {
         // Mark ownership BEFORE prepare so concurrent native compact hooks
-        // see ownsCompaction() and never cancel our in-flight enriched path.
+        // see hasEnrichedInFlight() and cancel the native (not our re-trigger).
         beginEnrichedCompact()
         compactionPreTokens = usage.tokens
         announce(
@@ -806,21 +817,32 @@ export default function autocompactor(pi: ExtensionAPI) {
   //
   // CRITICAL: Pi throws "Compaction cancelled" when ANY handler returns
   // {cancel:true} for the compact that is currently starting. That includes
-  // OUR own actuate ctx.compact({customInstructions}) — so we must NEVER
-  // cancel a compact we already own / already enriched. See ownsCompaction().
+  // OUR own actuate/intercept ctx.compact({customInstructions}) — so we must
+  // NEVER cancel an event that is already our enriched compact
+  // (isEnrichedEvent). Concurrent *native* auto-compacts while we already
+  // own an enriched one MUST be cancelled (no second re-trigger) — otherwise
+  // two AgentSession.compact() calls race on _compactionAbortController and
+  // throw "Cannot read properties of undefined (reading 'signal')".
   pi.on("session_before_compact", async (event, ctx) => {
     try {
-      // Self-triggered / already-enriched: agent_end (or a prior intercept
-      // re-trigger) already ran prepare and passed customInstructions into
-      // ctx.compact(). Let that compaction run untouched — a second
-      // prepare(trigger=native) here is redundant and, worse, returning
-      // {cancel:true} aborts the in-flight compact with "Compaction cancelled".
-      if (ownsCompaction(event)) {
+      // Our actuate / intercept re-trigger: already prepared + customInstructions
+      // (or manual reason while we hold the in-flight claim). Let it run.
+      if (isEnrichedEvent(event)) {
         setAcStatus(
           ctx,
           "autocompactor: enriched compaction in progress; not cancelling.",
         )
         return
+      }
+      // Concurrent native (threshold/overflow, no customInstructions) while an
+      // enriched compact is already running — cancel native only. Do NOT
+      // re-trigger; that would nest a second compact.
+      if (hasEnrichedInFlight()) {
+        setAcStatus(
+          ctx,
+          "autocompactor: enriched compaction in flight; cancelling concurrent native.",
+        )
+        return { cancel: true }
       }
       const usage = ctx.getContextUsage()
       // Capture pre-compaction tokens for the post-compaction summary.
@@ -859,14 +881,14 @@ export default function autocompactor(pi: ExtensionAPI) {
       )
       const prep = await bridge(
         pi, ctx, "prepare", ["--trigger", "native"], PREPARE_TIMEOUT_MS)
-      // Re-check ownership after the (possibly long) prepare: another actuate
-      // may have started while we awaited the bridge.
-      if (ownsCompaction(event)) {
+      // Re-check after the (possibly long) prepare: another actuate may have
+      // started. Cancel this native; do not start a second re-trigger.
+      if (hasEnrichedInFlight()) {
         setAcStatus(
           ctx,
-          "autocompactor: enriched compaction started during prepare; not cancelling.",
+          "autocompactor: enriched compaction started during prepare; cancelling concurrent native.",
         )
-        return
+        return { cancel: true }
       }
       if (!prep?.customInstructions) {
         announce(
@@ -886,18 +908,26 @@ export default function autocompactor(pi: ExtensionAPI) {
         "info",
         true,
       )
-      safeCompact(
-        pi,
-        ctx,
-        prep.customInstructions,
-        () => { endEnrichedCompact() },
-        () => flushAutoResume(ctx),
-        () => {
-          lastRecTokens = -Infinity
-          pendingAutoResume = null
-          clearWaitPoll()
-        },
-      )
+      const instructions = prep.customInstructions
+      // Defer re-trigger until AFTER this handler returns {cancel:true} and Pi
+      // finishes unwinding the native auto-compact (its finally clears
+      // _autoCompactionAbortController). Calling ctx.compact() inline nests
+      // two AgentSession.compact() calls and races the shared controller →
+      // "Cannot read properties of undefined (reading 'signal')".
+      setTimeout(() => {
+        safeCompact(
+          pi,
+          ctx,
+          instructions,
+          () => { endEnrichedCompact() },
+          () => flushAutoResume(ctx),
+          () => {
+            lastRecTokens = -Infinity
+            pendingAutoResume = null
+            clearWaitPoll()
+          },
+        )
+      }, 0)
       return { cancel: true }
     } catch {
       /* fall through to native compaction untouched */

@@ -561,3 +561,24 @@ worktree removed. 81 pytest on merged main. Live shim re-installed from MAIN;
   `CACHELANE_SOFT_BIAS` (default false) suppresses SOFT-band only when hit
   ≥ `CACHELANE_MIN_SAVINGS_RATIO` (0.40); hard line never suppressed.
   Session IDs still don't join (proxy UUID vs Pi id) — fleet rollup only.
+
+## 2026-07-17 — fix concurrent native + intercept nested compact (signal crash)
+
+- Symptom: intercept path announced preparing/intercepting then
+  `Error: Compaction cancelled` +
+  `Compaction failed: Cannot read properties of undefined (reading 'signal')` +
+  `autocompactor: compaction failed — … reading 'signal'`.
+- Root cause: `ownsCompaction(event)` treated *any* event as owned while
+  `enrichedCompactsInFlight > 0`, so a concurrent *native* auto-compact
+  (threshold, no customInstructions) was allowed to proceed alongside our
+  actuate/intercept `ctx.compact()`. Two `AgentSession.compact()` calls race
+  the single `_compactionAbortController` field; the loser's finally clears
+  it and the winner hits `this._compactionAbortController.signal` → TypeError.
+  Secondary: intercept re-triggered `ctx.compact()` *inline* inside
+  `session_before_compact`, nesting compact while native auto was still
+  unwinding.
+- Fix: split `isEnrichedEvent(event)` (let ours run) vs `hasEnrichedInFlight()`
+  (cancel concurrent native, no second re-trigger). Defer intercept re-trigger
+  with `setTimeout(0)` so native auto fully unwinds first. Regression test
+  covers concurrent-native cancel.
+- Deploy: `python3 src/install_pi.py` (restart Pi to load).
