@@ -389,6 +389,9 @@ def cmd_prepare(opts: dict) -> dict:
     next_step, next_step_src = transcript_lib.resolve_next_step(st)
     state["staged_next_step"] = next_step
     state["staged_next_step_src"] = next_step_src
+    # Stage open_work for reinject / telemetry (counts + kinds only in events).
+    open_work = list(getattr(st, "open_work", None) or [])[:5]
+    state["staged_open_work"] = open_work
     comp = transcript_lib.context_composition(st, st.context_tokens)
     art_kept, art_dropped = artifacts.budget_plan(arts)
     state["last_compaction_stats"] = " | ".join([
@@ -436,6 +439,13 @@ def cmd_prepare(opts: dict) -> dict:
         "instr_chars": len(instructions), "artifact_chars": art_sizes,
         "composition": comp or None,
         "artifacts_kept": art_kept, "artifacts_dropped": art_dropped,
+        # Content-free next-step / open-work telemetry (no brief text).
+        "next_step_src": next_step_src or "",
+        "next_step_wait": bool(
+            next_step_src.startswith("open_work:waiting")),
+        "open_work_n": len(open_work),
+        "open_work_kinds": [w.get("kind") for w in open_work
+                            if isinstance(w, dict) and w.get("kind")],
         **prepare_resolution.event_fields(),
     })
 
@@ -521,9 +531,18 @@ def cmd_reinject(opts: dict) -> dict:
     if next_step:
         out["nextStep"] = next_step[:1500]
         out["nextStepSource"] = next_step_src
+    out["nextStepWait"] = bool(
+        (next_step_src or "").startswith("open_work:waiting"))
+    open_work = state.get("staged_open_work") or []
+    if open_work:
+        out["openWork"] = open_work[:5]
     # Surface the configured NEXTSTEP mode so the TS shim gates surfacing
     # consistently with config.json (single source of truth).
     out["nextStepMode"] = cfg.str("NEXTSTEP", default="autonomous").lower()
+    out["nextStepWaitMode"] = cfg.str(
+        "NEXTSTEP_WAIT", default="poll").lower()
+    out["waitPollS"] = int(cfg.float("WAIT_POLL_S", default=60))
+    out["waitPollMax"] = int(cfg.float("WAIT_POLL_MAX", default=20))
     return out
 
 

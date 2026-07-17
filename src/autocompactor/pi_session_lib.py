@@ -419,11 +419,19 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
             continue
 
         if role == "assistant":
-            st.assistant_text_chars += len(_message_text(msg, include_thinking=True))
+            asst_text = _message_text(msg, include_thinking=False)
+            st.assistant_text_chars += len(
+                _message_text(msg, include_thinking=True))
             usage = msg.get("usage")
             if isinstance(usage, dict):
                 st.last_usage = _usage_compat(usage)
                 st.usage_series.append(_usage_context(usage))
+            # Mechanical open-work extraction (wait monitors / on-success).
+            if asst_text:
+                hits = transcript_lib.extract_open_work_from_text(asst_text)
+                if hits:
+                    st.open_work = transcript_lib.merge_open_work(
+                        st.open_work, hits)
 
             for call in _tool_calls(msg):
                 name = call["name"]
@@ -480,7 +488,12 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
             text = _message_text(msg).strip()
             if text and not text.startswith("/") and "<command-name>" not in text:
                 st.user_prompt_chars += len(text)
-                st.last_user_task = text[:500]
+                # Hygiene: ignore trivial pings (status?) and strip base64/
+                # image bulk so last_user_task stays a real goal string.
+                if not transcript_lib.is_trivial_user_ping(text):
+                    cleaned = transcript_lib.sanitize_user_task_text(text)
+                    if cleaned and len(cleaned.strip()) >= 8:
+                        st.last_user_task = cleaned[:500]
                 if is_recent:
                     st.recent_words |= transcript_lib._content_words(text)
                 if transcript_lib.CORRECTION_RE.search(text):

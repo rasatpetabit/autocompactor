@@ -10,7 +10,9 @@
 // reaches Pi regardless of launch environment; the AUTOCOMPACTOR_PI_MODE
 // env var, when set, overrides the verdict.
 // Native-auto interception (cancel-and-retrigger in session_before_compact)
-// is gated by AUTOCOMPACTOR_PI_INTERCEPT=1, default OFF, and is skipped when
+// is gated by config.json PI_INTERCEPT (durable path) with the
+// AUTOCOMPACTOR_PI_INTERCEPT env var, when set, overriding in both
+// directions ("1" on, anything else off). Default OFF, and skipped when
 // @davidorex/pi-custom-compactor is configured (coexist passively).
 
 import * as fs from "node:fs"
@@ -109,6 +111,50 @@ function configuredNextStepMode(value?: unknown): "off" | "advisory" | "autonomo
   return "autonomous"
 }
 
+function configuredWaitMode(value?: unknown): "poll" | "advisory" | "off" {
+  const raw = (
+    process.env.AUTOCOMPACTOR_NEXTSTEP_WAIT ??
+    String(value ?? CFG?.NEXTSTEP_WAIT ?? "poll")
+  ).trim().toLowerCase()
+  if (raw === "poll" || raw === "advisory" || raw === "off") return raw
+  return "poll"
+}
+
+function configuredWaitPollS(value?: unknown): number {
+  const env = parseFloat(process.env.AUTOCOMPACTOR_WAIT_POLL_S ?? "")
+  if (Number.isFinite(env) && env > 0) return env
+  const fromVal = parseFloat(String(value ?? ""))
+  if (Number.isFinite(fromVal) && fromVal > 0) return fromVal
+  return cfgNum("WAIT_POLL_S", 60)
+}
+
+function configuredWaitPollMax(value?: unknown): number {
+  const env = parseFloat(process.env.AUTOCOMPACTOR_WAIT_POLL_MAX ?? "")
+  if (Number.isFinite(env) && env > 0) return Math.floor(env)
+  const fromVal = parseFloat(String(value ?? ""))
+  if (Number.isFinite(fromVal) && fromVal > 0) return Math.floor(fromVal)
+  return Math.floor(cfgNum("WAIT_POLL_MAX", 20))
+}
+
+function isWaitShapedStep(stepSrc: string, nextStepWait?: unknown): boolean {
+  if (nextStepWait === true || nextStepWait === 1 || nextStepWait === "1") return true
+  return String(stepSrc || "").startsWith("open_work:waiting")
+}
+
+// Visible delivery: when the session is idle (not streaming), omit deliverAs
+// so Pi's final branch renders+persists immediately. When not idle, use
+// nextTurn (the proven anti-swallow path for mid-stream events).
+type Deliver = "nextTurn" | "immediate"
+
+function deliveryFor(ctx: ExtensionContext): Deliver {
+  try {
+    const idle = typeof ctx.isIdle === "function" ? ctx.isIdle() : true
+    return idle ? "immediate" : "nextTurn"
+  } catch {
+    return "nextTurn"
+  }
+}
+
 type AutoResumePayload = {
   compactionId: string
   digestText?: string
@@ -116,10 +162,34 @@ type AutoResumePayload = {
   statusText: string
   step: string
   stepSrc: string
+  waitShaped?: boolean
+  waitMode?: "poll" | "advisory" | "off"
+  waitPollS?: number
+  waitPollMax?: number
+}
+
+type WaitPollState = {
+  brief: string
+  stepSrc: string
+  compactionId: string
+  remaining: number
+  delayMs: number
+  timer: ReturnType<typeof setTimeout> | null
 }
 
 function interceptEnabled(): boolean {
-  if (process.env.AUTOCOMPACTOR_PI_INTERCEPT !== "1") return false
+  // Durable delivery is config.json PI_INTERCEPT; the env var, when SET (to
+  // anything non-empty), WINS in both directions — "1" forces on, any other
+  // value forces off — so a lingering export can't silently fight the config
+  // (mirrors the MODE fix pattern; avoids the 2026-06-10 env-delivery
+  // regression where advise-only shipped because the env never reached Pi).
+  const env = process.env.AUTOCOMPACTOR_PI_INTERCEPT
+  if (env !== undefined && env !== "") {
+    if (env !== "1") return false
+  } else {
+    const cfg = CFG?.PI_INTERCEPT
+    if (!(cfg === true || cfg === 1 || cfg === "1")) return false
+  }
   try {
     // Coexist passively with pi-custom-compactor: never intercept if present.
     const settings = JSON.parse(
@@ -164,14 +234,13 @@ function notify(ctx: ExtensionContext, message: string, level: StatusLevel): voi
 // mid-stream — in BOTH cases `deliverAs:"followUp"` routes the message to
 // agent.followUp() (the agent's input queue): not rendered, never persisted, and
 // it can even trigger a spurious continuation turn that injects the status text
-// as agent input. So `followUp` is never used for a visible status. The only
-// channel that survives a compaction and renders is `deliverAs:"nextTurn"`: it is
-// queued and injected+rendered at the next user prompt (flush at agent-session.js
-// :797). EVERY visible notice — one-shot (load/compaction start/done/errors) and
-// the recurring agent_end advisory alike — uses "nextTurn". The recurring advisory
-// is de-duplicated by text (see lastAdvisory) so nextTurn cannot pile up stale
-// duplicates at the next prompt, which was the original reason it was on followUp.
-type Deliver = "nextTurn"
+// as agent input. So `followUp` is never used for a visible status.
+//
+// When the session is IDLE, omit deliverAs entirely so Pi's final branch
+// renders+persists immediately (user sees compact status without typing).
+// When NOT idle (mid-stream / agent_end), use deliverAs:"nextTurn" — the only
+// channel that survives a compaction and renders at the next user prompt.
+// The recurring advisory is de-duplicated by text (see lastAdvisory).
 
 function persistVisible(
   pi: ExtensionAPI,
@@ -180,6 +249,7 @@ function persistVisible(
   deliver: Deliver = "nextTurn",
 ): void {
   try {
+    const opts = deliver === "immediate" ? undefined : { deliverAs: "nextTurn" as const }
     pi.sendMessage(
       {
         customType: "autocompactor.status",
@@ -187,7 +257,7 @@ function persistVisible(
         display: true,
         details: { level, timestamp: Date.now() },
       },
-      { deliverAs: deliver },
+      opts,
     )
   } catch {
     /* persistent status is best-effort */
@@ -200,11 +270,11 @@ function announce(
   message: string,
   level: StatusLevel = "info",
   persist = true,
-  deliver: Deliver = "nextTurn",
+  deliver?: Deliver,
 ): void {
   setAcStatus(ctx, message)
   notify(ctx, message, level)
-  if (persist) persistVisible(pi, message, level, deliver)
+  if (persist) persistVisible(pi, message, level, deliver ?? deliveryFor(ctx))
 }
 
 function errorText(err: unknown): string {
@@ -303,6 +373,98 @@ export default function autocompactor(pi: ExtensionAPI) {
   let lastAdvisory = "" // dedupe key for the recurring advise/reentrancy notice
   let pendingAutoResume: AutoResumePayload | null = null
   let lastAutoResumeCompactionId = ""
+  let waitPoll: WaitPollState | null = null
+  // Bound for tests / host overrides; production uses ExtensionContext.
+  let waitPollCtx: ExtensionContext | null = null
+
+  const clearWaitPoll = (): void => {
+    if (waitPoll?.timer) {
+      try { clearTimeout(waitPoll.timer) } catch { /* ignore */ }
+    }
+    waitPoll = null
+    waitPollCtx = null
+  }
+
+  const fireWaitPoll = (): void => {
+    const state = waitPoll
+    const ctx = waitPollCtx
+    if (!state || !ctx) return
+    try {
+      const idle = typeof ctx.isIdle === "function" ? ctx.isIdle() : true
+      if (!idle) {
+        // Session busy — try once more after the same delay, without
+        // burning a remaining slot if we still have budget.
+        if (state.remaining > 0) {
+          state.timer = setTimeout(fireWaitPoll, state.delayMs)
+        } else {
+          clearWaitPoll()
+        }
+        return
+      }
+      state.remaining -= 1
+      const pollMessage =
+        `[autocompactor-nextstep] Polling open work after wait interval ` +
+        `(${state.stepSrc || "open_work:waiting"}; remaining polls: ${state.remaining}).\n` +
+        `${state.brief}\n\n` +
+        "Check the monitor command(s) now. If still running, report status and stop; " +
+        "if succeeded, complete the on-success handoff. Do not start unrelated work."
+      pi.sendMessage(
+        {
+          customType: "autocompactor.nextstep.poll",
+          content: pollMessage,
+          display: true,
+          details: {
+            waitPoll: true,
+            compactionId: state.compactionId,
+            source: state.stepSrc,
+            remaining: state.remaining,
+          },
+        },
+        { triggerTurn: true },
+      )
+      setAcStatus(
+        ctx,
+        state.remaining > 0
+          ? `autocompactor: waiting · next poll in ${Math.round(state.delayMs / 1000)}s · ${state.remaining} left`
+          : "autocompactor: waiting · final poll fired",
+      )
+      if (state.remaining > 0) {
+        state.timer = setTimeout(fireWaitPoll, state.delayMs)
+      } else {
+        waitPoll = null
+        waitPollCtx = null
+      }
+    } catch {
+      clearWaitPoll()
+    }
+  }
+
+  const scheduleWaitPoll = (
+    ctx: ExtensionContext,
+    brief: string,
+    stepSrc: string,
+    compactionId: string,
+    delayS: number,
+    maxPolls: number,
+  ): void => {
+    clearWaitPoll()
+    const delayMs = Math.max(5, delayS) * 1000
+    const remaining = Math.max(1, Math.floor(maxPolls))
+    waitPollCtx = ctx
+    waitPoll = {
+      brief,
+      stepSrc,
+      compactionId,
+      remaining,
+      delayMs,
+      timer: null,
+    }
+    waitPoll.timer = setTimeout(fireWaitPoll, delayMs)
+    setAcStatus(
+      ctx,
+      `autocompactor: waiting · poll in ${Math.round(delayMs / 1000)}s · max ${remaining}`,
+    )
+  }
 
   const flushAutoResume = (ctx: ExtensionContext): void => {
     const payload = pendingAutoResume
@@ -333,6 +495,55 @@ export default function autocompactor(pi: ExtensionAPI) {
           queuedOptions,
         )
       }
+
+      const waitShaped = Boolean(payload.waitShaped)
+      const waitMode = payload.waitMode ?? "poll"
+
+      // Wait-shaped autonomous resume: do NOT re-enter a coding task with
+      // triggerTurn. Surface the wait brief and optionally schedule polls.
+      if (waitShaped && waitMode !== "off") {
+        const waitMessage =
+          `[autocompactor-nextstep] Session is waiting for background work ` +
+          `(${payload.stepSrc || "open_work:waiting"}).\n` +
+          `${payload.step}\n\n` +
+          (waitMode === "poll"
+            ? `Polling every ${Math.round(payload.waitPollS ?? 60)}s (max ${payload.waitPollMax ?? 20}). ` +
+              "Do not start unrelated work."
+            : "Advisory only — no automatic poll. Reply when ready to check status.")
+        pi.sendMessage(
+          {
+            customType: "autocompactor.nextstep.wait",
+            content: waitMessage,
+            display: true,
+            details: {
+              waitShaped: true,
+              waitMode,
+              compactionId: payload.compactionId,
+              source: payload.stepSrc,
+            },
+          },
+          idle ? undefined : { deliverAs: "followUp" },
+        )
+        if (waitMode === "poll" && idle) {
+          scheduleWaitPoll(
+            ctx,
+            payload.step,
+            payload.stepSrc,
+            payload.compactionId,
+            payload.waitPollS ?? 60,
+            payload.waitPollMax ?? 20,
+          )
+        } else {
+          setAcStatus(
+            ctx,
+            waitMode === "poll"
+              ? "autocompactor: waiting (poll deferred until idle)"
+              : "autocompactor: waiting (advisory)",
+          )
+        }
+        return
+      }
+
       const taskMessage =
         `[autocompactor-nextstep] Continuing automatically after compaction. Recovered next step (${payload.stepSrc || "unknown"}):\n` +
         `${payload.step}\n\n` +
@@ -478,7 +689,7 @@ export default function autocompactor(pi: ExtensionAPI) {
           prep?.customInstructions,
           () => { selfTriggered = false },
           () => flushAutoResume(ctx),
-          () => { pendingAutoResume = null },
+          () => { pendingAutoResume = null; clearWaitPoll() },
         )
       } else {
         // Advise mode OR actuate mode with reentrancy guard (compaction in
@@ -581,7 +792,7 @@ export default function autocompactor(pi: ExtensionAPI) {
         prep.customInstructions,
         () => { selfTriggered = false },
         () => flushAutoResume(ctx),
-        () => { pendingAutoResume = null },
+        () => { pendingAutoResume = null; clearWaitPoll() },
       )
       return { cancel: true }
     } catch {
@@ -605,17 +816,24 @@ export default function autocompactor(pi: ExtensionAPI) {
       const digestType = typeof inj?.customType === "string" ? inj.customType : "autocompactor.digest"
 
       // Optional post-compaction next-step surfacing. Sourced at prepare time
-      // from the rich pre-compaction transcript (pending todo → last user task
-      // → last correction) and staged in bridge state; recovered here on
-      // reinject. Gated by NEXTSTEP mode:
+      // from the rich pre-compaction transcript (pending todo → open_work wait
+      // → last user task → last correction) and staged in bridge state;
+      // recovered here on reinject. Gated by NEXTSTEP mode:
       //   "off"        — never surface
       //   "advisory"   — surface a ready-to-run brief for the next human turn
-      //   "autonomous" — immediately trigger a model turn after compaction
+      //   "autonomous" — resume after compaction (coding triggerTurn, or
+      //                  wait-shaped scheduled poll — see NEXTSTEP_WAIT)
       // Config: top-level NEXTSTEP in config.json, overridable by
       // AUTOCOMPACTOR_NEXTSTEP env var. Default is autonomous.
+      // New compact cancels any in-flight wait poll for this session instance.
+      clearWaitPoll()
       const nextStepMode = configuredNextStepMode(inj?.nextStepMode)
       const step = ((inj?.nextStep as string | undefined) ?? "").trim()
       const stepSrc = ((inj?.nextStepSource as string | undefined) ?? "").trim()
+      const waitShaped = isWaitShapedStep(stepSrc, inj?.nextStepWait)
+      const waitMode = configuredWaitMode(inj?.nextStepWaitMode)
+      const waitPollS = configuredWaitPollS(inj?.waitPollS)
+      const waitPollMax = configuredWaitPollMax(inj?.waitPollMax)
       const compactionId = String(
         event?.compactionEntry?.id ??
         `${event?.reason ?? "unknown"}:${event?.compactionEntry?.timestamp ?? ""}:${stepSrc}:${step.slice(0, 80)}`,
@@ -630,17 +848,24 @@ export default function autocompactor(pi: ExtensionAPI) {
         // keeps it out of the user-facing chat history). Autonomous mode flushes
         // this explicitly with the triggered resume turn; nextTurn would wait
         // for another human prompt and miss the resumed turn.
+        // Idle: omit deliverAs so it lands immediately; non-idle: nextTurn.
+        const digOpts = deliveryFor(ctx) === "immediate"
+          ? undefined
+          : ({ deliverAs: "nextTurn" } as const)
         pi.sendMessage(
           {
             customType: digestType,
             content: digestText,
             display: false,
           },
-          { deliverAs: "nextTurn" },
+          digOpts,
         )
       }
 
       if (step && nextStepMode === "advisory") {
+        const advOpts = deliveryFor(ctx) === "immediate"
+          ? undefined
+          : ({ deliverAs: "nextTurn" } as const)
         pi.sendMessage(
           {
             customType: "autocompactor.nextstep.advisory",
@@ -650,7 +875,7 @@ export default function autocompactor(pi: ExtensionAPI) {
               `Continue with this step manually, or set AUTOCOMPACTOR_NEXTSTEP=autonomous to resume automatically after future compactions.`,
             display: true,
           },
-          { deliverAs: "nextTurn" },
+          advOpts,
         )
       }
 
@@ -685,7 +910,13 @@ export default function autocompactor(pi: ExtensionAPI) {
           statusText: msg,
           step,
           stepSrc,
+          waitShaped,
+          waitMode,
+          waitPollS,
+          waitPollMax,
         }
+        // Status only (persist=false); flushAutoResume surfaces the durable
+        // status + nextstep together so wait/coding paths share one channel.
         announce(pi, ctx, msg, "info", false)
         if (!selfTriggered) setTimeout(() => flushAutoResume(ctx), 0)
       } else {

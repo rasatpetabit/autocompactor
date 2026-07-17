@@ -22,6 +22,7 @@ Artifact classes (priority order — higher survives budget trimming first):
   working_commands commands whose results were clean
   hex_constants    hex literals with surrounding context (protocol work)
   files            edited / read file paths
+  open_work        waiting monitors / on-success handoffs (resume after compact)
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from autocompactor import statedir
 
 ART_DIR = os.path.expanduser("~/.autocompactor/pi/artifacts")
 
-PRIORITY = ["initial_prompts", "corrections", "error_ledger",
+PRIORITY = ["initial_prompts", "corrections", "open_work", "error_ledger",
             "working_commands", "hex_constants", "files"]
 
 
@@ -101,6 +102,9 @@ def merge(old: dict, new: dict) -> dict:
         "hex_constants": _dedupe_hex(
             (old.get("hex_constants") or [])
             + (new.get("hex_constants") or []))[-20:],
+        # Latest open_work wins per kind (new supersedes old for same kind).
+        "open_work": _merge_open_work(
+            old.get("open_work") or [], new.get("open_work") or [], 5),
         "files": {
             "edited": _dedupe_keep_last(
                 (of.get("edited") or []) + (nf.get("edited") or []), 30),
@@ -110,11 +114,25 @@ def merge(old: dict, new: dict) -> dict:
     }
 
 
+def _merge_open_work(old: list, new: list, cap: int = 5) -> list:
+    out = []
+    by_kind = {}
+    for item in list(old or []) + list(new or []):
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind") or "open"
+        by_kind[kind] = item
+    for kind in by_kind:
+        out.append(by_kind[kind])
+    return out[-cap:]
+
+
 def extract(st) -> dict:
     """Mechanical extraction from a TranscriptStats. No LLM calls."""
     return {
         "initial_prompts": list(getattr(st, "initial_user_prompts", []) or []),
         "corrections": st.corrections,
+        "open_work": list(getattr(st, "open_work", []) or [])[-5:],
         "error_ledger": [{"error": k, "count": v}
                          for k, v in list(st.error_ledger.items())[-20:]],
         "working_commands": st.working_commands,
@@ -160,6 +178,23 @@ def _sections(arts: dict) -> dict:
         sections["corrections"] = ("USER CORRECTIONS (verbatim, still "
                                    "binding):\n" + "\n".join(
                                        "- " + c for c in arts["corrections"]))
+    if arts.get("open_work"):
+        ow_lines = []
+        for item in arts["open_work"]:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind") or "open"
+            ids = ", ".join(item.get("resource_ids") or []) or "—"
+            cmds = "; ".join(item.get("monitor_cmds") or []) or "—"
+            nxt = item.get("next_on_success") or "—"
+            summary = (item.get("summary") or "")[:200]
+            ow_lines.append(
+                f"- [{kind}] {summary}\n  resources: {ids}\n"
+                f"  monitor: {cmds}\n  on success: {nxt}")
+        if ow_lines:
+            sections["open_work"] = (
+                "OPEN WORK (resume after compact — do not drop):\n"
+                + "\n".join(ow_lines))
     if arts.get("error_ledger"):
         sections["error_ledger"] = ("ERRORS SEEN THIS SESSION (do not "
                                     "re-attempt known-bad paths):\n"
@@ -228,6 +263,7 @@ def build_digest(arts: dict, budget_tokens: int = 1500,
 _LEDGER_LABELS = {
     "initial_prompts": "initial prompt(s)",
     "corrections": "corrections",
+    "open_work": "open work",
     "error_ledger": "errors",
     "working_commands": "commands",
     "hex_constants": "constants",
@@ -240,6 +276,7 @@ def _counts(arts: dict) -> dict:
     return {
         "initial_prompts": len(arts.get("initial_prompts") or []),
         "corrections": len(arts.get("corrections") or []),
+        "open_work": len(arts.get("open_work") or []),
         "error_ledger": len(arts.get("error_ledger") or []),
         "working_commands": len(arts.get("working_commands") or []),
         "hex_constants": len(arts.get("hex_constants") or []),

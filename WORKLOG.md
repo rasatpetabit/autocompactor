@@ -484,3 +484,38 @@ worktree removed. 81 pytest on merged main. Live shim re-installed from MAIN;
   section (`pi.HARD_PCT_WIDE`).
 - Codex note: `pi_session_lib` leaf→root walk picks the last file-order leaf;
   active segment honors `firstKeptEntryId`.
+## 2026-07-16 — Pi intercept becomes config-backed (one compaction owner)
+
+- **PI_INTERCEPT in config.json** (`"PI_INTERCEPT": true`): the shim's
+  `interceptEnabled()` now reads config with env override in BOTH directions —
+  `AUTOCOMPACTOR_PI_INTERCEPT` set non-empty wins ("1" on, anything else off);
+  unset → config value. Fixes the one-compaction-owner gap where native Pi
+  compaction raced the autocompactor because intercept was env-only and
+  non-interactive launches never saw the bashrc export.
+- Fail-open verified: bridge unreachable → native compaction proceeds with a
+  surfaced warning; no cancel without a bridge verdict.
+- Tests: 4 new cases in `src/pi/test/extension.test.mjs` (config-on cancels
+  native w/ customInstructions; env=0 beats config=true; env=1 no-config;
+  bridge-down fail-open). 16/17 pass — the 1 failure (`session_start`) is
+  pre-existing at HEAD (shim only registers agent_end/session_before_compact/
+  session_compact).
+- Deployed via `python3 src/install_pi.py`; deployed copy == repo modulo the
+  baked bridge path.
+
+## 2026-07-17 — waiting-state resume after compaction
+
+- **Incident:** session `019f7130…` (yanos wave-4). Actuate compacted at ~371k;
+  autonomous next-step recovered the *stale* Grok user ask (base64-polluted
+  `last_user_task`) instead of the assistant-declared wait for
+  `Y260717-114448`. Session went idle; compact status only appeared on the
+  next user prompt (`status?`).
+- **Fix:** mechanical `open_work` extraction (waiting monitors + on-success);
+  `resolve_next_step` prefers wait open_work over last_user_task; structured
+  WAIT brief; `last_user_task` strips base64 / ignores trivial pings.
+- **Shim:** wait-shaped autonomous → `autocompactor.nextstep.wait` + scheduled
+  poll (`NEXTSTEP_WAIT=poll`, `WAIT_POLL_S=60`, `WAIT_POLL_MAX=20`); idle
+  actuate status delivers immediately (no `deliverAs: nextTurn` deferral).
+- **Tests:** `tests/test_open_work.py` (8), `tests/shim_wait_resume.test.ts` (3),
+  full pytest green except pre-existing chonkie skip failures.
+- Design/plan: `docs/superpowers/specs/2026-07-17-waiting-state-resume-design.md`,
+  `docs/superpowers/plans/2026-07-17-waiting-state-resume.md`.

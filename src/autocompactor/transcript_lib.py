@@ -36,6 +36,7 @@ class TranscriptStats:
     todos: list = field(default_factory=list)          # latest TodoWrite state
     recent_errors: list = field(default_factory=list)  # last few error strings
     last_user_task: str = ""
+    open_work: list = field(default_factory=list)      # waiting monitors / on-success handoffs
     initial_user_prompts: list = field(default_factory=list)  # founding prompts, verbatim
     recent_commit: bool = False      # git commit in recent window
     recent_tests_pass: bool = False  # test-success marker in recent window
@@ -95,6 +96,32 @@ CORRECTION_RE = re.compile(
     r"|that'?s wrong|i (said|meant|prefer|want)\b|use .+ not\b)",
     re.IGNORECASE,
 )
+# Waiting-state open-work extraction (assistant-declared background work).
+WAIT_VERB_RE = re.compile(
+    r"(?is)(\bwhen it succeeds\b|\bi can poll\b|\bpoll and finish\b"
+    r"|\bleaving .{0,80} running\b|\bleave .{0,80} running\b"
+    r"|\bstill running\b|\bwaiting for\b|\bwill poll\b"
+    r"|\bmonitor\b.{0,40}\b(show|logs|status|follow)\b"
+    r"|\btake a while\b.{0,80}\bpoll\b)",
+)
+BUILD_ID_RE = re.compile(r"\bY\d{6}-\d+\b")
+MONITOR_CMD_RE = re.compile(
+    r"(?im)^\s*(?:[-*$]\s*)?((?:yanos-builder|task_list|subagent)\b[^\n]{0,160})",
+)
+MONITOR_TOKEN_RE = re.compile(
+    r"\b(yanos-builder|task_list|subagent|--follow)\b", re.IGNORECASE,
+)
+NEXT_ON_SUCCESS_RE = re.compile(
+    r"(?is)(?:when it succeeds|on success|once (?:it |that )?(?:succeeds|finishes|completes))"
+    r"[^\n.]{0,20}(?:I'?ll |I will |we(?:'ll| will) )?([^\n]{8,240})",
+)
+BASE64_LINE_RE = re.compile(r"^[A-Za-z0-9+/]{80,}={0,2}$")
+DATA_URI_RE = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,", re.IGNORECASE)
+PNG_HEADER_RE = re.compile(r"iVBORw0KGgo")
+TRIVIAL_USER_PINGS = frozenset({
+    "status?", "status", "ok", "okay", "thanks", "thank you", "thx",
+    "?", "…", "...", "y", "n", "yes", "no", "k", "kk", "cool", "great",
+})
 # Founding-goal capture: the first few genuine human prompts, kept verbatim
 # so every compaction pass can restate what the session was started to do.
 INITIAL_PROMPTS_MAX = 3
@@ -588,6 +615,138 @@ def build_context_state(st: TranscriptStats, window: float = 0.0,
     return "\n".join(lines)
 
 
+def is_trivial_user_ping(text: str) -> bool:
+    """True for short status pings that must not overwrite last_user_task."""
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    if t in TRIVIAL_USER_PINGS:
+        return True
+    # bare punctuation / emoji-only pings
+    if len(t) <= 2 and not any(ch.isalnum() for ch in t):
+        return True
+    return False
+
+
+def sanitize_user_task_text(text: str) -> str:
+    """Strip image/base64 bulk so last_user_task stays a real goal string."""
+    if not text:
+        return ""
+    cleaned = DATA_URI_RE.sub("", text)
+    out_lines = []
+    for line in cleaned.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if BASE64_LINE_RE.match(s):
+            continue
+        if PNG_HEADER_RE.search(s) and len(s) > 80:
+            # Keep any leading prose before a pasted PNG header on the same line.
+            head = PNG_HEADER_RE.split(s, maxsplit=1)[0].strip()
+            if head and len(head) >= 8 and not BASE64_LINE_RE.match(head):
+                out_lines.append(head)
+            continue
+        out_lines.append(line.rstrip())
+    return "\n".join(out_lines).strip()
+
+
+def extract_open_work_from_text(text: str) -> list:
+    """Mechanical wait/on-success extraction from a single assistant message.
+
+    Requires a concrete handle (build/job id and/or known monitor command)
+    plus wait language — bare "I can poll" without a handle is ignored to
+    limit false positives.
+    """
+    if not text or not text.strip():
+        return []
+    resource_ids = list(dict.fromkeys(BUILD_ID_RE.findall(text)))
+    monitor_cmds = []
+    for m in MONITOR_CMD_RE.finditer(text):
+        cmd = (m.group(1) or "").strip()
+        if cmd and cmd not in monitor_cmds:
+            monitor_cmds.append(cmd[:200])
+        if len(monitor_cmds) >= 5:
+            break
+    has_monitor_token = bool(MONITOR_TOKEN_RE.search(text))
+    has_handle = bool(resource_ids) or bool(monitor_cmds) or has_monitor_token
+    if not has_handle:
+        return []
+    has_wait_verb = bool(WAIT_VERB_RE.search(text))
+    next_on_success = ""
+    m = NEXT_ON_SUCCESS_RE.search(text)
+    if m:
+        next_on_success = re.sub(r"\s+", " ", (m.group(1) or "").strip())[:240]
+    hits = []
+    if has_wait_verb:
+        # Prefer a short summary line that names the resource.
+        summary = ""
+        for line in text.splitlines():
+            s = line.strip().lstrip("#*- ")
+            if not s:
+                continue
+            if resource_ids and any(rid in s for rid in resource_ids):
+                summary = s[:240]
+                break
+            if MONITOR_TOKEN_RE.search(s) and not summary:
+                summary = s[:240]
+        if not summary:
+            summary = re.sub(r"\s+", " ", text.strip())[:240]
+        hits.append({
+            "kind": "waiting_monitor",
+            "summary": summary,
+            "monitor_cmds": monitor_cmds[:5],
+            "resource_ids": resource_ids[:8],
+            "next_on_success": next_on_success,
+            "confidence": "high" if (resource_ids and monitor_cmds) else "medium",
+        })
+    elif next_on_success and (resource_ids or monitor_cmds):
+        hits.append({
+            "kind": "next_on_success",
+            "summary": next_on_success[:240],
+            "monitor_cmds": monitor_cmds[:5],
+            "resource_ids": resource_ids[:8],
+            "next_on_success": next_on_success,
+            "confidence": "medium",
+        })
+    return hits
+
+
+def merge_open_work(existing: list, new_hits: list, cap: int = 5) -> list:
+    """Append new open_work hits; latest same-kind replaces earlier."""
+    out = list(existing or [])
+    for hit in new_hits or []:
+        if not isinstance(hit, dict):
+            continue
+        kind = hit.get("kind")
+        if not kind:
+            continue
+        out = [h for h in out if h.get("kind") != kind]
+        out.append(hit)
+    return out[-cap:]
+
+
+def format_open_work_brief(item: dict) -> str:
+    """Structured resume brief for wait-shaped open work."""
+    if not isinstance(item, dict):
+        return ""
+    ids = item.get("resource_ids") or []
+    cmds = item.get("monitor_cmds") or []
+    nxt = (item.get("next_on_success") or "").strip()
+    summary = (item.get("summary") or "").strip()
+    resource = ", ".join(ids) if ids else (summary[:120] or "(unspecified)")
+    monitor = "; ".join(cmds) if cmds else "(none declared)"
+    on_success = nxt or "(unspecified)"
+    lines = [
+        f"WAITING: {resource}",
+        f"Monitor: {monitor}",
+        f"On success: {on_success}",
+        "Do not start unrelated work. Poll now; if still running, report status and stop.",
+    ]
+    if summary and summary not in resource:
+        lines.insert(1, f"Context: {summary[:200]}")
+    return "\n".join(lines)
+
+
 def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:
     """Compose compaction custom instructions from transcript analysis:
     structured-handoff schema + phase addendum + session-specific facts."""
@@ -620,6 +779,18 @@ def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:
         if done:
             lines.append("- Completed items (one line each is enough): "
                          + "; ".join(done[-8:]))
+    open_work = list(getattr(st, "open_work", None) or [])
+    if open_work:
+        lines.append("- OPEN WORK (must survive compaction; resume these, "
+                     "do not drop):")
+        for item in open_work[-5:]:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind") or "open"
+            brief = format_open_work_brief(item) if kind == "waiting_monitor" \
+                else (item.get("summary") or item.get("next_on_success") or "")
+            for bline in (brief or "").splitlines() or [str(item)[:200]]:
+                lines.append("    * " + bline)
     if st.recent_errors:
         lines.append("- Recent error texts (verbatim, for FAILED APPROACHES "
                      "or the hypothesis ledger):")
@@ -635,12 +806,15 @@ def resolve_next_step(st: "TranscriptStats") -> tuple:
 
     Priority chain (first non-empty wins):
       1. First pending TodoWrite item -- explicit, user-authored plan.
-      2. The latest genuine user task (last_user_task) -- the live goal.
-      3. The most recent user correction -- what to do differently now.
+      2. Latest waiting_monitor open_work -- live background wait.
+      3. Latest next_on_success open_work -- declared post-success handoff.
+      4. The latest genuine user task (last_user_task) -- the live goal.
+      5. The most recent user correction -- what to do differently now.
 
     Returns (next_step, source_tag) where source_tag is a short stable
-    label used for telemetry/reinject ("todo:pending[0]" | "last_user_task"
-    | "correction[-1]" | ""). Empty step yields ("", "").
+    label used for telemetry/reinject ("todo:pending[0]" |
+    "open_work:waiting_monitor" | "open_work:next_on_success" |
+    "last_user_task" | "correction[-1]" | ""). Empty step yields ("", "").
 
     MUST be called at prepare time (rich pre-compaction transcript). The
     post-compaction transcript reinject sees is truncated to an opaque
@@ -651,6 +825,20 @@ def resolve_next_step(st: "TranscriptStats") -> tuple:
               if t.get("status") != "completed" and t.get("content", "").strip()]
     if pending:
         return pending[0], "todo:pending[0]"
+    open_work = [w for w in (getattr(st, "open_work", None) or [])
+                 if isinstance(w, dict)]
+    for kind, tag in (("waiting_monitor", "open_work:waiting_monitor"),
+                      ("next_on_success", "open_work:next_on_success")):
+        for item in reversed(open_work):
+            if item.get("kind") != kind:
+                continue
+            if kind == "waiting_monitor":
+                brief = format_open_work_brief(item).strip()
+            else:
+                brief = (item.get("next_on_success") or item.get("summary")
+                         or "").strip()
+            if brief:
+                return brief, tag
     if st.last_user_task.strip():
         return st.last_user_task.strip(), "last_user_task"
     if st.corrections:
