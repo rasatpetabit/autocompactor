@@ -115,9 +115,15 @@ NEXT_ON_SUCCESS_RE = re.compile(
     r"(?is)(?:when it succeeds|on success|once (?:it |that )?(?:succeeds|finishes|completes))"
     r"[^\n.]{0,20}(?:I'?ll |I will |we(?:'ll| will) )?([^\n]{8,240})",
 )
-BASE64_LINE_RE = re.compile(r"^[A-Za-z0-9+/]{80,}={0,2}$")
+# Soft threshold: chat-wrapped base64 is often ~76–77 chars/line, not 80+.
+# Also match trailing short base64 lines (e.g. PNG IEND `...CYII=`).
+BASE64_LINE_RE = re.compile(r"^[A-Za-z0-9+/]{40,}={0,2}$")
+BASE64_CHUNK_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
+BASE64_TRAIL_RE = re.compile(r"^[A-Za-z0-9+/]{16,}={1,2}$")
 DATA_URI_RE = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,", re.IGNORECASE)
 PNG_HEADER_RE = re.compile(r"iVBORw0KGgo")
+JPEG_HEADER_RE = re.compile(r"/9j/")
+PNG_IEND_RE = re.compile(r"IEND|CYII=")
 TRIVIAL_USER_PINGS = frozenset({
     "status?", "status", "ok", "okay", "thanks", "thank you", "thx",
     "?", "…", "...", "y", "n", "yes", "no", "k", "kk", "cool", "great",
@@ -629,25 +635,67 @@ def is_trivial_user_ping(text: str) -> bool:
 
 
 def sanitize_user_task_text(text: str) -> str:
-    """Strip image/base64 bulk so last_user_task stays a real goal string."""
+    """Strip image/base64 bulk so last_user_task stays a real goal string.
+
+    Handles both long single-line base64 and chat-wrapped (~76-char) lines.
+    Once an image/base64 payload is detected, trailing bulk is dropped so a
+    short prose preamble is kept without the multi-KB paste.
+    """
     if not text:
         return ""
     cleaned = DATA_URI_RE.sub("", text)
     out_lines = []
+    dropping_bulk = False
     for line in cleaned.splitlines():
         s = line.strip()
         if not s:
+            if not dropping_bulk:
+                continue
+            # blank inside bulk — keep dropping
             continue
-        if BASE64_LINE_RE.match(s):
-            continue
-        if PNG_HEADER_RE.search(s) and len(s) > 80:
-            # Keep any leading prose before a pasted PNG header on the same line.
-            head = PNG_HEADER_RE.split(s, maxsplit=1)[0].strip()
+        if dropping_bulk:
+            # Stay in bulk mode while lines look like base64 continuation
+            # (including the short final padded line of a PNG/JPEG paste).
+            if (BASE64_LINE_RE.match(s) or BASE64_CHUNK_RE.fullmatch(s)
+                    or BASE64_TRAIL_RE.match(s) or PNG_IEND_RE.search(s)):
+                continue
+            # Non-base64 after bulk: resume capturing (rare; usually EOF).
+            dropping_bulk = False
+        # Detect start of image/base64 payload.
+        if PNG_HEADER_RE.search(s) or JPEG_HEADER_RE.search(s):
+            head = PNG_HEADER_RE.split(s, maxsplit=1)[0]
+            if JPEG_HEADER_RE.search(head):
+                head = JPEG_HEADER_RE.split(head, maxsplit=1)[0]
+            head = head.strip()
             if head and len(head) >= 8 and not BASE64_LINE_RE.match(head):
                 out_lines.append(head)
+            dropping_bulk = True
+            continue
+        if BASE64_LINE_RE.match(s):
+            dropping_bulk = True
+            continue
+        # Inline long base64 chunk mid-line: keep prose before it, drop rest.
+        m = BASE64_CHUNK_RE.search(s)
+        if m and m.start() > 0 and len(m.group(0)) >= 60:
+            head = s[:m.start()].strip()
+            if head and len(head) >= 8:
+                out_lines.append(head)
+            dropping_bulk = True
             continue
         out_lines.append(line.rstrip())
     return "\n".join(out_lines).strip()
+
+
+def _resolve_shell_build_ids(text: str) -> list:
+    """Pick Y######-###### ids assigned to BUILD_ID= / similar in shell text."""
+    ids = []
+    for m in re.finditer(
+            r"(?im)\b(?:BUILD_ID|build_id|JOB_ID|job_id)\s*=\s*[\"']?(Y\d{6}-\d+)",
+            text or ""):
+        rid = m.group(1)
+        if rid not in ids:
+            ids.append(rid)
+    return ids
 
 
 def extract_open_work_from_text(text: str) -> list:
@@ -659,10 +707,18 @@ def extract_open_work_from_text(text: str) -> list:
     """
     if not text or not text.strip():
         return []
-    resource_ids = list(dict.fromkeys(BUILD_ID_RE.findall(text)))
+    resource_ids = list(dict.fromkeys(
+        BUILD_ID_RE.findall(text) + _resolve_shell_build_ids(text)))
     monitor_cmds = []
     for m in MONITOR_CMD_RE.finditer(text):
-        cmd = (m.group(1) or "").strip()
+        cmd = (m.group(1) or "").strip().rstrip("\\").strip()
+        # Skip pure build-enqueue / help lines; prefer show/logs monitors.
+        if re.search(r"\byanos-builder\s+(build|--help|-h)\b", cmd):
+            if not re.search(r"\b(show|logs)\b", cmd):
+                continue
+        if re.search(r"\byanos-builder\s+status\b", cmd):
+            # Multi-build status dumps are not a useful single-target monitor.
+            continue
         if cmd and cmd not in monitor_cmds:
             monitor_cmds.append(cmd[:200])
         if len(monitor_cmds) >= 5:
@@ -678,41 +734,90 @@ def extract_open_work_from_text(text: str) -> list:
         next_on_success = re.sub(r"\s+", " ", (m.group(1) or "").strip())[:240]
     hits = []
     if has_wait_verb:
-        # Prefer a short summary line that names the resource.
+        # Prefer a short summary line that names the LATEST resource id
+        # (most recent build), not the first historical one.
         summary = ""
-        for line in text.splitlines():
-            s = line.strip().lstrip("#*- ")
-            if not s:
-                continue
-            if resource_ids and any(rid in s for rid in resource_ids):
-                summary = s[:240]
+        preferred_ids = list(reversed(resource_ids)) if resource_ids else []
+        for rid in preferred_ids:
+            for line in text.splitlines():
+                s = line.strip().lstrip("#*- ")
+                if rid in s and not re.search(
+                        r"\b(failed|error|aborted)\b", s, re.I):
+                    summary = s[:240]
+                    break
+            if summary:
                 break
-            if MONITOR_TOKEN_RE.search(s) and not summary:
-                summary = s[:240]
+        if not summary:
+            for line in text.splitlines():
+                s = line.strip().lstrip("#*- ")
+                if not s:
+                    continue
+                if MONITOR_TOKEN_RE.search(s) and re.search(
+                        r"\b(show|logs|status|running)\b", s, re.I):
+                    summary = s[:240]
+                    break
         if not summary:
             summary = re.sub(r"\s+", " ", text.strip())[:240]
+        # Prefer concrete show/logs commands for the latest id.
+        preferred_cmds = []
+        if preferred_ids:
+            rid = preferred_ids[0]
+            preferred_cmds = [c for c in monitor_cmds if rid in c]
+        if not preferred_cmds:
+            preferred_cmds = [
+                c for c in monitor_cmds
+                if re.search(r"\b(show|logs|status)\b", c)
+            ] or monitor_cmds
         hits.append({
             "kind": "waiting_monitor",
             "summary": summary,
-            "monitor_cmds": monitor_cmds[:5],
-            "resource_ids": resource_ids[:8],
+            "monitor_cmds": preferred_cmds[:5],
+            "resource_ids": resource_ids[-4:] if resource_ids else [],
             "next_on_success": next_on_success,
-            "confidence": "high" if (resource_ids and monitor_cmds) else "medium",
+            "confidence": "high" if (resource_ids and preferred_cmds) else "medium",
         })
     elif next_on_success and (resource_ids or monitor_cmds):
         hits.append({
             "kind": "next_on_success",
             "summary": next_on_success[:240],
             "monitor_cmds": monitor_cmds[:5],
-            "resource_ids": resource_ids[:8],
+            "resource_ids": resource_ids[-4:] if resource_ids else [],
             "next_on_success": next_on_success,
             "confidence": "medium",
         })
     return hits
 
 
+def _open_work_rank(item: dict) -> tuple:
+    """Higher is better: prefer the chronologically newest primary id, then
+    on-success handoff, then concrete show/logs monitors — NOT raw id count
+    (status dumps list many historical builds and would always win)."""
+    if not isinstance(item, dict):
+        return ("", 0, 0, 0, 0)
+    ids = list(item.get("resource_ids") or [])
+    primary = _primary_resource_id(ids)
+    conf = 2 if item.get("confidence") == "high" else (
+        1 if item.get("confidence") == "medium" else 0)
+    cmds = list(item.get("monitor_cmds") or [])
+    concrete_show = sum(
+        1 for c in cmds
+        if re.search(r"\b(show|logs)\b", c) and BUILD_ID_RE.search(c)
+    )
+    return (
+        primary,  # lexicographic Y-stamp ≈ time; newest wins
+        1 if item.get("next_on_success") else 0,
+        concrete_show,
+        conf,
+        1 if primary else 0,
+    )
+
+
 def merge_open_work(existing: list, new_hits: list, cap: int = 5) -> list:
-    """Append new open_work hits; latest same-kind replaces earlier."""
+    """Merge open_work hits; same-kind keeps the richer hit (not always latest).
+
+    Latest wins only when ranks are equal — so a later weak bash-monitor
+    line cannot wipe a stronger earlier wait with concrete build ids.
+    """
     out = list(existing or [])
     for hit in new_hits or []:
         if not isinstance(hit, dict):
@@ -720,21 +825,76 @@ def merge_open_work(existing: list, new_hits: list, cap: int = 5) -> list:
         kind = hit.get("kind")
         if not kind:
             continue
-        out = [h for h in out if h.get("kind") != kind]
-        out.append(hit)
+        prev = next((h for h in out if h.get("kind") == kind), None)
+        if prev is None:
+            out.append(hit)
+            continue
+        if _open_work_rank(hit) >= _open_work_rank(prev):
+            # Prefer newer when at least as rich; merge resource ids/cmds.
+            merged = dict(prev)
+            merged.update({k: v for k, v in hit.items() if v not in (None, "", [], {})})
+            ids = list(dict.fromkeys(
+                list(prev.get("resource_ids") or [])
+                + list(hit.get("resource_ids") or [])))
+            cmds = list(dict.fromkeys(
+                list(prev.get("monitor_cmds") or [])
+                + list(hit.get("monitor_cmds") or [])))
+            merged["resource_ids"] = ids[-8:]
+            merged["monitor_cmds"] = cmds[-5:]
+            if _open_work_rank(hit) > _open_work_rank(prev):
+                # Newer is strictly richer — take its summary/confidence.
+                for k in ("summary", "confidence", "next_on_success"):
+                    if hit.get(k):
+                        merged[k] = hit[k]
+            out = [h for h in out if h.get("kind") != kind]
+            out.append(merged)
+        # else: keep prev (richer)
     return out[-cap:]
+
+
+def _primary_resource_id(ids: list) -> str:
+    """Y-stamps sort lexicographically by time; pick the newest."""
+    clean = [i for i in ids if isinstance(i, str) and i]
+    if not clean:
+        return ""
+    return sorted(clean)[-1]
 
 
 def format_open_work_brief(item: dict) -> str:
     """Structured resume brief for wait-shaped open work."""
     if not isinstance(item, dict):
         return ""
-    ids = item.get("resource_ids") or []
-    cmds = item.get("monitor_cmds") or []
+    ids = list(item.get("resource_ids") or [])
+    cmds = list(item.get("monitor_cmds") or [])
     nxt = (item.get("next_on_success") or "").strip()
     summary = (item.get("summary") or "").strip()
-    resource = ", ".join(ids) if ids else (summary[:120] or "(unspecified)")
-    monitor = "; ".join(cmds) if cmds else "(none declared)"
+    # Prefer the chronologically latest concrete id as the primary target.
+    primary = _primary_resource_id(ids)
+    resource = primary or (summary[:120] or "(unspecified)")
+    if primary and len(ids) > 1:
+        others = [i for i in sorted(set(ids)) if i != primary][-3:]
+        resource = f"{primary} (also seen: {', '.join(others)})"
+    # Prefer monitor cmds that name the primary id; expand $BUILD_ID; else
+    # synthesize a show command for the primary rather than a stale other id.
+    preferred = [c for c in cmds if primary and primary in c]
+    if primary:
+        expanded = [
+            c.replace('"$BUILD_ID"', primary).replace("$BUILD_ID", primary)
+            for c in cmds
+            if "$BUILD_ID" in c
+        ]
+        for c in expanded:
+            if c not in preferred:
+                preferred.append(c)
+    if not preferred and primary:
+        preferred = [f"yanos-builder show {primary}",
+                     f"yanos-builder logs {primary} --follow"]
+    if not preferred:
+        preferred = [
+            c for c in cmds
+            if re.search(r"\b(show|logs)\b", c)
+        ] or cmds
+    monitor = "; ".join(preferred[:3]) if preferred else "(none declared)"
     on_success = nxt or "(unspecified)"
     lines = [
         f"WAITING: {resource}",
@@ -742,7 +902,9 @@ def format_open_work_brief(item: dict) -> str:
         f"On success: {on_success}",
         "Do not start unrelated work. Poll now; if still running, report status and stop.",
     ]
-    if summary and summary not in resource:
+    if summary and primary and primary not in summary:
+        lines.insert(1, f"Context: {summary[:200]}")
+    elif summary and not primary:
         lines.insert(1, f"Context: {summary[:200]}")
     return "\n".join(lines)
 

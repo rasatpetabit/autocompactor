@@ -453,6 +453,24 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
                     pending_bash[call.get("id")] = cmd
                     if is_recent and "git commit" in cmd:
                         st.recent_commit = True
+                    # Bash that enqueues/monitors a background build is also
+                    # open-work evidence (often no prose wait declaration yet).
+                    # Seed a wait verb so extract_open_work_from_text accepts
+                    # monitor commands that already carry a resource handle.
+                    if cmd and (
+                        "yanos-builder show" in cmd
+                        or "yanos-builder logs" in cmd
+                        or ("yanos-builder" in cmd and "enqueue" in cmd)
+                        or ("BUILD_ID=" in cmd and "yanos-builder" in cmd)
+                    ):
+                        seeded = cmd
+                        if not transcript_lib.WAIT_VERB_RE.search(cmd):
+                            seeded = cmd + "\n# monitor; leaving build running"
+                        cmd_hits = transcript_lib.extract_open_work_from_text(
+                            seeded)
+                        if cmd_hits:
+                            st.open_work = transcript_lib.merge_open_work(
+                                st.open_work, cmd_hits)
                 elif lname in ("task", "agent") and is_recent:
                     st.task_tool_recent = True
 
@@ -468,6 +486,30 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
                 st.working_commands.append(cmd)
             if is_recent:
                 recent_result_flags.append(is_error)
+            # Tool output often carries the concrete BUILD_ID after enqueue
+            # ("enqueued Y260717-…") even when the assistant never restated it.
+            # Strict: only live enqueue / single-build running|queued status.
+            # Skip multi-build `yanos-builder status` dumps (many historical ids).
+            if text:
+                multi_dump = (
+                    text.count("status  :") >= 2
+                    or text.count("Build Y") >= 2
+                    or (cmd and re.search(
+                        r"yanos-builder\s+status\b", cmd))
+                )
+                live_wait = (not multi_dump) and bool(
+                    re.search(r"\benqueued\b", text, re.I)
+                    or re.search(
+                        r"status\s*:\s*(running|queued)\b", text, re.I)
+                )
+                if live_wait:
+                    seeded = ((cmd + "\n") if cmd else "") + text
+                    if not transcript_lib.WAIT_VERB_RE.search(seeded):
+                        seeded += "\n# monitor; leaving build running"
+                    hits = transcript_lib.extract_open_work_from_text(seeded)
+                    if hits:
+                        st.open_work = transcript_lib.merge_open_work(
+                            st.open_work, hits)
 
         elif role == "bashExecution":
             cmd = str(msg.get("command", "") or "")
