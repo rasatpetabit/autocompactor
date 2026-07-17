@@ -1,0 +1,23 @@
+---
+schema_version: 8
+slug: post-compact-task-continuity
+status: in-progress
+phase: brainstorm
+topic: "Strengthen ability to stay on task and continue previous work after an autocompactor run"
+complexity: high
+complexity_source: null
+autonomy: null
+planning_mode: auto
+created_at: 2026-07-17T23:39:50.635Z
+predecessor_transcript: null
+spec_path: /srv/dev/ras/autocompactor/docs/masterplan/post-compact-task-continuity/spec.md
+plan_path: /srv/dev/ras/autocompactor/docs/masterplan/post-compact-task-continuity/plan.md
+plan_index_path: /srv/dev/ras/autocompactor/docs/masterplan/post-compact-task-continuity/plan.index.json
+tasks: []
+active_run: null
+pending_gate: null
+goals_enabled: true
+goals: []
+review: {"adversary":true}
+render: {"images":"off"}
+dispatch: {"fabric":true}
