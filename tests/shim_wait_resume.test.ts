@@ -199,3 +199,96 @@ describe("wait-shaped autonomous resume", () => {
     expect(immediate.length).toBeGreaterThan(0)
   })
 })
+
+describe("compact transient retry", () => {
+  test("retries connection-error summarization failures then succeeds", async () => {
+    const timers: Array<{ ms: number; fn: () => void }> = []
+    const realSetTimeout = globalThis.setTimeout
+    // @ts-expect-error test stub
+    globalThis.setTimeout = ((fn: any, ms?: number) => {
+      if (!ms || ms < 20) return realSetTimeout(fn, ms ?? 0)
+      timers.push({ ms: ms ?? 0, fn })
+      return 0 as any
+    }) as any
+
+    try {
+      const mod = await freshShim()
+      let compactCalls = 0
+      const sendMessages: { message: any; options: any }[] = []
+      const handlers: Record<string, (e: any, ctx: any) => any> = {}
+      const ctx: any = {
+        cwd: "/tmp",
+        hasUI: false,
+        sessionManager: { getSessionFile: () => "/tmp/sess.jsonl" },
+        compactCalls: 0,
+        compact(opts?: any) {
+          compactCalls++
+          ctx.compactCalls = compactCalls
+          const entry = { id: `compact-${compactCalls}`, timestamp: compactCalls }
+          // First call fails with connection error; second succeeds.
+          if (compactCalls === 1) {
+            realSetTimeout(() => {
+              opts?.onError?.(new Error("Summarization failed: Connection error."))
+            }, 0)
+            return Promise.resolve()
+          }
+          const p = (async () => {
+            await handlers["session_before_compact"]?.(
+              { reason: "actuate", willRetry: false, compactionEntry: entry },
+              ctx,
+            )
+            await handlers["session_compact"]?.(
+              { reason: "actuate", willRetry: false, compactionEntry: entry },
+              ctx,
+            )
+            opts?.onComplete?.({})
+          })()
+          return p
+        },
+        getContextUsage: () => ({ tokens: 250000, contextWindow: 500000 }),
+        isIdle: () => true,
+        ui: { notify: () => {}, setStatus: () => {} },
+      }
+      const pi: any = {
+        on(ev: string, h: any) { handlers[ev] = h },
+        async exec(_cmd: string, args: string[]) {
+          const sub = args[1]
+          const payload: any = {
+            evaluate: {
+              recommend: true, mode: "actuate",
+              reason: "test connection-retry", context_tokens: 250000,
+            },
+            prepare: { customInstructions: "TEST-INSTR" },
+            reinject: {
+              text: "DIGEST", customType: "autocompactor.digest",
+              nextStep: "continue work", nextStepSource: "last_user_task",
+              nextStepMode: "autonomous", nextStepWait: false,
+            },
+          }[sub]
+          return { code: 0, stdout: payload ? JSON.stringify(payload) : "" }
+        },
+        sendMessage(message: any, msgOptions?: any) {
+          sendMessages.push({ message, options: msgOptions })
+        },
+        registerCommand() {},
+      }
+      mod.default(pi)
+      await handlers["agent_end"]?.({}, ctx)
+      // allow first compact onError
+      await new Promise((r) => realSetTimeout(r, 20))
+      // fire retry timer (~2s base)
+      const retry = timers.find((t) => t.ms >= 1000)
+      expect(retry).toBeTruthy()
+      retry!.fn()
+      await new Promise((r) => realSetTimeout(r, 30))
+      expect(compactCalls).toBeGreaterThanOrEqual(2)
+      const warn = sendMessages.some((m) =>
+        String(m.message?.content || "").includes("retry") &&
+        String(m.message?.content || "").includes("transient"),
+      )
+      expect(warn).toBe(true)
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+    }
+  })
+})

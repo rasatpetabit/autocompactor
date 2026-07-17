@@ -309,21 +309,73 @@ function withStatsBlock(message: string, title: string, stats: unknown): string 
 // callback, the caller's try/catch would swallow it and `selfTriggered` would
 // stay true forever — bricking all future compaction. We settle exactly once
 // (onComplete | onError | sync-throw | promise-reject), always clearing the flag.
+//
+// Transient provider blips ("Summarization failed: Connection error") are
+// retried a few times with backoff so actuate does not burn the cooldown on a
+// single failed summarizer call and then sit silent until the user pokes.
+const COMPACT_RETRY_MAX = Math.max(
+  0,
+  Math.floor(num("AUTOCOMPACTOR_COMPACT_RETRIES", cfgNum("COMPACT_RETRIES", 2))),
+)
+const COMPACT_RETRY_BASE_MS = Math.max(
+  250,
+  Math.floor(num("AUTOCOMPACTOR_COMPACT_RETRY_MS", cfgNum("COMPACT_RETRY_MS", 2_000))),
+)
+
+function isTransientCompactError(errMsg: string): boolean {
+  const m = (errMsg || "").toLowerCase()
+  if (!m) return false
+  return (
+    m.includes("connection error") ||
+    m.includes("connection reset") ||
+    m.includes("econnreset") ||
+    m.includes("econnrefused") ||
+    m.includes("etimedout") ||
+    m.includes("socket hang up") ||
+    m.includes("network") ||
+    m.includes("fetch failed") ||
+    m.includes("503") ||
+    m.includes("502") ||
+    m.includes("504") ||
+    m.includes("rate limit") ||
+    m.includes("overloaded") ||
+    m.includes("temporarily unavailable") ||
+    m.includes("summarization failed")
+  )
+}
+
 function safeCompact(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   customInstructions: string | undefined,
   clear: () => void,
   afterComplete?: () => void,
-  afterError?: () => void,
+  afterError?: (errMsg: string) => void,
+  attempt: number = 0,
 ): void {
   let settled = false
   const finish = (errMsg?: string): void => {
     if (settled) return
     settled = true
+    if (errMsg && isTransientCompactError(errMsg) && attempt < COMPACT_RETRY_MAX) {
+      const next = attempt + 1
+      const delay = COMPACT_RETRY_BASE_MS * Math.pow(2, attempt)
+      announce(
+        pi,
+        ctx,
+        `autocompactor: compaction failed (transient) — ${errMsg}; retry ${next}/${COMPACT_RETRY_MAX} in ${Math.round(delay / 1000)}s.`,
+        "warning",
+        true,
+      )
+      // Keep selfTriggered set across retries (clear only on final settle).
+      setTimeout(() => {
+        safeCompact(pi, ctx, customInstructions, clear, afterComplete, afterError, next)
+      }, delay)
+      return
+    }
     if (errMsg) announce(pi, ctx, `autocompactor: compaction failed — ${errMsg}.`, "error", true)
     clear()
-    if (errMsg) afterError?.()
+    if (errMsg) afterError?.(errMsg)
     else afterComplete?.()
   }
   try {
@@ -689,7 +741,12 @@ export default function autocompactor(pi: ExtensionAPI) {
           prep?.customInstructions,
           () => { selfTriggered = false },
           () => flushAutoResume(ctx),
-          () => { pendingAutoResume = null; clearWaitPoll() },
+          () => {
+            // Failed compact must not lock the session behind cooldown.
+            lastRecTokens = -Infinity
+            pendingAutoResume = null
+            clearWaitPoll()
+          },
         )
       } else {
         // Advise mode OR actuate mode with reentrancy guard (compaction in
@@ -792,7 +849,11 @@ export default function autocompactor(pi: ExtensionAPI) {
         prep.customInstructions,
         () => { selfTriggered = false },
         () => flushAutoResume(ctx),
-        () => { pendingAutoResume = null; clearWaitPoll() },
+        () => {
+          lastRecTokens = -Infinity
+          pendingAutoResume = null
+          clearWaitPoll()
+        },
       )
       return { cancel: true }
     } catch {

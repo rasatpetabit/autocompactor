@@ -6,6 +6,8 @@
   "NEXTSTEP_WAIT": "poll",
   "WAIT_POLL_S": 60,
   "WAIT_POLL_MAX": 20,
+  "COMPACT_RETRIES": 2,
+  "COMPACT_RETRY_MS": 2000,
   "PROFILE": "economy",
   "WINDOW": 200000,
   "RESERVE": 40000,

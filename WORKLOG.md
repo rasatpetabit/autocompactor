@@ -519,3 +519,13 @@ worktree removed. 81 pytest on merged main. Live shim re-installed from MAIN;
   full pytest green except pre-existing chonkie skip failures.
 - Design/plan: `docs/superpowers/specs/2026-07-17-waiting-state-resume-design.md`,
   `docs/superpowers/plans/2026-07-17-waiting-state-resume.md`.
+
+## 2026-07-17 — compact connection-error retry
+
+- Actuate path hit `Summarization failed: Connection error` with no retry;
+  cooldown stayed set so the next agent_end stayed quiet until a human poke.
+- `safeCompact` now retries transient summarizer failures (connection/network/
+  5xx/rate-limit/overloaded) up to `COMPACT_RETRIES` (default 2) with
+  exponential backoff from `COMPACT_RETRY_MS` (default 2000ms).
+- Final failure clears `lastRecTokens` so cooldown does not block a later
+  attempt. Env: `AUTOCOMPACTOR_COMPACT_RETRIES`, `AUTOCOMPACTOR_COMPACT_RETRY_MS`.
