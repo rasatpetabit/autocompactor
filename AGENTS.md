@@ -69,6 +69,7 @@ the only adapter that ships.
 | `src/autocompactor/artifacts.py` | mechanical extraction -> disk -> budgeted digest |
 | `src/autocompactor/llm_digest.py` | optional cheap-model "must-survive" digest (harness-agnostic; consumed by pi_bridge) |
 | `src/autocompactor/stats.py` | telemetry appender |
+| `src/autocompactor/cachelane_stats.py` | read-only CacheLane fleet rollup for evaluate (observe-only; optional soft bias) |
 | `src/autocompactor/statedir.py` | state root (`~/.autocompactor/pi`) |
 | `src/autocompactor/window_resolver.py` | effective-window resolution (Pi runtime window: `contextWindow − reserveTokens`) |
 | `src/autocompactor/nightly_eval.py` | cron self-evaluation: tests, telemetry health checks, dated reports, retention pruning |
@@ -90,12 +91,12 @@ Pi adapter ships.
   (the shared Python core). State/telemetry live under `~/.autocompactor/pi/`.
   See `HANDOFF.md` ("Pi harness") for the architecture, actuate-vs-advise
   decision, and verified ground-truth pins.
-<!-- agent-dispatch:begin routing hash=6d8307801e22f016588774ae010198516e8402aa6a7cd0724a433885e67b981b -->
+<!-- agent-dispatch:begin routing hash=91201f5fd8778421b77e96a3b48cdf126230bbc35f8af4bbf99d75e3cf7eb275 -->
 ## §routing — managed by agent-dispatch (do not hand-edit)
 
-Binding rules (enforced by PreToolUse guard — violations are hard-blocked):
-- haiku: FORBIDDEN — no dispatch path exists, no override possible.
-- sonnet: OVERRIDE-ONLY — requires a live, unexpired grant (`agent-dispatch override grant sonnet …`).
+Binding rules (enforced by PreToolUse guard):
+- haiku: override-only (live override grant required).
+- sonnet: override-only (live override grant required).
 - model param MUST be explicit — missing model is denied (exception: harness built-ins Explore/Plan inherit the frontier session model).
 
 For the full routing policy, fallback chains, and backend health:
@@ -104,3 +105,8 @@ For the full routing policy, fallback chains, and backend health:
 
 Source of truth: policy/dispatch-policy.jsonc in the agent-dispatch repo (run `agent-dispatch where` for its root).
 <!-- agent-dispatch:end -->
+## Knowledge
+
+Structured project knowledge is cataloged in the `.okf/` directory.
+See [`.okf/index.md`](.okf/index.md) for the repo's knowledge index.
+

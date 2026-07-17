@@ -397,3 +397,121 @@ test("actuate: ctx.compact throwing synchronously clears selfTriggered (no perma
     delete process.env.AUTOCOMPACTOR_PI_MODE
   }
 })
+
+// ---------------------------------------------------------- PI_INTERCEPT
+// Config-backed intercept (config.json PI_INTERCEPT) with env-override
+// semantics: the env var, when SET, wins in both directions. CFG is read at
+// module load, so these tests import a FRESH copy of the transpiled shim
+// with AUTOCOMPACTOR_BRIDGE pointed at a temp repo containing the config.
+// interceptEnabled() also reads ~/.pi/agent/settings.json at call time, so
+// HOME is stubbed to a hermetic dir (no pi-custom-compactor).
+
+let shimSeq = 0
+
+async function loadShimWithConfig(cfgObj) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ac-pi-intercept-"))
+  fs.mkdirSync(path.join(dir, "src"))
+  if (cfgObj !== undefined) {
+    fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfgObj))
+  }
+  const prevBridge = process.env.AUTOCOMPACTOR_BRIDGE
+  process.env.AUTOCOMPACTOR_BRIDGE = path.join(dir, "src", "pi_bridge.py")
+  try {
+    const out = path.join(dir, `autocompactor-${shimSeq++}.mjs`)
+    fs.copyFileSync(path.join(tmpDir, "autocompactor.mjs"), out)
+    const mod = (await import(pathToFileURL(out).href)).default
+    return { mod, dir }
+  } finally {
+    if (prevBridge === undefined) delete process.env.AUTOCOMPACTOR_BRIDGE
+    else process.env.AUTOCOMPACTOR_BRIDGE = prevBridge
+  }
+}
+
+function withHermeticHome(fn) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ac-pi-home-"))
+  fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true })
+  fs.writeFileSync(
+    path.join(home, ".pi", "agent", "settings.json"),
+    JSON.stringify({ packages: [] }),
+  )
+  const prev = process.env.HOME
+  return Promise.resolve()
+    .then(() => { process.env.HOME = home })
+    .then(fn)
+    .finally(() => {
+      if (prev === undefined) delete process.env.HOME
+      else process.env.HOME = prev
+      try { fs.rmSync(home, { recursive: true, force: true }) } catch {}
+    })
+}
+
+test("intercept via config.json PI_INTERCEPT: cancels native and re-triggers enriched", async () => {
+  delete process.env.AUTOCOMPACTOR_PI_INTERCEPT
+  const { mod } = await loadShimWithConfig({ PI_INTERCEPT: true })
+  await withHermeticHome(async () => {
+    const pi = makePi({ exec: bridgeResponder(RECOMMEND) })
+    mod(pi)
+    const ctx = makeCtx({ tokens: 150_000 })
+    const result = await pi.handlers.session_before_compact({}, ctx)
+    assert.deepEqual(result, { cancel: true }, "native compaction is cancelled")
+    assert.equal(ctx.compactCalls.length, 1, "re-triggered with our compact call")
+    assert.equal(ctx.compactCalls[0].customInstructions, "PRESERVE THESE THINGS")
+    const prep = pi.execCalls.find((c) => c.args[1] === "prepare")
+    assert.ok(prep.args.includes("--trigger") && prep.args.includes("native"))
+    assert.ok(!prep.args.includes("--skip-llm"), "intercept prepare keeps the LLM digest")
+  })
+})
+
+test("stale-mixed state: env AUTOCOMPACTOR_PI_INTERCEPT=0 wins over config PI_INTERCEPT=true", async () => {
+  process.env.AUTOCOMPACTOR_PI_INTERCEPT = "0"
+  try {
+    const { mod } = await loadShimWithConfig({ PI_INTERCEPT: true })
+    await withHermeticHome(async () => {
+      const pi = makePi({ exec: bridgeResponder(RECOMMEND) })
+      mod(pi)
+      const ctx = makeCtx({ tokens: 150_000 })
+      const result = await pi.handlers.session_before_compact({}, ctx)
+      assert.equal(result, undefined, "env=0 disables intercept despite config=true")
+      assert.equal(ctx.compactCalls.length, 0)
+      const prep = pi.execCalls.find((c) => c.args[1] === "prepare")
+      assert.ok(prep.args.includes("--skip-llm"), "non-intercept native prepare")
+    })
+  } finally {
+    delete process.env.AUTOCOMPACTOR_PI_INTERCEPT
+  }
+})
+
+test("env AUTOCOMPACTOR_PI_INTERCEPT=1 enables intercept with no config key", async () => {
+  process.env.AUTOCOMPACTOR_PI_INTERCEPT = "1"
+  try {
+    const { mod } = await loadShimWithConfig({})
+    await withHermeticHome(async () => {
+      const pi = makePi({ exec: bridgeResponder(RECOMMEND) })
+      mod(pi)
+      const ctx = makeCtx({ tokens: 150_000 })
+      const result = await pi.handlers.session_before_compact({}, ctx)
+      assert.deepEqual(result, { cancel: true })
+      assert.equal(ctx.compactCalls.length, 1)
+    })
+  } finally {
+    delete process.env.AUTOCOMPACTOR_PI_INTERCEPT
+  }
+})
+
+test("intercept fail-open: bridge prepare failure lets native compaction proceed", async () => {
+  delete process.env.AUTOCOMPACTOR_PI_INTERCEPT
+  const { mod } = await loadShimWithConfig({ PI_INTERCEPT: true })
+  await withHermeticHome(async () => {
+    // Bridge is down: every exec fails (code 1, no stdout).
+    const pi = makePi()
+    mod(pi)
+    const ctx = makeCtx({ tokens: 150_000 })
+    const result = await pi.handlers.session_before_compact({}, ctx)
+    assert.equal(result, undefined, "no cancel — native compaction must proceed")
+    assert.equal(ctx.compactCalls.length, 0, "no re-trigger without instructions")
+    assert.ok(
+      visibleStatuses(pi).some((s) => /no custom instructions.*allowing native/i.test(s.message.content)),
+      "fail-open is surfaced to the user",
+    )
+  })
+})

@@ -542,3 +542,22 @@ worktree removed. 81 pytest on merged main. Live shim re-installed from MAIN;
   treats non-empty `event.customInstructions` as already-enriched). Never
   cancel an owned/enriched compact. Re-check ownership after prepare.
   Do not retry cancel as transient.
+
+## 2026-07-17 — deploy race-fix + CacheLane threshold retune
+
+- **Deploy:** fixed shim (`enrichedCompactsInFlight` / `ownsCompaction` +
+  `COMPACT_RETRIES`) installed on epyc1, epyc2, skynet3 via
+  `python3 src/install_pi.py` (md5 `415e8e58…`). Bridge path baked to
+  `/srv/dev/ras/autocompactor/src/pi_bridge.py` on all three; pin versions
+  remain host-local (0.78.0 / 0.80.9 / 0.78.1).
+- **Threshold reevaluation (Pi CacheLane :7332):** fleet hit ~42%, savings
+  ~63%, ~6.4M tokens K-pruned. `HARD_PCT_WIDE=0.40` hard-fired at ~184k on
+  460k windows — near post-compact residual (~120k med) → thrash. Raised:
+  `SOFT_PCT_WIDE` 0.25→0.40, `HARD_PCT_WIDE` 0.40→0.58, `COOLDOWN` 20k→30k
+  (~184k / ~267k soft/hard @460k effective).
+- **CacheLane → evaluate:** new `cachelane_stats.read_rollup` (sqlite ro on
+  `~/.cachelane-litellm`) attaches fleet hit/prune fields to `monitor_eval`
+  and the reason string when `CACHELANE_STATS=true` (default). Optional
+  `CACHELANE_SOFT_BIAS` (default false) suppresses SOFT-band only when hit
+  ≥ `CACHELANE_MIN_SAVINGS_RATIO` (0.40); hard line never suppressed.
+  Session IDs still don't join (proxy UUID vs Pi id) — fleet rollup only.

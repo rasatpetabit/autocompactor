@@ -42,8 +42,9 @@ import os
 import shutil
 import sys
 
-from autocompactor import (artifacts, context_inventory, pi_session_lib, policy,  # noqa: E402
-                           statedir, transcript_lib, window_resolver)
+from autocompactor import (artifacts, cachelane_stats, context_inventory,  # noqa: E402
+                           pi_session_lib, policy, statedir, transcript_lib,
+                           window_resolver)
 from autocompactor.config_lib import cfg                          # noqa: E402
 from autocompactor.llm_digest import llm_digest                 # noqa: E402
 from autocompactor.stats import log_event                         # noqa: E402
@@ -288,6 +289,26 @@ def cmd_evaluate(opts: dict) -> dict:
     if occupancy < hard and est_reclaim < min_savings:
         recommend = False
 
+    # CacheLane fleet rollup (observe-only by default). Soft bias is opt-in
+    # via CACHELANE_SOFT_BIAS and never suppresses the hard line. Fail-open
+    # when the DB is missing or unreadable.
+    cl_rollup = None
+    cl_soft_bias = False
+    if cfg.bool("CACHELANE_STATS", default=True):
+        cl_home = cfg.str("CACHELANE_HOME", default="") or None
+        cl_rollup = cachelane_stats.read_rollup(cl_home)
+        cl_soft_bias = cachelane_stats.soft_bias_suppresses(
+            cl_rollup,
+            enabled=cfg.bool("CACHELANE_SOFT_BIAS", default=False),
+            min_savings_ratio=cfg.float(
+                "CACHELANE_MIN_SAVINGS_RATIO", default=0.40),
+            occupancy=occupancy,
+            hard=hard,
+        )
+        if cl_soft_bias and recommend and occupancy < hard:
+            recommend = False
+
+    cl_fields = cl_rollup.as_event_fields() if cl_rollup else {}
     log_event({
         "type": "monitor_eval", "session_id": session_id,
         "context_tokens": context_tokens,
@@ -301,6 +322,8 @@ def cmd_evaluate(opts: dict) -> dict:
         "tail_parse": False,
         "recommended": recommend and not suppressed,
         "suppressed_by_cooldown": recommend and suppressed,
+        "suppressed_by_cachelane_soft_bias": bool(cl_soft_bias),
+        **cl_fields,
         **resolution.event_fields(),
     })
 
@@ -329,11 +352,16 @@ def cmd_evaluate(opts: dict) -> dict:
                                  model_window=(runtime_context_window or None))
     if gating:
         reason += " — triggered by: " + "; ".join(gating)
+    if cl_rollup is not None:
+        reason += f" · {cl_rollup.observe_note()}"
     if recommend and suppressed:
         reason += " (suppressed: cooldown)"
+    elif cl_soft_bias and occupancy < hard:
+        reason += " (suppressed: cachelane soft bias)"
     elif not recommend and occupancy < hard and est_reclaim < min_savings:
+        note = f" · {cl_rollup.observe_note()}" if cl_rollup is not None else ""
         reason = (f"est. reclaim ~{max(est_reclaim, 0):,} tokens is below "
-                  f"the {int(min_savings):,}-token minimum")
+                  f"the {int(min_savings):,}-token minimum{note}")
 
     return {"recommend": bool(recommend and not suppressed),
             "reason": reason,

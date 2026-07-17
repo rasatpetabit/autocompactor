@@ -141,22 +141,23 @@ def test_evaluate_mode_env_overrides_config(tmp_path):
 
 def test_wide_threshold_scales_for_large_context_windows(tmp_path):
     # Regression: a 976K GLM-5.2 context window with flat SOFT_PCT/HARD_PCT
-    # needs 374K-560K tokens to trigger — unreachable in normal sessions.
-    # config.json sets _WIDE variants (>=300K windows) that scale the gate
-    # down so autocompactor fires at a practical threshold.
+    # needs hundreds of K tokens to trigger. config.json sets _WIDE variants
+    # (>=300K windows) so the gate stays practical — but not so low that
+    # CacheLane-pruned sessions thrash near the post-compact residual.
+    # 2026-07-17 retune: SOFT_WIDE 0.40 / HARD_WIDE 0.58 (was 0.25 / 0.40).
     state_dir = tmp_path / "state"
     fixture_path = REPO_ROOT / "tests" / "fixtures" / "pi" / "with_compaction.jsonl"
     result = run_bridge(
-        ["evaluate", "--session", str(fixture_path), "--tokens", "375000", "--context-window", "976000"],
+        ["evaluate", "--session", str(fixture_path), "--tokens", "550000", "--context-window", "976000"],
         state_dir,
     )
     assert result.returncode == 0
     data = parse_single_json(result.stdout)
     assert data is not None
     assert data["mode"] == "actuate"
-    assert "234k" in data["reason"]  # SOFT_PCT_WIDE=0.25 · 936K effective
-    assert "374k" in data["reason"]  # HARD_PCT_WIDE=0.40 · 936K effective
-    assert data["recommend"] is True  # 375K > hard threshold (374K)
+    assert "374k" in data["reason"]  # SOFT_PCT_WIDE=0.40 · 936K effective
+    assert "543k" in data["reason"]  # HARD_PCT_WIDE=0.58 · 936K effective
+    assert data["recommend"] is True  # 550K > hard threshold (543K)
 
 
 def test_wide_threshold_below_soft_does_not_recommend(tmp_path):
@@ -169,7 +170,7 @@ def test_wide_threshold_below_soft_does_not_recommend(tmp_path):
     assert result.returncode == 0
     data = parse_single_json(result.stdout)
     assert data is not None
-    assert data["recommend"] is False  # 200K < soft threshold (234K), no gating
+    assert data["recommend"] is False  # 200K < soft threshold (374K), no gating
 
 
 def test_cooldown_round_trip(tmp_path):
