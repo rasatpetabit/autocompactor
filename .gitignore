@@ -14,3 +14,6 @@ config.local.json
 *.egg-info/
 build/
 dist/
+
+# Local Python env (chonkie + deps)
+.venv/

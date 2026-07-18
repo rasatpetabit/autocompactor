@@ -12,6 +12,9 @@ license = { text = "Proprietary" }
 authors = [{ name = "ras" }]
 dependencies = []
 
+[project.optional-dependencies]
+chonkie = ["chonkie>=1.7.0"]
+
 [project.scripts]
 contextinventory = "autocompactor.context_inventory:main"
 mdinventory = "autocompactor.md_inventory:main"
