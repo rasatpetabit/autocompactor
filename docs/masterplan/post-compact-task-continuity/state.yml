@@ -1,7 +1,7 @@
 ---
 schema_version: 8
 slug: post-compact-task-continuity
-status: in-progress
+status: archived
 phase: execute
 topic: "Strengthen ability to stay on task and continue previous work after an autocompactor run"
 complexity: high
