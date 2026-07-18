@@ -24,3 +24,4 @@ dispatch: {"fabric":true}
 goals_md_hash: sha256:9ea149c2924a4e307eacf08784a9c8316676c949713d759922fd03f539e80496
 worktree: /srv/dev/ras/autocompactor/.worktrees/post-compact-task-continuity
 verified_sha: 5dbea7e289826cad05d8c6861c876973bd1e52a0
+worktree_disposition: removed_after_merge

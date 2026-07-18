@@ -1,0 +1,3 @@
+final_verdict: approve
+summary: chunked review: 6 regions, worst-wins → approve
+findings_count: 0
