@@ -4,7 +4,7 @@
   "wave": 0,
   "op": "dispatch_fabric",
   "contract_version": "adsp-v1.1",
-  "status": "dispatched",
+  "status": "recorded",
   "attempt": 1,
   "dispatched_at": "2026-07-18T00:36:41.977Z",
   "routing_inputs": {
@@ -56,5 +56,22 @@
         }
       }
     ]
+  },
+  "completed_at": "2026-07-18T00:36:41.977Z",
+  "record_outcome": {
+    "recorded": [],
+    "failed": [
+      {
+        "id": 1,
+        "status": "blocked",
+        "summary": "broker error during dispatch_task: /srv/dev/ras/autocompactor/.worktrees/post-compact-task-continuity/src/autocompactor/progress_lib.py: file not found — skynet_edit_files only edits existing files",
+        "blockers": "/srv/dev/ras/autocompactor/.worktrees/post-compact-task-continuity/src/autocompactor/progress_lib.py: file not found — skynet_edit_files only edits existing files"
+      }
+    ],
+    "cleared": false,
+    "commits": {
+      "code": null,
+      "state": "5a5fda62dae8274a32162cee0da795087028dff7"
+    }
   }
 }
