@@ -47,10 +47,108 @@ def _parse(argv):
     return chunker, chunk_size
 
 
-def _make_chunker(name, chunk_size):
+def _fallback_recursive_chunks(text, chunk_size):
+    """Pure-Python character recursive split (no chonkie install required).
+
+    Mirrors the no-network RecursiveChunker(character) intent: prefer paragraph
+    / line / sentence boundaries, hard-cut at chunk_size. Returns list of
+    {"text", "token_count"} where token_count ≈ character length (char tokenizer).
+    """
+    chunk_size = max(1, int(chunk_size))
+    text = text or ""
+    if not text:
+        return []
+
+    # Prefer splitting on strong boundaries first, then re-pack to chunk_size.
+    parts = []
+    for para in text.split("\n\n"):
+        if not para:
+            parts.append("\n\n")
+            continue
+        if len(para) <= chunk_size:
+            parts.append(para)
+            continue
+        for line in para.split("\n"):
+            if len(line) <= chunk_size:
+                parts.append(line)
+                continue
+            # sentence-ish then hard cut
+            buf = line
+            while buf:
+                if len(buf) <= chunk_size:
+                    parts.append(buf)
+                    break
+                window = buf[:chunk_size]
+                cut = max(window.rfind(". "), window.rfind("; "),
+                          window.rfind(", "), window.rfind(" "))
+                if cut < chunk_size // 4:
+                    cut = chunk_size
+                else:
+                    cut = cut + 1  # keep delimiter with left piece
+                parts.append(buf[:cut])
+                buf = buf[cut:]
+
+    # Pack parts into <= chunk_size chunks (join with single spaces/newlines
+    # already present in parts).
+    out = []
+    cur = ""
+    for p in parts:
+        if not p:
+            continue
+        if not cur:
+            cur = p
+            continue
+        sep = "\n\n" if (not cur.endswith("\n") and "\n" not in p[:1]) else ""
+        # Prefer blank-line join when both sides look like paragraphs.
+        if p.startswith("\n") or cur.endswith("\n"):
+            candidate = cur + p
+        else:
+            candidate = cur + ("\n" if "\n" in cur or "\n" in p else " ") + p
+        if len(candidate) <= chunk_size:
+            cur = candidate
+        else:
+            out.append(cur)
+            cur = p
+    if cur:
+        out.append(cur)
+
+    # Final hard-cut any oversized piece (safety).
+    final = []
+    for piece in out:
+        while len(piece) > chunk_size:
+            final.append(piece[:chunk_size])
+            piece = piece[chunk_size:]
+        if piece:
+            final.append(piece)
+    return [{"text": c, "token_count": len(c)} for c in final if c]
+
+
+class _ListChunker:
+    """Callable matching chonkie chunker(text) -> iterable of chunk-like objs."""
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def __call__(self, text):
+        # text already chunked at build time for fallback path
+        return self._chunks
+
+
+def _make_chunker(name, chunk_size, text=None):
     """Build a chunker that needs NO network. Defaults to recursive (character
-    tokenizer). Unknown names degrade to recursive rather than failing."""
-    from chonkie import RecursiveChunker
+    tokenizer). Unknown names degrade to recursive rather than failing.
+
+    If the optional `chonkie` package is not installed, uses a pure-Python
+    recursive character splitter so shadow/digest modes still work on hosts
+    that cannot pip-install system-wide (PEP 668).
+    """
+    try:
+        from chonkie import RecursiveChunker
+    except Exception:
+        # Fallback: precompute chunks for this text (caller passes text).
+        chunks = _fallback_recursive_chunks(text or "", chunk_size)
+        return _ListChunker(chunks)
+
     if name in ("token", "sentence"):
         # These tokenizers would need a download; degrade to recursive to keep
         # the no-network guarantee. (Phase 1 deliberately excludes them.)
@@ -70,14 +168,20 @@ def main(argv):
     if not text.strip():
         sys.stdout.write("[]")
         return 0
-    chunker = _make_chunker(chunker_name, chunk_size)
+    chunker = _make_chunker(chunker_name, chunk_size, text=text)
     chunks = chunker(text)
     out = []
     for c in chunks:
-        out.append({
-            "text": getattr(c, "text", str(c)),
-            "token_count": int(getattr(c, "token_count", 0) or 0),
-        })
+        if isinstance(c, dict) and "text" in c:
+            out.append({
+                "text": c["text"],
+                "token_count": int(c.get("token_count", 0) or 0),
+            })
+        else:
+            out.append({
+                "text": getattr(c, "text", str(c)),
+                "token_count": int(getattr(c, "token_count", 0) or 0),
+            })
     sys.stdout.write(json.dumps(out))
     return 0
 
