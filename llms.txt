@@ -1,0 +1,26 @@
+# ras/autocompactor
+
+> Pi context compactor — smarter, earlier, cheaper compaction for the Pi coding agent via a Python core with phase-aware instructions and mechanical artifact extraction.
+
+autocompactor is a **Pi context compactor**: it provides earlier, instruction-tailored context compaction for Pi coding-agent sessions — boundary-aware timing for *when* to compact, phase-aware structured instructions for *how* to summarize, mechanical artifact extraction for content that should never be entrusted to a summarizer's goodwill, and local telemetry.
+
+## Knowledge index — start here
+
+- [.okf/index.md](.okf/index.md): in-repo knowledge catalog: what this repo is, structure, conventions, pointers.
+- [Pi bridge and harness-agnostic core](.okf/pi-bridge-and-core.md)
+
+## Repo entry points
+
+- [README.md](README.md): project overview, install, usage.
+- [AGENTS.md](AGENTS.md): agent operating conventions for this repo.
+
+## Documentation
+
+- [masterplan](docs/masterplan)
+- [superpowers](docs/superpowers)
+
+## Workspace catalog
+
+- [ras/autocompactor catalog](../../okf-workspace/repos/ras/autocompactor.md): curated description in the fleet /srv/dev workspace index.
+- [Workspace index](../../okf-workspace/index.md): master catalog of all repos under /srv/dev, grouped by area.
+- [Back to workspace root](../../llms.txt)

@@ -619,7 +619,7 @@ def cmd_reinject(opts: dict) -> dict:
         state.get("staged_progress_resume")
         or cfg.str("PROGRESS_RESUME", default="autonomous")
     ).lower()
-    out["progressResumeCooldownownMs"] = int(
+    out["progressResumeCooldownMs"] = int(
         cfg.float("PROGRESS_RESUME_COOLDOWN_MS", default=60000))
     return out
 

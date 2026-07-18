@@ -985,7 +985,7 @@ export default function autocompactor(pi: ExtensionAPI) {
       const progressCooldownMs = Math.max(
         0,
         Number(
-          (inj?.progressResumeCooldownownMs as number | undefined) ??
+          (inj?.progressResumeCooldownMs as number | undefined) ??
           process.env.AUTOCOMPACTOR_PROGRESS_RESUME_COOLDOWN_MS ??
           (CFG as any)?.PROGRESS_RESUME_COOLDOWN_MS ??
           60000,
@@ -999,7 +999,7 @@ export default function autocompactor(pi: ExtensionAPI) {
         const now = Date.now()
         if (
           stepSrc === lastProgressResumeKey &&
-          now - lastProgressResumeAt < progressCooldownownMs
+          now - lastProgressResumeAt < progressCooldownMs
         ) {
           progressCodingAutonomous = false
         }

@@ -33,10 +33,10 @@ Deferred, owner-held cleanup from the Pi-only pivot merge (branch
 2. ~~**TS-shim dead-branch cleanup**~~ — **CLOSED (2026-06-22).** The dead
    `CFG?.pi?.[key]` lookups in `cfgNum` and the `AUTOCOMPACTOR_PI_*` env reads
    were dropped from `src/pi/autocompactor.ts:50-86`.
-3. **`~/.claude/settings.json`** — still OPEN. Deregister the now-deleted
-   Claude hooks (`context_monitor` UserPromptSubmit/PostToolUse,
-   `precompact_analyzer` PreCompact). They error non-fatally now that their
-   scripts are gone. Outside the repo tree; owner account.
+3. ~~**`~/.claude/settings.json`**~~ — **CLOSED (2026-07-18).** Live
+   `~/.claude/settings.json` / `settings.local.json` no longer register
+   `context_monitor` / `precompact_analyzer` / `PreCompact` hooks (verified
+   scan). No deregistration left to do on this host.
 
 **Inert nits (safe post-merge sweep, no runtime effect):**
 - `transcript_lib.observe_only(harness="claude")` — inert dead `harness` param;
