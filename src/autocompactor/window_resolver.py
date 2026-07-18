@@ -42,7 +42,8 @@ def _int_or_none(value):
         return None
 
 
-def tiers(harness: str = "claude") -> list[int]:
+def tiers() -> list[int]:
+    """Configured auto-window tier ladder (single-namespace config)."""
     vals = []
     for raw in config_lib.cfg.list(
             "AUTO_WINDOW_TIERS", default=DEFAULT_TIERS):
@@ -74,7 +75,7 @@ def resolve_window(configured_window: float, observed_peak: int,
     configured = max(float(configured_window or 0), 1.0)
     reserve = max(_int_or_none(reserve) or 0, 0)
     runtime = _int_or_none(runtime_context_window)
-    tier_values = tiers("pi")
+    tier_values = tiers()
     if runtime:
         learned, source = _nearest_tier(runtime, tier_values), "runtime"
         effective = float(max(runtime - reserve, 1))

@@ -38,16 +38,15 @@ Deferred, owner-held cleanup from the Pi-only pivot merge (branch
    `context_monitor` / `precompact_analyzer` / `PreCompact` hooks (verified
    scan). No deregistration left to do on this host.
 
-**Inert nits (safe post-merge sweep, no runtime effect):**
-- `transcript_lib.observe_only(harness="claude")` — inert dead `harness` param;
-  both callers already call it arg-less.
-- `TranscriptStats.todo_step` / `todos_all_done` — dataclass fields the Pi
-  parser never sets (default `False`); read under guards, dormant-by-construction.
-- F401 unused imports in `tests/test_llm_digest.py`; stale `analyze()` reference
-  in the `_block_text` docstring.
-- `resolve_window` `cmd_prepare`/configured branch has no direct test pinning
-  `effective_window == configured − reserve` (assertion still true; the hot
-  `cmd_evaluate` path is covered). A 1-line regression pin would close it.
+**Inert nits — CLOSED (2026-07-18 sweep):**
+- ~~`observe_only(harness=...)`~~ — dead `harness` param removed (and same for
+  `window_resolver.tiers`).
+- ~~`todo_step` / `todos_all_done` dormant~~ — Pi parser now fills `st.todos` +
+  derived flags on TodoWrite-shaped toolCalls (`TodoWrite`/`todo_write`/`todo`);
+  stock Pi fixtures stay honest-empty (no stable live tool shape as of scan).
+- ~~F401 / stale `_block_text` docstring~~ — already clean (no action).
+- ~~`resolve_window` configured−reserve pin~~ — `tests/test_window_resolver.py`
+  covers configured and runtime branches + reserve floor.
 
 ## Historical decision record (pre-Pi-only-pivot, preserved)
 

@@ -483,7 +483,11 @@ def active_signals(st: TranscriptStats, prompt: str = "",
 OBSERVE_ONLY_DEFAULT = "error_resolved,tests_pass,idle_gap"
 
 
-def observe_only(harness: str = "claude") -> frozenset:
+def observe_only() -> frozenset:
+    """Signals that may fire for telemetry but never justify a recommendation.
+
+    Harness-agnostic: Pi is the sole adapter; the old harness= kwarg was inert.
+    """
     from autocompactor import config_lib
     raw = config_lib.cfg.str("OBSERVE_ONLY",
                              default=OBSERVE_ONLY_DEFAULT)

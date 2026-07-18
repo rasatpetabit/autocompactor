@@ -256,6 +256,71 @@ def test_skills_remain_zero_spec0():
     assert st.skill_chars == 0 and st.skill_names == []
 
 
+def test_todos_honest_empty_on_stock_pi_fixtures():
+    """T4 honesty: stock Pi fixtures do not fill todos (no stable tool)."""
+    for name in ("linear.jsonl", "branched.jsonl", "with_compaction.jsonl",
+                 "real_shapes.jsonl"):
+        st = pi_session_lib.analyze(os.path.join(FIX, "pi", name))
+        assert st.todos == []
+        assert st.todos_all_done is False
+        assert st.todo_step is False
+
+
+def test_todowrite_toolcall_fills_todos_and_flags(tmp_path):
+    """If a TodoWrite-shaped toolCall appears, fill st.todos + derived flags."""
+    entries = [
+        {
+            "type": "message",
+            "id": "m1",
+            "parentId": None,
+            "timestamp": "2026-07-18T00:00:00.000Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "do the plan"}],
+            },
+        },
+        {
+            "type": "message",
+            "id": "m2",
+            "parentId": "m1",
+            "timestamp": "2026-07-18T00:00:01.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "td1",
+                    "name": "TodoWrite",
+                    "arguments": {
+                        "todos": [
+                            {"content": "done step", "status": "completed"},
+                            {"content": "next step", "status": "pending"},
+                        ],
+                    },
+                }],
+                "usage": {
+                    "input": 100, "output": 10,
+                    "cacheRead": 0, "cacheWrite": 0, "totalTokens": 110,
+                },
+            },
+        },
+    ]
+    path = _write_jsonl(tmp_path / "todos.jsonl", entries)
+    st = pi_session_lib.analyze(path)
+    assert len(st.todos) == 2
+    assert st.todo_step is True
+    assert st.todos_all_done is False
+
+    # All completed → todos_all_done, no todo_step.
+    entries[-1]["message"]["content"][0]["arguments"]["todos"] = [
+        {"content": "a", "status": "completed"},
+        {"content": "b", "status": "done"},
+    ]
+    path2 = _write_jsonl(tmp_path / "todos_done.jsonl", entries)
+    st2 = pi_session_lib.analyze(path2)
+    assert st2.todos_all_done is True
+    assert st2.todo_step is False
+
+
 # --- Task 2 (context-window-analysis): per-item primitives hoisted to the
 # neutral home so context_inventory can reuse them with no import cycle. ---
 def test_interval_tokens_lives_in_pi_session_lib():

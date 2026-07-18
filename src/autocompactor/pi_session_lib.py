@@ -188,6 +188,32 @@ def _remember_path(seen: dict, path, idx: int) -> None:
         seen[path] = idx
 
 
+_DONE_TODO_STATUSES = frozenset({"completed", "done", "cancelled"})
+
+
+def _apply_todos(st, args) -> None:
+    """Fill st.todos + derived todo_step / todos_all_done from a tool call.
+
+    Accepts Claude-style ``{"todos": [{"content", "status"}, ...]}`` args
+    (and the same under a bare list). Never raises; leaves prior state on
+    unusable input so a partial/malformed call cannot wipe a good list.
+    """
+    if not isinstance(args, dict):
+        return
+    raw = args.get("todos")
+    if not isinstance(raw, list):
+        return
+    todos = [t for t in raw if isinstance(t, dict)]
+    if not todos:
+        return
+    st.todos = todos
+    statuses = [str(t.get("status") or "").lower() for t in todos]
+    pending = [s for s in statuses if s not in _DONE_TODO_STATUSES]
+    done = [s for s in statuses if s in ("completed", "done")]
+    st.todos_all_done = not pending
+    st.todo_step = bool(done) and bool(pending)
+
+
 def _tool_calls(message: dict) -> list:
     calls = []
     for block in _content_blocks(message):
@@ -432,11 +458,10 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
                 if hits:
                     st.open_work = transcript_lib.merge_open_work(
                         st.open_work, hits)
-            # Todos: Pi does not yet emit a stable TodoWrite tool shape into
-            # the JSONL the way Claude Code did. st.todos remains best-effort
-            # empty unless a future parser fills it; progress_lib.extract_todos
-            # and resolve_next_step tolerate empty lists (post-compact
-            # continuity plan T4).
+            # Todos: best-effort. Live Pi sessions (re-scanned 2026-07-18)
+            # do not emit a TodoWrite-class tool; when a Claude-shaped or
+            # future Pi-shaped call appears, fill st.todos + derived flags.
+            # progress_lib.extract_todos / resolve_next_step tolerate empty.
 
             for call in _tool_calls(msg):
                 name = call["name"]
@@ -448,6 +473,8 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
 
                 if lname in ("edit", "write"):
                     _remember_path(edited, args.get("path"), idx)
+                elif lname in ("todowrite", "todo_write", "todo"):
+                    _apply_todos(st, args)
                 elif lname == "read":
                     _remember_path(read, args.get("path"), idx)
                 elif lname == "grep":

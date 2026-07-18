@@ -25,6 +25,9 @@ founding topic. All 6 plan tasks done; goals G1–G5 attested achieved.
 
 ## Follow-ups
 
-- Wire `create_files` into fabric prepare for new-file tasks.
-- Optional live mid-wave compact smoke after `install_pi.py`.
-- Fill Pi `st.todos` when a stable tool shape appears (T4 honest empty).
+- Wire `create_files` into fabric prepare for new-file tasks (agent-dispatch).
+- ~~Optional live mid-wave compact smoke~~ — bridge prepare/reinject exercised
+  on a live session copy (2026-07-18); full mid-wave actuate still needs a
+  long natural session.
+- ~~Fill Pi `st.todos`~~ — defensive TodoWrite-shaped parser + flags shipped
+  (2026-07-18); stock fixtures remain honest-empty (no live Pi todo tool yet).
