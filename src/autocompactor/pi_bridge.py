@@ -43,8 +43,8 @@ import shutil
 import sys
 
 from autocompactor import (artifacts, cachelane_stats, context_inventory,  # noqa: E402
-                           pi_session_lib, policy, statedir, transcript_lib,
-                           window_resolver)
+                           pi_session_lib, policy, progress_lib, statedir,
+                           transcript_lib, window_resolver)
 from autocompactor.config_lib import cfg                          # noqa: E402
 from autocompactor.llm_digest import llm_digest                 # noqa: E402
 from autocompactor.stats import log_event                         # noqa: E402
@@ -392,6 +392,31 @@ def cmd_prepare(opts: dict) -> dict:
     instructions = staged or transcript_lib.build_preservation_instructions(
         st, opts.get("cwd", ""))
 
+    # Mechanical plan-position extract (never-raise). Attach to stats so
+    # artifacts.extract + resolve_next_step see the same winner.
+    prog = progress_lib.extract_all_safe(
+        st,
+        cwd=opts.get("cwd", "") or "",
+        progress_plan_files=cfg.bool("PROGRESS_PLAN_FILES", default=False),
+        progress_coord=cfg.str("PROGRESS_COORD", default="task_only"),
+        progress_affinity=cfg.bool("PROGRESS_AFFINITY", default=True),
+        budget_tokens=int(cfg.float("PROGRESS_BUDGET_TOKENS", default=400)),
+    )
+    pos = prog.get("progress_position")
+    if isinstance(pos, dict):
+        try:
+            st.progress_position = pos
+        except Exception:
+            pass
+    state["staged_progress"] = {
+        k: prog.get("content_free", {}).get(k)
+        for k in (
+            "progress_surface", "progress_key", "progress_mode",
+            "progress_rank", "progress_confidence", "progress_affinity",
+            "progress_brief_len", "progress_summary_len",
+        )
+    } if isinstance(pos, dict) else progress_lib.content_free_fields(None)
+
     arts = artifacts.merge(artifacts.load(session_id),
                            artifacts.extract(st))
     art_sizes = artifacts.save(session_id, arts)
@@ -414,9 +439,22 @@ def cmd_prepare(opts: dict) -> dict:
     # Capture the next step from the RICH pre-compaction transcript. The
     # post-compaction transcript reinject sees is truncated to an opaque
     # summary, so resolving there would return empty. Persist for reinject.
-    next_step, next_step_src = transcript_lib.resolve_next_step(st)
+    next_step, next_step_src = transcript_lib.resolve_next_step(st, pos)
     state["staged_next_step"] = next_step
     state["staged_next_step_src"] = next_step_src
+    # Eligibility for autonomous coding hard-resume (wait uses nextStepWait).
+    state["staged_progress_resume"] = (
+        "autonomous" if progress_lib.hard_resume_eligible(
+            pos if isinstance(pos, dict) else None,
+            progress_resume=cfg.str("PROGRESS_RESUME", default="autonomous"),
+            min_confidence=float(cfg.float("PROGRESS_MIN_CONFIDENCE", default=0.75)),
+            nextstep=cfg.str("NEXTSTEP", default="autonomous"),
+        ) else (
+            "off" if cfg.str("PROGRESS_RESUME", default="autonomous").lower() == "off"
+            or cfg.str("NEXTSTEP", default="autonomous").lower() == "off"
+            else "advisory"
+        )
+    )
     # Stage open_work for reinject / telemetry (counts + kinds only in events).
     open_work = list(getattr(st, "open_work", None) or [])[:5]
     state["staged_open_work"] = open_work
@@ -470,10 +508,14 @@ def cmd_prepare(opts: dict) -> dict:
         # Content-free next-step / open-work telemetry (no brief text).
         "next_step_src": next_step_src or "",
         "next_step_wait": bool(
-            next_step_src.startswith("open_work:waiting")),
+            next_step_src.startswith("open_work:waiting")
+            or next_step_src.startswith("progress:open_work")
+            or (isinstance(pos, dict) and pos.get("mode") == "wait")),
         "open_work_n": len(open_work),
         "open_work_kinds": [w.get("kind") for w in open_work
                             if isinstance(w, dict) and w.get("kind")],
+        **(state.get("staged_progress") or {}),
+        "progress_resume": state.get("staged_progress_resume", ""),
         **prepare_resolution.event_fields(),
     })
 
@@ -560,7 +602,8 @@ def cmd_reinject(opts: dict) -> dict:
         out["nextStep"] = next_step[:1500]
         out["nextStepSource"] = next_step_src
     out["nextStepWait"] = bool(
-        (next_step_src or "").startswith("open_work:waiting"))
+        (next_step_src or "").startswith("open_work:waiting")
+        or (next_step_src or "").startswith("progress:open_work"))
     open_work = state.get("staged_open_work") or []
     if open_work:
         out["openWork"] = open_work[:5]
@@ -571,6 +614,13 @@ def cmd_reinject(opts: dict) -> dict:
         "NEXTSTEP_WAIT", default="poll").lower()
     out["waitPollS"] = int(cfg.float("WAIT_POLL_S", default=60))
     out["waitPollMax"] = int(cfg.float("WAIT_POLL_MAX", default=20))
+    # Progress hard-resume gate (independent of wait path).
+    out["progressResume"] = (
+        state.get("staged_progress_resume")
+        or cfg.str("PROGRESS_RESUME", default="autonomous")
+    ).lower()
+    out["progressResumeCooldownownMs"] = int(
+        cfg.float("PROGRESS_RESUME_COOLDOWN_MS", default=60000))
     return out
 
 

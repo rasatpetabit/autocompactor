@@ -131,15 +131,16 @@ def test_preservation_instructions_include_open_work():
     assert "Y260717-114448" in instr
 
 
-def test_todo_still_beats_open_work():
+def test_wait_beats_todo_when_both_present():
+    """Wait mode always outranks coding progress/todos (progress-ledger A2)."""
     st = pi_session_lib.analyze(WAITING_FIXTURE)
     st.todos = [
         {"content": "finish packaging", "status": "pending"},
         {"content": "done item", "status": "completed"},
     ]
     step, src = transcript_lib.resolve_next_step(st)
-    assert src == "todo:pending[0]"
-    assert step == "finish packaging"
+    assert src == "open_work:waiting_monitor"
+    assert "Y260717-114448" in step
 
 
 def test_sanitize_user_task_text_unit():

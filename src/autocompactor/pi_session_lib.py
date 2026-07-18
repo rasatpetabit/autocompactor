@@ -432,6 +432,11 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
                 if hits:
                     st.open_work = transcript_lib.merge_open_work(
                         st.open_work, hits)
+            # Todos: Pi does not yet emit a stable TodoWrite tool shape into
+            # the JSONL the way Claude Code did. st.todos remains best-effort
+            # empty unless a future parser fills it; progress_lib.extract_todos
+            # and resolve_next_step tolerate empty lists (post-compact
+            # continuity plan T4).
 
             for call in _tool_calls(msg):
                 name = call["name"]
