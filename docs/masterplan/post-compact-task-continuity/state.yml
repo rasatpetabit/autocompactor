@@ -2,7 +2,7 @@
 schema_version: 8
 slug: post-compact-task-continuity
 status: in-progress
-phase: brainstorm
+phase: execute
 topic: "Strengthen ability to stay on task and continue previous work after an autocompactor run"
 complexity: high
 complexity_source: null
@@ -13,7 +13,7 @@ predecessor_transcript: null
 spec_path: /srv/dev/ras/autocompactor/docs/masterplan/post-compact-task-continuity/spec.md
 plan_path: /srv/dev/ras/autocompactor/docs/masterplan/post-compact-task-continuity/plan.md
 plan_index_path: /srv/dev/ras/autocompactor/docs/masterplan/post-compact-task-continuity/plan.index.json
-tasks: []
+tasks: [{"id":1,"status":"pending","wave":0,"files":["src/autocompactor/progress_lib.py","tests/test_progress_lib.py","tests/fixtures/progress/masterplan_active_state.yml","tests/fixtures/progress/session_affinity_true.jsonl","tests/fixtures/progress/session_affinity_false.jsonl"]},{"id":2,"status":"pending","wave":1,"files":["src/autocompactor/artifacts.py","src/autocompactor/transcript_lib.py","config.json","tests/test_open_work.py"]},{"id":3,"status":"pending","wave":1,"files":["src/autocompactor/pi_bridge.py","tests/test_pi_bridge.py"]},{"id":4,"status":"pending","wave":1,"files":["src/autocompactor/pi_session_lib.py","tests/test_pi_session_lib.py"]},{"id":5,"status":"pending","wave":2,"files":["src/pi/autocompactor.ts","tests/shim_wait_resume.test.ts"]},{"id":6,"status":"pending","wave":2,"files":["HANDOFF.md","README.md"]}]
 active_run: null
 pending_gate: null
 goals_enabled: true

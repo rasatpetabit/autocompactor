@@ -1,0 +1,121 @@
+{
+  "schema_version": "6.0",
+  "meta": {
+    "title": "post-compact-task-continuity",
+    "spec": "docs/masterplan/post-compact-task-continuity/spec.md"
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "wave": 0,
+      "description": "Create progress_lib: ProgressHit, masterplan/coord/todo/plan_file extractors (gated defaults), affinity/confidence/brief, never-raise + fixtures/tests.",
+      "files": [
+        "src/autocompactor/progress_lib.py",
+        "tests/test_progress_lib.py",
+        "tests/fixtures/progress/masterplan_active_state.yml",
+        "tests/fixtures/progress/session_affinity_true.jsonl",
+        "tests/fixtures/progress/session_affinity_false.jsonl"
+      ],
+      "verify_commands": [
+        "python3 -m pytest tests/test_progress_lib.py -q"
+      ],
+      "codex": "ok",
+      "goals": [
+        "G1",
+        "G2",
+        "G3"
+      ]
+    },
+    {
+      "id": 2,
+      "wave": 1,
+      "description": "Wire progress_position into artifacts PRIORITY/digest, rewrite resolve_next_step (wait mode first), add config knobs; keep open_work green.",
+      "files": [
+        "src/autocompactor/artifacts.py",
+        "src/autocompactor/transcript_lib.py",
+        "config.json",
+        "tests/test_open_work.py"
+      ],
+      "verify_commands": [
+        "python3 -m pytest tests/test_progress_lib.py tests/test_open_work.py -q"
+      ],
+      "codex": "ok",
+      "goals": [
+        "G1",
+        "G3",
+        "G4"
+      ]
+    },
+    {
+      "id": 3,
+      "wave": 1,
+      "description": "Stage progress in pi_bridge prepare/reinject with content-free telemetry and eligibility gates for progressResume.",
+      "files": [
+        "src/autocompactor/pi_bridge.py",
+        "tests/test_pi_bridge.py"
+      ],
+      "verify_commands": [
+        "python3 -m pytest tests/test_pi_bridge.py -q"
+      ],
+      "codex": "ok",
+      "goals": [
+        "G1",
+        "G2",
+        "G4"
+      ]
+    },
+    {
+      "id": 4,
+      "wave": 1,
+      "description": "Best-effort Pi todo fill in pi_session_lib if tool shapes allow; otherwise keep empty and document honest tests.",
+      "files": [
+        "src/autocompactor/pi_session_lib.py",
+        "tests/test_pi_session_lib.py"
+      ],
+      "verify_commands": [
+        "python3 -m pytest tests/test_pi_session_lib.py tests/test_progress_lib.py -q"
+      ],
+      "codex": "ok",
+      "goals": [
+        "G1",
+        "G5"
+      ]
+    },
+    {
+      "id": 5,
+      "wave": 2,
+      "description": "TS flushAutoResume hard-resume eligibility + anti-thrash cooldown; wait path regression tests.",
+      "files": [
+        "src/pi/autocompactor.ts",
+        "tests/shim_wait_resume.test.ts"
+      ],
+      "verify_commands": [
+        "node --test tests/shim_wait_resume.test.ts"
+      ],
+      "codex": "ok",
+      "goals": [
+        "G1",
+        "G2",
+        "G3"
+      ]
+    },
+    {
+      "id": 6,
+      "wave": 2,
+      "description": "Update HANDOFF/README tunables; run full pytest suite (and Pi smoke when safe).",
+      "files": [
+        "HANDOFF.md",
+        "README.md"
+      ],
+      "verify_commands": [
+        "python3 -m pytest tests/ -q"
+      ],
+      "codex": "ok",
+      "goals": [
+        "G5"
+      ]
+    }
+  ],
+  "plan_hash": "sha256:b48c3a63a0645cf7c7f11c8bf3d06ce4e0b2797f9ceb5c6dcfdbcc0b37ebc85c",
+  "generated_at": "2026-07-18T00:34:08.562Z"
+}
