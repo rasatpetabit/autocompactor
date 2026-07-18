@@ -1,0 +1,60 @@
+{
+  "key": "mp-wave-dispatch-v1:post-compact-task-continuity:0:dispatch_fabric",
+  "run_id": "post-compact-task-continuity",
+  "wave": 0,
+  "op": "dispatch_fabric",
+  "contract_version": "adsp-v1.1",
+  "status": "dispatched",
+  "attempt": 1,
+  "dispatched_at": "2026-07-18T00:36:41.977Z",
+  "routing_inputs": {
+    "routing": "auto",
+    "codex_host_suppressed": true,
+    "linked_worktree": true
+  },
+  "payload": [
+    {
+      "id": 1,
+      "description": "Create progress_lib: ProgressHit, masterplan/coord/todo/plan_file extractors (gated defaults), affinity/confidence/brief, never-raise + fixtures/tests.",
+      "files": [
+        "src/autocompactor/progress_lib.py",
+        "tests/test_progress_lib.py",
+        "tests/fixtures/progress/masterplan_active_state.yml",
+        "tests/fixtures/progress/session_affinity_true.jsonl",
+        "tests/fixtures/progress/session_affinity_false.jsonl"
+      ],
+      "verify_commands": [
+        "python3 -m pytest tests/test_progress_lib.py -q"
+      ],
+      "class": "bounded-edit"
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": 1,
+      "class": "bounded-edit",
+      "handoff_key": "adsp-idem-v1:post-compact-task-continuity:1:1352be837be085ccc246594c8bbcbb8fd15c51017192074464f0eb3a2054f226:ad869c41da9ea100b957cbe2da69fc575a1e7acb18bb41bfe7a2536f8cb3daa5"
+    }
+  ],
+  "result": {
+    "wave": 0,
+    "tasks": [
+      {
+        "task_id": 1,
+        "digest": {
+          "task_id": 1,
+          "status": "blocked",
+          "start_sha": "",
+          "files_changed": [],
+          "verify": [],
+          "summary": "broker error during dispatch_task: /srv/dev/ras/autocompactor/.worktrees/post-compact-task-continuity/src/autocompactor/progress_lib.py: file not found — skynet_edit_files only edits existing files",
+          "blockers": "/srv/dev/ras/autocompactor/.worktrees/post-compact-task-continuity/src/autocompactor/progress_lib.py: file not found — skynet_edit_files only edits existing files",
+          "dispatch": {
+            "outcome": "broker_error",
+            "reason": "/srv/dev/ras/autocompactor/.worktrees/post-compact-task-continuity/src/autocompactor/progress_lib.py: file not found — skynet_edit_files only edits existing files"
+          }
+        }
+      }
+    ]
+  }
+}
