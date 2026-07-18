@@ -1,0 +1,28 @@
+schema_version: 8
+slug: demo-wave-run
+status: in-progress
+phase: execute
+topic: "Demo multi-step wave work for progress_lib fixtures"
+tasks:
+  - id: 1
+    status: done
+    wave: 0
+    files:
+      - src/a.py
+  - id: 7
+    status: pending
+    wave: 2
+    description: "Implement progress hard-resume brief"
+    files:
+      - src/autocompactor/progress_lib.py
+      - tests/test_progress_lib.py
+    verify_commands:
+      - python3 -m pytest tests/test_progress_lib.py -q
+  - id: 8
+    status: pending
+    wave: 2
+    files:
+      - README.md
+active_run:
+  wave: 2
+  phase: launching

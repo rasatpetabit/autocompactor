@@ -963,44 +963,68 @@ def build_preservation_instructions(st: TranscriptStats, cwd: str = "") -> str:
     return "\n".join(lines)
 
 
-def resolve_next_step(st: "TranscriptStats") -> tuple:
+def resolve_next_step(st: "TranscriptStats",
+                      progress_position=None) -> tuple:
     """Resolve the most actionable next step from the PRE-compaction transcript.
 
     Priority chain (first non-empty wins):
-      1. First pending TodoWrite item -- explicit, user-authored plan.
-      2. Latest waiting_monitor open_work -- live background wait.
-      3. Latest next_on_success open_work -- declared post-success handoff.
-      4. The latest genuine user task (last_user_task) -- the live goal.
-      5. The most recent user correction -- what to do differently now.
+      1. progress_position mode=wait -- live background wait (disk/transcript).
+      2. Latest waiting_monitor open_work -- belt-and-suspenders wait path.
+      3. progress_position mode=code -- mechanical plan position brief.
+      4. First pending TodoWrite item -- explicit, user-authored plan.
+      5. Latest next_on_success open_work -- declared post-success handoff.
+      6. The latest genuine user task (last_user_task) -- the live goal.
+      7. The most recent user correction -- what to do differently now.
 
-    Returns (next_step, source_tag) where source_tag is a short stable
-    label used for telemetry/reinject ("todo:pending[0]" |
-    "open_work:waiting_monitor" | "open_work:next_on_success" |
-    "last_user_task" | "correction[-1]" | ""). Empty step yields ("", "").
+    Returns (next_step, source_tag). progress sources use tags like
+    "progress:masterplan" / "progress:open_work". Empty step yields ("", "").
 
     MUST be called at prepare time (rich pre-compaction transcript). The
     post-compaction transcript reinject sees is truncated to an opaque
     summary, so resolving there would return empty.
     """
+    pos = progress_position
+    if not isinstance(pos, dict):
+        pos = getattr(st, "progress_position", None)
+    if isinstance(pos, dict) and pos.get("mode") == "wait":
+        brief = (pos.get("brief") or pos.get("summary") or "").strip()
+        if brief:
+            # Keep open_work:waiting_* tags so TS isWaitShapedStep + telemetry
+            # stay compatible with the waiting-state path.
+            if (pos.get("surface") or "") == "open_work":
+                return brief, "open_work:waiting_monitor"
+            surface = pos.get("surface") or "progress"
+            return brief, f"progress:{surface}"
+
+    open_work = [w for w in (getattr(st, "open_work", None) or [])
+                 if isinstance(w, dict)]
+    for item in reversed(open_work):
+        if item.get("kind") != "waiting_monitor":
+            continue
+        brief = format_open_work_brief(item).strip()
+        if brief:
+            return brief, "open_work:waiting_monitor"
+
+    if isinstance(pos, dict) and pos.get("mode") != "wait":
+        brief = (pos.get("brief") or pos.get("summary") or "").strip()
+        if brief:
+            surface = pos.get("surface") or "progress"
+            return brief, f"progress:{surface}"
+
     pending = [t.get("content", "").strip()
               for t in (st.todos or [])
               if t.get("status") != "completed" and t.get("content", "").strip()]
     if pending:
         return pending[0], "todo:pending[0]"
-    open_work = [w for w in (getattr(st, "open_work", None) or [])
-                 if isinstance(w, dict)]
-    for kind, tag in (("waiting_monitor", "open_work:waiting_monitor"),
-                      ("next_on_success", "open_work:next_on_success")):
-        for item in reversed(open_work):
-            if item.get("kind") != kind:
-                continue
-            if kind == "waiting_monitor":
-                brief = format_open_work_brief(item).strip()
-            else:
-                brief = (item.get("next_on_success") or item.get("summary")
-                         or "").strip()
-            if brief:
-                return brief, tag
+
+    for item in reversed(open_work):
+        if item.get("kind") != "next_on_success":
+            continue
+        brief = (item.get("next_on_success") or item.get("summary")
+                 or "").strip()
+        if brief:
+            return brief, "open_work:next_on_success"
+
     if st.last_user_task.strip():
         return st.last_user_task.strip(), "last_user_task"
     if st.corrections:

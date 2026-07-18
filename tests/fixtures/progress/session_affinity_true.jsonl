@@ -1,0 +1,2 @@
+{"type":"message","id":"1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"Continue masterplan demo-wave-run task T7 hard resume work in docs/masterplan/demo-wave-run"}]}}
+{"type":"message","id":"2","parentId":"1","message":{"role":"assistant","content":[{"type":"text","text":"Working on T7 in demo-wave-run."}],"usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}

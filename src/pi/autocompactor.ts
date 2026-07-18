@@ -138,7 +138,8 @@ function configuredWaitPollMax(value?: unknown): number {
 
 function isWaitShapedStep(stepSrc: string, nextStepWait?: unknown): boolean {
   if (nextStepWait === true || nextStepWait === 1 || nextStepWait === "1") return true
-  return String(stepSrc || "").startsWith("open_work:waiting")
+  const src = String(stepSrc || "")
+  return src.startsWith("open_work:waiting") || src.startsWith("progress:open_work")
 }
 
 // Visible delivery: when the session is idle (not streaming), omit deliverAs
@@ -437,6 +438,9 @@ export default function autocompactor(pi: ExtensionAPI) {
   let lastAdvisory = "" // dedupe key for the recurring advise/reentrancy notice
   let pendingAutoResume: AutoResumePayload | null = null
   let lastAutoResumeCompactionId = ""
+  // Anti-thrash for progress:* hard resume (same key within cooldown → advisory).
+  let lastProgressResumeKey = ""
+  let lastProgressResumeAt = 0
   let waitPoll: WaitPollState | null = null
   // Bound for tests / host overrides; production uses ExtensionContext.
   let waitPollCtx: ExtensionContext | null = null
@@ -633,10 +637,14 @@ export default function autocompactor(pi: ExtensionAPI) {
         return
       }
 
+      if (String(payload.stepSrc || "").startsWith("progress:")) {
+        lastProgressResumeKey = String(payload.stepSrc || "")
+        lastProgressResumeAt = Date.now()
+      }
       const taskMessage =
         `[autocompactor-nextstep] Continuing automatically after compaction. Recovered next step (${payload.stepSrc || "unknown"}):\n` +
         `${payload.step}\n\n` +
-        "Verify the current repository/session state before editing, then continue executing the active task using the available tools."
+        "Verify git status/diff on any listed files before editing; resume mid-task — do not restart from scratch."
       pi.sendMessage(
         {
           customType: "autocompactor.nextstep.task",
@@ -968,12 +976,41 @@ export default function autocompactor(pi: ExtensionAPI) {
       const waitMode = configuredWaitMode(inj?.nextStepWaitMode)
       const waitPollS = configuredWaitPollS(inj?.waitPollS)
       const waitPollMax = configuredWaitPollMax(inj?.waitPollMax)
+      const progressResume = String(
+        (inj?.progressResume as string | undefined) ??
+        process.env.AUTOCOMPACTOR_PROGRESS_RESUME ??
+        (CFG as any)?.PROGRESS_RESUME ??
+        "autonomous",
+      ).toLowerCase()
+      const progressCooldownMs = Math.max(
+        0,
+        Number(
+          (inj?.progressResumeCooldownownMs as number | undefined) ??
+          process.env.AUTOCOMPACTOR_PROGRESS_RESUME_COOLDOWN_MS ??
+          (CFG as any)?.PROGRESS_RESUME_COOLDOWN_MS ??
+          60000,
+        ) || 60000,
+      )
+      const isProgressCoding =
+        !waitShaped && String(stepSrc || "").startsWith("progress:")
+      let progressCodingAutonomous =
+        !isProgressCoding || progressResume === "autonomous"
+      if (isProgressCoding && progressCodingAutonomous && stepSrc) {
+        const now = Date.now()
+        if (
+          stepSrc === lastProgressResumeKey &&
+          now - lastProgressResumeAt < progressCooldownownMs
+        ) {
+          progressCodingAutonomous = false
+        }
+      }
       const compactionId = String(
         event?.compactionEntry?.id ??
         `${event?.reason ?? "unknown"}:${event?.compactionEntry?.timestamp ?? ""}:${stepSrc}:${step.slice(0, 80)}`,
       )
       const autoResume = Boolean(
-        step && nextStepMode === "autonomous" && !event?.willRetry &&
+        step && nextStepMode === "autonomous" && progressCodingAutonomous &&
+        !event?.willRetry &&
         (selfTriggered || event?.reason !== "manual"),
       )
 
@@ -996,17 +1033,26 @@ export default function autocompactor(pi: ExtensionAPI) {
         )
       }
 
-      if (step && nextStepMode === "advisory") {
+      const progressAdvisory = Boolean(
+        step && isProgressCoding && !progressCodingAutonomous &&
+        progressResume !== "off" && nextStepMode !== "off",
+      )
+      if (step && (nextStepMode === "advisory" || progressAdvisory)) {
         const advOpts = deliveryFor(ctx) === "immediate"
           ? undefined
           : ({ deliverAs: "nextTurn" } as const)
+        const why = progressAdvisory && nextStepMode !== "advisory"
+          ? (progressResume === "advisory"
+              ? "PROGRESS_RESUME=advisory"
+              : "progress resume throttled (same key within cooldown)")
+          : "NEXTSTEP=advisory"
         pi.sendMessage(
           {
             customType: "autocompactor.nextstep.advisory",
             content:
-              `autocompactor-nextstep: recovered next step (${stepSrc || "unknown"}) —\n` +
+              `autocompactor-nextstep: recovered next step (${stepSrc || "unknown"}; ${why}) —\n` +
               `${step}\n\n` +
-              `Continue with this step manually, or set AUTOCOMPACTOR_NEXTSTEP=autonomous to resume automatically after future compactions.`,
+              `Continue with this step manually, or set AUTOCOMPACTOR_NEXTSTEP=autonomous / PROGRESS_RESUME=autonomous to resume automatically after future compactions.`,
             display: true,
           },
           advOpts,

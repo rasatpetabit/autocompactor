@@ -177,6 +177,39 @@ describe("wait-shaped autonomous resume", () => {
     expect(waits.length).toBe(0)
   })
 
+  test("progressResume=advisory does not triggerTurn coding progress step", async () => {
+    const mod = await freshShim()
+    const h = makeHarness({
+      idle: true,
+      bridgeResponse: {
+        reinject: {
+          text: "TEST-DIGEST",
+          customType: "autocompactor.digest",
+          nextStep:
+            "RESUME mid-task — do not restart from scratch.\nContinue ONLY this unit: T7",
+          nextStepSource: "progress:masterplan",
+          nextStepWait: false,
+          nextStepMode: "autonomous",
+          progressResume: "advisory",
+        },
+      },
+    })
+    mod.default(h.pi)
+    await h.handlers["agent_end"]?.({}, h.ctx)
+    if (h.ctx.compactCalls === 0) await h.ctx.compact({})
+    await h.waitForCompactions()
+    await new Promise((r) => setTimeout(r, 20))
+
+    const coding = h.sendMessages.filter(
+      (m) => m.message?.customType === "autocompactor.nextstep.task" && m.options?.triggerTurn,
+    )
+    expect(coding.length).toBe(0)
+    const adv = h.sendMessages.filter(
+      (m) => m.message?.customType === "autocompactor.nextstep.advisory",
+    )
+    expect(adv.length).toBeGreaterThanOrEqual(1)
+  })
+
   test("idle actuate status omits deliverAs nextTurn", async () => {
     const mod = await freshShim()
     const h = makeHarness({ idle: true })

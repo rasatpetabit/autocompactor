@@ -23,6 +23,7 @@ Artifact classes (priority order — higher survives budget trimming first):
   hex_constants    hex literals with surrounding context (protocol work)
   files            edited / read file paths
   open_work        waiting monitors / on-success handoffs (resume after compact)
+  progress_position mechanical plan position (masterplan/coord/todo) for hard resume
 """
 
 from __future__ import annotations
@@ -34,8 +35,11 @@ from autocompactor import statedir
 
 ART_DIR = os.path.expanduser("~/.autocompactor/pi/artifacts")
 
-PRIORITY = ["initial_prompts", "corrections", "open_work", "error_ledger",
-            "working_commands", "hex_constants", "files"]
+PRIORITY = ["initial_prompts", "corrections", "progress_position", "open_work",
+            "error_ledger", "working_commands", "hex_constants", "files"]
+
+# Soft ceiling for the progress section (~tokens; chars ≈ tokens*4).
+PROGRESS_SECTION_BUDGET_TOKENS = 400
 
 
 def _artifact_dir(harness: str = "pi") -> str:
@@ -105,6 +109,9 @@ def merge(old: dict, new: dict) -> dict:
         # Latest open_work wins per kind (new supersedes old for same kind).
         "open_work": _merge_open_work(
             old.get("open_work") or [], new.get("open_work") or [], 5),
+        # progress_position tracks LIVE work — higher rank wins (not old-wins).
+        "progress_position": _merge_progress_position(
+            old.get("progress_position"), new.get("progress_position")),
         "files": {
             "edited": _dedupe_keep_last(
                 (of.get("edited") or []) + (nf.get("edited") or []), 30),
@@ -127,12 +134,34 @@ def _merge_open_work(old: list, new: list, cap: int = 5) -> list:
     return out[-cap:]
 
 
+def _merge_progress_position(old, new):
+    """Single-object merge: prefer higher rank, then confidence, then new."""
+    candidates = [c for c in (new, old) if isinstance(c, dict) and c]
+    if not candidates:
+        return new if isinstance(new, dict) else (old if isinstance(old, dict) else None)
+    if len(candidates) == 1:
+        return candidates[0]
+
+    def key(h):
+        try:
+            return (int(h.get("rank") or 0), float(h.get("confidence") or 0),
+                    float(h.get("mtime") or 0))
+        except Exception:
+            return (0, 0.0, 0.0)
+
+    return max(candidates, key=key)
+
+
 def extract(st) -> dict:
     """Mechanical extraction from a TranscriptStats. No LLM calls."""
+    pos = getattr(st, "progress_position", None)
+    if not isinstance(pos, dict):
+        pos = None
     return {
         "initial_prompts": list(getattr(st, "initial_user_prompts", []) or []),
         "corrections": st.corrections,
         "open_work": list(getattr(st, "open_work", []) or [])[-5:],
+        "progress_position": pos,
         "error_ledger": [{"error": k, "count": v}
                          for k, v in list(st.error_ledger.items())[-20:]],
         "working_commands": st.working_commands,
@@ -178,6 +207,18 @@ def _sections(arts: dict) -> dict:
         sections["corrections"] = ("USER CORRECTIONS (verbatim, still "
                                    "binding):\n" + "\n".join(
                                        "- " + c for c in arts["corrections"]))
+    pos = arts.get("progress_position")
+    if isinstance(pos, dict) and pos:
+        brief = (pos.get("brief") or pos.get("summary") or "").strip()
+        if brief:
+            max_chars = PROGRESS_SECTION_BUDGET_TOKENS * 4
+            if len(brief) > max_chars:
+                brief = brief[: max_chars - 1] + "…"
+            surface = pos.get("surface") or "progress"
+            key = pos.get("key") or ""
+            sections["progress_position"] = (
+                f"PLAN POSITION ({surface} {key}) — resume this unit; "
+                "do not restart from scratch:\n" + brief)
     if arts.get("open_work"):
         ow_lines = []
         for item in arts["open_work"]:
