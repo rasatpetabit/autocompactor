@@ -59,6 +59,14 @@ needed. `config.local.json` is the gitignored site-local overlay, and any
 |---|---|---|
 | `MODE` | `actuate` | `advise` only posts an `autocompactor.advice` message; `actuate` lets the shim call `ctx.compact()` itself. Overridden by `AUTOCOMPACTOR_PI_MODE` env var. |
 | `NEXTSTEP` | `autonomous` | Post-compaction continuation mode: `autonomous` immediately triggers a model turn with the recovered next step, `advisory` shows the step for the next human turn, `off` disables it. Overridden by `AUTOCOMPACTOR_NEXTSTEP`. |
+
+| `PROGRESS_RESUME` | `autonomous` | Hard-resume gate for mechanical plan position (`progress:*` next steps). `autonomous` / `advisory` / `off`. Independent of wait path. `AUTOCOMPACTOR_PROGRESS_RESUME` overrides. |
+| `PROGRESS_MIN_CONFIDENCE` | `0.75` | Below this, progress coding resume is advisory only. |
+| `PROGRESS_BUDGET_TOKENS` | `400` | Section ceiling for PLAN POSITION in the artifact digest. |
+| `PROGRESS_COORD` | `task_only` | Coord blackboard surface: `task_only` / `wave_ok` / `off`. |
+| `PROGRESS_PLAN_FILES` | `false` | Optional weak plan-file extractor. |
+| `PROGRESS_AFFINITY` | `true` | Require session affinity for masterplan/coord hard resume. |
+| `PROGRESS_RESUME_COOLDOWN_MS` | `60000` | Same progress key within this window → advisory (anti-thrash). |
 | `PROFILE` | `economy` | Compaction profile passed to the summarizer. |
 | `WINDOW` | 200000 | Fallback context window in tokens. Pi normally derives the exact effective window from `ctx` (`contextWindow − reserveTokens`), better than this static value. |
 | `RESERVE` | 40000 | Reserve tokens subtracted from `contextWindow` when Pi does not report one. Mirrors the Pi host pin in `~/.pi/agent/settings.json`. |

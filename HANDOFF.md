@@ -12,6 +12,15 @@ is the sole adapter that ships.
 > `pi_session_lib.py`, `pi_bridge.py`, `nightly_eval.py`, `install_pi.py`, and
 > `src/pi/autocompactor.ts`.
 
+
+## Post-compact plan position (2026-07-18)
+
+Mechanical **progress ledger** (`progress_lib.py`) stages masterplan/coord/todo
+plan position into artifacts + next-step. Hard resume is gated by session
+**affinity**, **confidence**, `PROGRESS_RESUME`, and wait-mode supremacy
+(waiting-state path unchanged). See
+`docs/masterplan/post-compact-task-continuity/spec.md`.
+
 ## Post-pivot follow-ups (open items, 2026-06-21)
 
 Deferred, owner-held cleanup from the Pi-only pivot merge (branch
