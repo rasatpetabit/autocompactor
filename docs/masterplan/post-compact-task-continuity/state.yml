@@ -17,7 +17,8 @@ tasks: []
 active_run: null
 pending_gate: null
 goals_enabled: true
-goals: []
+goals: [{"id":"G1","text":"Correct mid-wave hard resume","signal":"test"},{"id":"G2","text":"No stale-plan hijack","signal":"test"},{"id":"G3","text":"Wait-path regression free","signal":"test"},{"id":"G4","text":"Content-free telemetry","signal":"test"},{"id":"G5","text":"Verification green","signal":"command"}]
 review: {"adversary":true}
 render: {"images":"off"}
 dispatch: {"fabric":true}
+goals_md_hash: sha256:9ea149c2924a4e307eacf08784a9c8316676c949713d759922fd03f539e80496
