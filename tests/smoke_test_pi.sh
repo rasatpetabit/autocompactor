@@ -60,5 +60,25 @@ else
   echo "   (bun not installed; skipped)"
 fi
 
+echo "7) mid-wave progress hard-resume: prepare+reinject with active masterplan cwd"
+MID=$(mktemp -d)
+trap 'rm -rf "$HOME" "$MID"' EXIT
+mkdir -p "$MID/docs/masterplan/demo-wave-run"
+cp tests/fixtures/progress/masterplan_active_state.yml \
+  "$MID/docs/masterplan/demo-wave-run/state.yml"
+cp tests/fixtures/progress/session_affinity_true.jsonl "$MID/session.jsonl"
+export AUTOCOMPACTOR_PROGRESS_RESUME=autonomous
+export AUTOCOMPACTOR_NEXTSTEP=autonomous
+export AUTOCOMPACTOR_CONFIG=""
+python3 "$BRIDGE" prepare --session "$MID/session.jsonl" --cwd "$MID" --trigger self \
+  >/dev/null || fail "mid-wave prepare failed"
+OUT7=$(python3 "$BRIDGE" reinject --session "$MID/session.jsonl")
+echo "$OUT7" | grep -q '"progressResume": "autonomous"' \
+  || fail "mid-wave reinject missing progressResume=autonomous: $OUT7"
+echo "$OUT7" | grep -q '"nextStepSource": "progress:' \
+  || fail "mid-wave reinject missing progress nextStepSource: $OUT7"
+echo "$OUT7" | grep -q '"nextStepWait": false' \
+  || fail "mid-wave expected coding (non-wait) resume"
+
 echo ""
 echo "ALL PI SMOKE TESTS PASSED"

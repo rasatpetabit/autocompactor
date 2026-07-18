@@ -302,6 +302,62 @@ def test_reinject_without_prepare_is_quiet_or_json(tmp_path):
     parse_single_json(result.stdout)
 
 
+def test_midwave_prepare_reinject_progress_hard_resume(tmp_path):
+    """Mid-wave actuate smoke: prepare+reinject surfaces progress hard-resume.
+
+    Simulates compact mid masterplan execute: cwd has active state.yml,
+    session text has affinity cues, reinject must return progress: source
+    and progressResume=autonomous (coding hard-resume eligible).
+    """
+    state_dir = tmp_path / "state"
+    # Active masterplan bundle under cwd.
+    mp_src = REPO_ROOT / "tests" / "fixtures" / "progress" / "masterplan_active_state.yml"
+    mp_dir = tmp_path / "docs" / "masterplan" / "demo-wave-run"
+    mp_dir.mkdir(parents=True)
+    (mp_dir / "state.yml").write_text(mp_src.read_text(encoding="utf-8"), encoding="utf-8")
+    # Affinity-true session transcript as the compact target.
+    sess = tmp_path / "midwave.jsonl"
+    sess.write_text(
+        (REPO_ROOT / "tests" / "fixtures" / "progress" / "session_affinity_true.jsonl")
+        .read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    prep = run_bridge(
+        ["prepare", "--session", str(sess), "--cwd", str(tmp_path), "--trigger", "self"],
+        state_dir,
+        extra_env={
+            "AUTOCOMPACTOR_PROGRESS_RESUME": "autonomous",
+            "AUTOCOMPACTOR_NEXTSTEP": "autonomous",
+            "AUTOCOMPACTOR_CONFIG": "",
+        },
+    )
+    assert prep.returncode == 0, prep.stderr
+    prep_data = parse_single_json(prep.stdout)
+    assert prep_data and prep_data.get("customInstructions")
+
+    reinj = run_bridge(
+        ["reinject", "--session", str(sess)],
+        state_dir,
+        extra_env={
+            "AUTOCOMPACTOR_PROGRESS_RESUME": "autonomous",
+            "AUTOCOMPACTOR_NEXTSTEP": "autonomous",
+            "AUTOCOMPACTOR_CONFIG": "",
+        },
+    )
+    assert reinj.returncode == 0, reinj.stderr
+    data = parse_single_json(reinj.stdout)
+    assert data is not None
+    assert data.get("customType") == "autocompactor.digest"
+    src = str(data.get("nextStepSource") or "")
+    assert src.startswith("progress:"), data
+    assert data.get("progressResume") == "autonomous", data
+    assert int(data.get("progressResumeCooldownMs") or 0) >= 0
+    step = str(data.get("nextStep") or "")
+    assert step.strip(), "hard-resume brief must be non-empty"
+    assert data.get("nextStepWait") is False
+
+
 # --- Task 8 (context-window-analysis): decision-consumer corrections (spec §6) ---
 
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "pi"

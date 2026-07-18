@@ -25,9 +25,10 @@ founding topic. All 6 plan tasks done; goals G1–G5 attested achieved.
 
 ## Follow-ups
 
-- Wire `create_files` into fabric prepare for new-file tasks (agent-dispatch).
-- ~~Optional live mid-wave compact smoke~~ — bridge prepare/reinject exercised
-  on a live session copy (2026-07-18); full mid-wave actuate still needs a
-  long natural session.
+- ~~Wire `create_files` into fabric prepare~~ — agent-dispatch task 49 S-B
+  (`create_files` defaults true on `dispatch_task` gateway edit; masterplan
+  `dispatch-wave` auto-opts when targets missing). Schema text aligned 2026-07-18.
+- ~~Mid-wave progress actuate smoke~~ — `test_midwave_prepare_reinject_progress_hard_resume`
+  + `smoke_test_pi.sh` step 7 (prepare→reinject with active masterplan cwd).
 - ~~Fill Pi `st.todos`~~ — defensive TodoWrite-shaped parser + flags shipped
   (2026-07-18); stock fixtures remain honest-empty (no live Pi todo tool yet).
