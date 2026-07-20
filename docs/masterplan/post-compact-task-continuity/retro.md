@@ -4,15 +4,16 @@
 
 Shipped a mechanical **progress ledger** + gated hard resume so post-autocompactor
 sessions re-enter multi-step (especially masterplan) work instead of a stale
-founding topic. All 6 plan tasks done; goals G1–G5 attested achieved.
+founding topic. Completed all six plan tasks; goals G1–G5 are attested as achieved.
 
 ## What worked
 
 - Disk-first extractors (`progress_lib`) over summarizer goodwill.
 - Adversarial amendments A1–A8 (affinity, wait supremacy, confidence, budget)
-  prevented forced derail designs.
+  prevented designs that could force derailment.
 - Reuse of waiting-state `flushAutoResume` — no second resume engine.
-- Tests first: 15 progress_lib + open_work regressions + bridge + 7 bun shim.
+- Test-first coverage: 15 progress_lib tests, open_work regressions, bridge tests,
+  and 7 Bun shim tests.
 
 ## Friction
 

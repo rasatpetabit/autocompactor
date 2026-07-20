@@ -310,51 +310,60 @@ def test_midwave_prepare_reinject_progress_hard_resume(tmp_path):
     and progressResume=autonomous (coding hard-resume eligible).
     """
     state_dir = tmp_path / "state"
-    # Active masterplan bundle under cwd.
-    mp_src = REPO_ROOT / "tests" / "fixtures" / "progress" / "masterplan_active_state.yml"
-    mp_dir = tmp_path / "docs" / "masterplan" / "demo-wave-run"
-    mp_dir.mkdir(parents=True)
-    (mp_dir / "state.yml").write_text(mp_src.read_text(encoding="utf-8"), encoding="utf-8")
-    # Affinity-true session transcript as the compact target.
-    sess = tmp_path / "midwave.jsonl"
-    sess.write_text(
-        (REPO_ROOT / "tests" / "fixtures" / "progress" / "session_affinity_true.jsonl")
-        .read_text(encoding="utf-8"),
-        encoding="utf-8",
+    state_fixture = (
+        REPO_ROOT / "tests" / "fixtures" / "progress" / "masterplan_active_state.yml"
+    )
+    masterplan_dir = tmp_path / "docs" / "masterplan" / "demo-wave-run"
+    masterplan_dir.mkdir(parents=True)
+    (masterplan_dir / "state.yml").write_text(
+        state_fixture.read_text(encoding="utf-8"), encoding="utf-8"
     )
 
-    prep = run_bridge(
-        ["prepare", "--session", str(sess), "--cwd", str(tmp_path), "--trigger", "self"],
-        state_dir,
-        extra_env={
-            "AUTOCOMPACTOR_PROGRESS_RESUME": "autonomous",
-            "AUTOCOMPACTOR_NEXTSTEP": "autonomous",
-            "AUTOCOMPACTOR_CONFIG": "",
-        },
+    session_path = tmp_path / "midwave.jsonl"
+    session_fixture = (
+        REPO_ROOT / "tests" / "fixtures" / "progress" / "session_affinity_true.jsonl"
     )
-    assert prep.returncode == 0, prep.stderr
-    prep_data = parse_single_json(prep.stdout)
-    assert prep_data and prep_data.get("customInstructions")
+    session_path.write_text(
+        session_fixture.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    resume_env = {
+        "AUTOCOMPACTOR_PROGRESS_RESUME": "autonomous",
+        "AUTOCOMPACTOR_NEXTSTEP": "autonomous",
+        "AUTOCOMPACTOR_CONFIG": "",
+    }
 
-    reinj = run_bridge(
-        ["reinject", "--session", str(sess)],
+    prepare_result = run_bridge(
+        [
+            "prepare",
+            "--session",
+            str(session_path),
+            "--cwd",
+            str(tmp_path),
+            "--trigger",
+            "self",
+        ],
         state_dir,
-        extra_env={
-            "AUTOCOMPACTOR_PROGRESS_RESUME": "autonomous",
-            "AUTOCOMPACTOR_NEXTSTEP": "autonomous",
-            "AUTOCOMPACTOR_CONFIG": "",
-        },
+        extra_env=resume_env,
     )
-    assert reinj.returncode == 0, reinj.stderr
-    data = parse_single_json(reinj.stdout)
+    assert prepare_result.returncode == 0, prepare_result.stderr
+    prepare_data = parse_single_json(prepare_result.stdout)
+    assert prepare_data and prepare_data.get("customInstructions")
+
+    reinject_result = run_bridge(
+        ["reinject", "--session", str(session_path)],
+        state_dir,
+        extra_env=resume_env,
+    )
+    assert reinject_result.returncode == 0, reinject_result.stderr
+    data = parse_single_json(reinject_result.stdout)
     assert data is not None
     assert data.get("customType") == "autocompactor.digest"
-    src = str(data.get("nextStepSource") or "")
-    assert src.startswith("progress:"), data
+    source = str(data.get("nextStepSource") or "")
+    assert source.startswith("progress:"), data
     assert data.get("progressResume") == "autonomous", data
     assert int(data.get("progressResumeCooldownMs") or 0) >= 0
-    step = str(data.get("nextStep") or "")
-    assert step.strip(), "hard-resume brief must be non-empty"
+    next_step = str(data.get("nextStep") or "")
+    assert next_step.strip(), "hard-resume brief must be non-empty"
     assert data.get("nextStepWait") is False
 
 
@@ -431,13 +440,13 @@ def test_visible_fallback_static_inputs_corrected_formula_recommends_at_hard(tmp
     post_floor) + the CORRECTED formula still recommends at the hard line
     (the hard line is never gated by min_savings even on the fallback path)."""
     state_dir = tmp_path / "state"
-    import sys as _sys
-    _sys.path.insert(0, str(REPO_ROOT / "src"))
+    sys.path.insert(0, str(REPO_ROOT / "src"))
     from autocompactor import context_inventory as ci
 
-    def boom(*a, **k):
+    def raise_inventory_error(*_args, **_kwargs):
         raise RuntimeError("forced inventory failure for test")
-    monkeypatch.setattr(ci, "decision_floor_terms", boom)
+
+    monkeypatch.setattr(ci, "decision_floor_terms", raise_inventory_error)
     # Re-run the bridge IN-PROCESS so the monkeypatch applies. We call
     # cmd_evaluate directly with a minimal opts dict.
     from autocompactor import pi_bridge
@@ -461,8 +470,7 @@ def test_decision_path_does_not_read_floor_probe(tmp_path, monkeypatch):
     readout path (build_context_state -> context_composition ->
     build_inventory(include_probe=True)) legitimately reads the probe for the
     per-package display, which is the intended readout use."""
-    import sys as _sys
-    _sys.path.insert(0, str(REPO_ROOT / "src"))
+    sys.path.insert(0, str(REPO_ROOT / "src"))
     from autocompactor import context_inventory as ci, pi_bridge
     sentinel_opened = {"yes": False}
     def trap(*a, **k):
@@ -480,7 +488,7 @@ def test_decision_path_does_not_read_floor_probe(tmp_path, monkeypatch):
     # And the helper the decision actually uses (_config_aware_post_floor)
     # also does not read the probe.
     sentinel_opened["yes"] = False
-    pf, note = pi_bridge._config_aware_post_floor([], 150000, "test-session")
+    pf, _note = pi_bridge._config_aware_post_floor([], 150000, "test-session")
     assert isinstance(pf, int) and pf >= 0
     assert sentinel_opened["yes"] is False
 
@@ -495,21 +503,13 @@ def test_reinject_persists_post_floor_terms(tmp_path):
                          "--context-window", "200000"], state_dir)
     assert result.returncode == 0
     # The reinject event should be logged with post_total/base/skills.
-    import glob
-    stats_files = glob.glob(str(state_dir / "**" / "events.jsonl"), recursive=True)
-    found = False
-    for sf in stats_files:
-        for line in open(sf):
+    for stats_file in state_dir.rglob("events.jsonl"):
+        for line in stats_file.read_text(encoding="utf-8").splitlines():
             try:
-                obj = json.loads(line)
+                event = json.loads(line)
             except Exception:
                 continue
-            if obj.get("type") == "reinject":
-                assert "post_total" in obj
-                assert "base" in obj
-                assert "skills" in obj
-                found = True
-    # The reinject may early-return if no digest/stats; the event is logged
-    # only when reinject proceeds. Either way the bridge must exit 0.
-    assert result.returncode == 0
-    del found  # telemetry presence is best-effort; the contract is no-raise
+            if event.get("type") == "reinject":
+                assert "post_total" in event
+                assert "base" in event
+                assert "skills" in event
