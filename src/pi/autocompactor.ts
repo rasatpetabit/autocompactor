@@ -444,6 +444,11 @@ export default function autocompactor(pi: ExtensionAPI) {
   let waitPoll: WaitPollState | null = null
   // Bound for tests / host overrides; production uses ExtensionContext.
   let waitPollCtx: ExtensionContext | null = null
+  // When intercept cancels a native compact and re-triggers via ctx.compact(),
+  // Pi always labels the re-trigger reason "manual". Remember the *original*
+  // reason so session_compact does not treat a user /compact as actuate
+  // hard-resume (selfTriggered alone would force auto-continue).
+  let interceptOriginalReason: string | null = null
 
   const beginEnrichedCompact = (): void => {
     enrichedCompactsInFlight += 1
@@ -451,7 +456,10 @@ export default function autocompactor(pi: ExtensionAPI) {
   }
   const endEnrichedCompact = (): void => {
     enrichedCompactsInFlight = Math.max(0, enrichedCompactsInFlight - 1)
-    if (enrichedCompactsInFlight === 0) selfTriggered = false
+    if (enrichedCompactsInFlight === 0) {
+      selfTriggered = false
+      interceptOriginalReason = null
+    }
   }
   const hasEnrichedInFlight = (): boolean =>
     enrichedCompactsInFlight > 0 || selfTriggered
@@ -912,6 +920,10 @@ export default function autocompactor(pi: ExtensionAPI) {
         )
         return
       }
+      // Capture pre-intercept reason. User /compact is "manual"; threshold/
+      // overflow auto-compacts must keep autonomous resume. The re-trigger
+      // compact() always arrives as reason=manual from Pi.
+      interceptOriginalReason = String(event?.reason || "unknown")
       beginEnrichedCompact()
       announce(
         pi,
@@ -1012,10 +1024,21 @@ export default function autocompactor(pi: ExtensionAPI) {
         event?.compactionEntry?.id ??
         `${event?.reason ?? "unknown"}:${event?.compactionEntry?.timestamp ?? ""}:${stepSrc}:${step.slice(0, 80)}`,
       )
+      // User-initiated /compact must NOT auto-continue. Pi labels intercept
+      // re-triggers as reason=manual always; use interceptOriginalReason:
+      //   actuate: selfTriggered, interceptOriginalReason=null → autonomous
+      //   intercept(/compact): interceptOriginalReason="manual" → no
+      //   intercept(threshold|overflow): original reason kept → autonomous
+      //   pure manual (no intercept): !selfTriggered && reason=manual → no
       const autoResume = Boolean(
         step && nextStepMode === "autonomous" && progressCodingAutonomous &&
         !event?.willRetry &&
-        (selfTriggered || event?.reason !== "manual"),
+        (
+          // Actuate, or intercept of non-manual (threshold/overflow)
+          (selfTriggered && interceptOriginalReason !== "manual") ||
+          // Native threshold/overflow without intercept enrichment
+          (!selfTriggered && event?.reason !== "manual")
+        ),
       )
 
       if (digestText && !autoResume) {
@@ -1037,19 +1060,29 @@ export default function autocompactor(pi: ExtensionAPI) {
         )
       }
 
+      // When autonomous resume is blocked (manual /compact, path-only
+      // affinity → progressResume advisory, cooldown), still surface the
+      // recovered step as advisory so the human can continue — never
+      // silently drop a recovered next step after compact.
       const progressAdvisory = Boolean(
         step && isProgressCoding && !progressCodingAutonomous &&
         progressResume !== "off" && nextStepMode !== "off",
       )
-      if (step && (nextStepMode === "advisory" || progressAdvisory)) {
+      const blockedAutonomousAdvisory = Boolean(
+        step && !autoResume && !waitShaped &&
+        nextStepMode === "autonomous" && progressResume !== "off",
+      )
+      if (step && (nextStepMode === "advisory" || progressAdvisory || blockedAutonomousAdvisory)) {
         const advOpts = deliveryFor(ctx) === "immediate"
           ? undefined
           : ({ deliverAs: "nextTurn" } as const)
-        const why = progressAdvisory && nextStepMode !== "advisory"
-          ? (progressResume === "advisory"
-              ? "PROGRESS_RESUME=advisory"
-              : "progress resume throttled (same key within cooldown)")
-          : "NEXTSTEP=advisory"
+        const why = nextStepMode === "advisory"
+          ? "NEXTSTEP=advisory"
+          : progressAdvisory && progressResume === "advisory"
+            ? "PROGRESS_RESUME=advisory"
+            : progressAdvisory
+              ? "progress resume throttled (same key within cooldown)"
+              : "manual /compact — not auto-resuming; continue if this step is still live"
         pi.sendMessage(
           {
             customType: "autocompactor.nextstep.advisory",

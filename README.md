@@ -58,7 +58,7 @@ needed. `config.local.json` is the gitignored site-local overlay, and any
 | Key | Default | Meaning |
 |---|---|---|
 | `MODE` | `actuate` | `advise` only posts an `autocompactor.advice` message; `actuate` lets the shim call `ctx.compact()` itself. Overridden by `AUTOCOMPACTOR_PI_MODE` env var. |
-| `NEXTSTEP` | `autonomous` | Post-compaction continuation mode: `autonomous` immediately triggers a model turn with the recovered next step, `advisory` shows the step for the next human turn, `off` disables it. Overridden by `AUTOCOMPACTOR_NEXTSTEP`. |
+| `NEXTSTEP` | `autonomous` | Post-compaction continuation mode: `autonomous` immediately triggers a model turn with the recovered next step, `advisory` shows the step for the next human turn, `off` disables it. Overridden by `AUTOCOMPACTOR_NEXTSTEP`. **User `/compact` never auto-resumes** (artifacts + optional advisory only); only threshold/overflow/actuate may hard-resume. Path-only masterplan worktree affinity is also advisory. |
 
 | `PROGRESS_RESUME` | `autonomous` | Hard-resume gate for mechanical plan position (`progress:*` next steps). `autonomous` / `advisory` / `off`. Independent of wait path. `AUTOCOMPACTOR_PROGRESS_RESUME` overrides. |
 | `PROGRESS_MIN_CONFIDENCE` | `0.75` | Below this, progress coding resume is advisory only. |

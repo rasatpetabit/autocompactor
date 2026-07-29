@@ -193,16 +193,65 @@ def test_extract_all_safe_never_raises(monkeypatch):
 
 
 def test_worktree_cwd_grants_affinity(tmp_path: Path):
-    # Simulate .worktrees/<slug> cwd
+    # Simulate .worktrees/<slug> cwd — strip active_run so only path grants affinity.
+    wt = tmp_path / ".worktrees" / "demo-wave-run"
+    dest = wt / "docs" / "masterplan" / "demo-wave-run"
+    dest.mkdir(parents=True)
+    src = Path(FIX) / "masterplan_active_state.yml"
+    text = src.read_text(encoding="utf-8")
+    text = text.replace("active_run:\n  wave: 2\n  phase: launching\n", "")
+    (dest / "state.yml").write_text(text, encoding="utf-8")
+    hits = progress_lib.extract_masterplan(
+        str(wt), session_text="unrelated grok fix")
+    assert hits
+    assert hits[0]["affinity"] is True
+    # Path-only affinity must NOT hard-resume pending tasks (phantom resume).
+    assert hits[0].get("path_affinity") is True
+    assert hits[0].get("session_bound") is False
+    assert progress_lib.hard_resume_eligible(hits[0]) is False
+
+
+def test_worktree_plus_session_slug_allows_hard_resume(tmp_path: Path):
     wt = tmp_path / ".worktrees" / "demo-wave-run"
     dest = wt / "docs" / "masterplan" / "demo-wave-run"
     dest.mkdir(parents=True)
     src = Path(FIX) / "masterplan_active_state.yml"
     (dest / "state.yml").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
     hits = progress_lib.extract_masterplan(
-        str(wt), session_text="unrelated grok fix")
+        str(wt), session_text="continuing demo-wave-run T7 implement")
     assert hits
-    assert hits[0]["affinity"] is True
+    assert hits[0].get("session_bound") is True
+    assert progress_lib.hard_resume_eligible(hits[0]) is True
+
+
+def test_in_progress_task_hard_resumes_with_path_only(tmp_path: Path):
+    """Live in_progress status is enough even without session slug text."""
+    wt = tmp_path / ".worktrees" / "demo-wave-run"
+    dest = wt / "docs" / "masterplan" / "demo-wave-run"
+    dest.mkdir(parents=True)
+    # Force first task to in_progress
+    import yaml
+    data = yaml.safe_load((Path(FIX) / "masterplan_active_state.yml").read_text())
+    data.pop("active_run", None)
+    for task in data.get("tasks") or []:
+        if isinstance(task, dict):
+            task["status"] = "done"
+    # mark one in_progress
+    for task in data.get("tasks") or []:
+        if isinstance(task, dict) and task.get("id") == 7:
+            task["status"] = "in_progress"
+            break
+    else:
+        data.setdefault("tasks", []).append(
+            {"id": 7, "status": "in_progress", "wave": 2, "title": "live"})
+    (dest / "state.yml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    hits = progress_lib.extract_masterplan(
+        str(wt), session_text="unrelated status?")
+    assert hits
+    assert str(hits[0].get("status")).lower().replace("-", "_") in (
+        "in_progress",)
+    assert hits[0].get("session_bound") is False
+    assert progress_lib.hard_resume_eligible(hits[0]) is True
 
 
 def test_hard_resume_respects_progress_resume_and_nextstep(demo_repo: Path):

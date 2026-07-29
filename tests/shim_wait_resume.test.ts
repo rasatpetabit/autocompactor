@@ -177,6 +177,73 @@ describe("wait-shaped autonomous resume", () => {
     expect(waits.length).toBe(0)
   })
 
+  test("manual /compact does not triggerTurn even with progress nextStep", async () => {
+    // Intercept path re-triggers ctx.compact as reason=manual; without
+    // interceptOriginalReason tracking this used to hard-resume phantom
+    // masterplan tasks after a user /compact with no live work.
+    const mod = await freshShim()
+    const h = makeHarness({
+      idle: true,
+      bridgeResponse: {
+        reinject: {
+          text: "TEST-DIGEST",
+          customType: "autocompactor.digest",
+          nextStep:
+            "RESUME mid-task — do not restart from scratch.\nContinue ONLY this unit: T1",
+          nextStepSource: "progress:masterplan",
+          nextStepWait: false,
+          nextStepMode: "autonomous",
+          progressResume: "autonomous",
+        },
+        prepare: {
+          customInstructions: "TEST-INSTRUCTIONS",
+          staged: true,
+        },
+      },
+    })
+    mod.default(h.pi)
+    // Simulate user /compact: session_before_compact reason=manual, then
+    // intercept re-triggers enriched compact, then session_compact reason=manual.
+    await h.handlers["session_before_compact"]?.(
+      { reason: "manual", willRetry: false },
+      h.ctx,
+    )
+    // Drive the deferred safeCompact
+    await new Promise((r) => setTimeout(r, 30))
+    await h.waitForCompactions()
+    // If compact was scheduled, fire session_compact as the re-trigger would
+    if (h.handlers["session_compact"]) {
+      await h.handlers["session_compact"]?.(
+        {
+          reason: "manual",
+          willRetry: false,
+          compactionEntry: {
+            id: "c-manual",
+            timestamp: Date.now(),
+            tokensBefore: 100_000,
+            summary: "ok",
+            firstKeptEntryId: "e1",
+            details: {},
+          },
+        },
+        h.ctx,
+      )
+    }
+    await new Promise((r) => setTimeout(r, 40))
+
+    const coding = h.sendMessages.filter(
+      (m) =>
+        m.message?.customType === "autocompactor.nextstep.task" &&
+        m.options?.triggerTurn,
+    )
+    expect(coding.length).toBe(0)
+    // May advisory-surface the step; must not force a coding turn.
+    const forced = h.sendMessages.filter(
+      (m) => m.options?.triggerTurn === true,
+    )
+    expect(forced.length).toBe(0)
+  })
+
   test("progressResume=advisory does not triggerTurn coding progress step", async () => {
     const mod = await freshShim()
     const h = makeHarness({

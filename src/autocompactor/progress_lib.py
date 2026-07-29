@@ -156,28 +156,33 @@ def format_resume_brief(
     return text
 
 
-def masterplan_affinity(
+def masterplan_path_affinity(*, slug: str, cwd: str = "") -> bool:
+    """cwd is under this bundle's worktree/branch path (weak alone)."""
+    slug = (slug or "").strip()
+    if not slug:
+        return False
+    cwd = (cwd or "").replace("\\", "/")
+    m = _WORKTREE_SLUG_RE.search(cwd)
+    if m and m.group(1) == slug:
+        return True
+    if f"masterplan/{slug}" in cwd:
+        return True
+    return False
+
+
+def masterplan_session_affinity(
     *,
     slug: str,
     task_id: Any = None,
-    cwd: str = "",
     session_text: str = "",
     active_run: Any = None,
     owner_live: bool = False,
 ) -> bool:
-    """True when the session appears bound to this masterplan run."""
+    """Transcript/run evidence the session is executing this unit."""
     slug = (slug or "").strip()
     if not slug:
         return False
-    cwd = cwd or ""
     session_text = session_text or ""
-    # Worktree / branch path
-    m = _WORKTREE_SLUG_RE.search(cwd.replace("\\", "/"))
-    if m and m.group(1) == slug:
-        return True
-    if f"masterplan/{slug}" in cwd.replace("\\", "/"):
-        return True
-    # Transcript / session cues
     if slug in session_text:
         return True
     if f"docs/masterplan/{slug}" in session_text:
@@ -193,6 +198,32 @@ def masterplan_affinity(
     if owner_live:
         return True
     return False
+
+
+def masterplan_affinity(
+    *,
+    slug: str,
+    task_id: Any = None,
+    cwd: str = "",
+    session_text: str = "",
+    active_run: Any = None,
+    owner_live: bool = False,
+) -> bool:
+    """True when the session appears bound to this masterplan run.
+
+    Path affinity (cwd worktree) alone is *not* enough for hard resume —
+    a status-only session sitting in a worktree must not auto-continue
+    pending tasks. See hard_resume_eligible / session_bound.
+    """
+    if masterplan_path_affinity(slug=slug, cwd=cwd):
+        return True
+    return masterplan_session_affinity(
+        slug=slug,
+        task_id=task_id,
+        session_text=session_text,
+        active_run=active_run,
+        owner_live=owner_live,
+    )
 
 
 def _pick_masterplan_task(tasks: list) -> Optional[dict]:
@@ -343,13 +374,17 @@ def extract_masterplan(
                 )
                 status_t = status or "in-progress"
 
-            affinity = masterplan_affinity(
+            path_aff = masterplan_path_affinity(
+                slug=str(data.get("slug") or slug), cwd=cwd)
+            session_bound = masterplan_session_affinity(
                 slug=str(data.get("slug") or slug),
                 task_id=tid if isinstance(tid, (int, str)) else None,
-                cwd=cwd,
                 session_text=session_text,
                 active_run=active_run,
             )
+            # Digest affinity may be path-only; hard resume needs session_bound
+            # or an in_progress task (see hard_resume_eligible).
+            affinity = path_aff or session_bound
             # Confidence: base high for structured state; lower without affinity
             conf = 0.9 if affinity else 0.55
             if not task and not all_done:
@@ -367,6 +402,8 @@ def extract_masterplan(
                 "verify": [str(v) for v in verify] if task else [],
                 "resource_ids": [str(data.get("slug") or slug), str(tid)],
                 "status": status_t,
+                "session_bound": bool(session_bound),
+                "path_affinity": bool(path_aff),
                 "mtime": mtime,
             }
             if require_affinity and not affinity:
@@ -655,7 +692,13 @@ def hard_resume_eligible(
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     nextstep: str = "autonomous",
 ) -> bool:
-    """Whether autonomous coding triggerTurn may fire for this hit."""
+    """Whether autonomous coding triggerTurn may fire for this hit.
+
+    Masterplan/coord hard resume requires *session-bound* evidence (transcript
+    mentions slug/task or live active_run), not merely sitting in a worktree
+    with pending tasks. A pending task with only path affinity is advisory.
+    In-progress / active / running task status is treated as live enough.
+    """
     if not hit:
         return False
     if str(nextstep).lower() == "off":
@@ -669,8 +712,25 @@ def hard_resume_eligible(
         return False
     if _safe_float(hit.get("confidence"), 0) < float(min_confidence):
         return False
-    if hit.get("surface") in ("masterplan", "coord") and not hit.get("affinity"):
-        return False
+    surface = hit.get("surface")
+    if surface in ("masterplan", "coord"):
+        if not hit.get("affinity"):
+            return False
+        status = str(hit.get("status") or "").lower()
+        live_status = status in (
+            "in_progress", "in-progress", "active", "running")
+        session_bound = bool(hit.get("session_bound"))
+        # Backward-compat: older hits without session_bound field treat
+        # affinity as session-bound only when not path-only. Prefer explicit.
+        if "session_bound" in hit:
+            if not (session_bound or live_status):
+                return False
+        elif not live_status:
+            # No session_bound key and not live → refuse (fail closed for
+            # path-only worktree affinity carried as affinity=True).
+            # path_affinity alone is insufficient.
+            if hit.get("path_affinity") and not session_bound:
+                return False
     return bool((hit.get("brief") or "").strip())
 
 
