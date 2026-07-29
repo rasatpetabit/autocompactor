@@ -453,11 +453,16 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
                 st.last_usage = _usage_compat(usage)
                 st.usage_series.append(_usage_context(usage))
             # Mechanical open-work extraction (wait monitors / on-success).
+            # Also accumulate terminal resource ids so wait items can be
+            # invalidated once a build is known succeeded/failed (F1).
             if asst_text:
                 hits = transcript_lib.extract_open_work_from_text(asst_text)
                 if hits:
                     st.open_work = transcript_lib.merge_open_work(
                         st.open_work, hits)
+                term = transcript_lib.extract_terminal_resource_ids(asst_text)
+                if term:
+                    st.terminal_resource_ids |= term
             # Todos: best-effort. Live Pi sessions (re-scanned 2026-07-18)
             # do not emit a TodoWrite-class tool; when a Claude-shaped or
             # future Pi-shaped call appears, fill st.todos + derived flags.
@@ -542,6 +547,10 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
                     if hits:
                         st.open_work = transcript_lib.merge_open_work(
                             st.open_work, hits)
+                # Terminal status in tool output (show/logs) invalidates wait.
+                term = transcript_lib.extract_terminal_resource_ids(text)
+                if term:
+                    st.terminal_resource_ids |= term
 
         elif role == "bashExecution":
             cmd = str(msg.get("command", "") or "")
@@ -557,6 +566,10 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
                 st.working_commands.append(cmd)
             if is_recent:
                 recent_result_flags.append(is_error)
+            if text:
+                term = transcript_lib.extract_terminal_resource_ids(text)
+                if term:
+                    st.terminal_resource_ids |= term
 
         elif role == "user":
             text = _message_text(msg).strip()
@@ -588,6 +601,12 @@ def analyze_active_prefix(full_path, active, recent_window: int = 30,
     st.working_commands = st.working_commands[-15:]
     st.corrections = st.corrections[-20:]
     st.hex_constants = st.hex_constants[-20:]
+
+    # F1: drop waiting_monitor items for resources already terminal in the
+    # transcript so resolve_next_step / progress / preservation all agree.
+    if st.terminal_resource_ids:
+        st.open_work = transcript_lib.invalidate_terminal_open_work(
+            st.open_work, st.terminal_resource_ids)
 
     if recent_result_flags:
         had_err = any(recent_result_flags)

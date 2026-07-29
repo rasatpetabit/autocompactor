@@ -37,6 +37,9 @@ class TranscriptStats:
     recent_errors: list = field(default_factory=list)  # last few error strings
     last_user_task: str = ""
     open_work: list = field(default_factory=list)      # waiting monitors / on-success handoffs
+    # Resource ids (Y-stamps) observed terminal (succeeded/failed/…) in the
+    # transcript; used to invalidate stale waiting_monitor open_work (F1).
+    terminal_resource_ids: set = field(default_factory=set)
     initial_user_prompts: list = field(default_factory=list)  # founding prompts, verbatim
     recent_commit: bool = False      # git commit in recent window
     recent_tests_pass: bool = False  # test-success marker in recent window
@@ -110,6 +113,26 @@ MONITOR_CMD_RE = re.compile(
 )
 MONITOR_TOKEN_RE = re.compile(
     r"\b(yanos-builder|task_list|subagent|--follow)\b", re.IGNORECASE,
+)
+# Terminal status for a resource (yanos-builder show / Tasks Summary / catalog).
+# Conservative: requires co-occurrence with a concrete Y-stamp (see
+# extract_terminal_resource_ids). "completed" is intentionally excluded —
+# too many non-build uses (todos, commits).
+TERMINAL_STATUS_TOKEN_RE = re.compile(
+    r"\b(succeeded|failed|aborted|cancelled)\b", re.IGNORECASE,
+)
+STATUS_TERMINAL_RE = re.compile(
+    r"status\s*:\s*(succeeded|failed|aborted|cancelled)\b", re.IGNORECASE,
+)
+LIVE_STATUS_RE = re.compile(
+    r"\b(running|queued|in[- ]progress)\b", re.IGNORECASE,
+)
+TASKS_SUMMARY_ALL_OK_RE = re.compile(
+    r"tasks?\s+summary\b[^.\n]{0,80}\b(all\s+)?(succeeded|passed|completed)\b",
+    re.IGNORECASE,
+)
+CATALOG_OK_RE = re.compile(
+    r"\bcatalog\b[^.\n]{0,60}\b(succeeded|passed|ok)\b", re.IGNORECASE,
 )
 NEXT_ON_SUCCESS_RE = re.compile(
     r"(?is)(?:when it succeeds|on success|once (?:it |that )?(?:succeeds|finishes|completes))"
@@ -702,6 +725,87 @@ def _resolve_shell_build_ids(text: str) -> list:
     return ids
 
 
+def extract_terminal_resource_ids(text: str) -> set:
+    """Y-stamps the text declares terminal (succeeded/failed/aborted/cancelled).
+
+    Conservative attribution:
+      1. Same line: Y-stamp + terminal token and not live (running/queued).
+      2. Single-build block: exactly one Y-stamp in the text AND a
+         `status : succeeded|failed` line / Tasks Summary all-ok / catalog ok.
+    Multi-build status dumps only mark ids that co-occur with a terminal
+    token on their own line (rule 1) — never the whole dump.
+    """
+    if not text or not text.strip():
+        return set()
+    out: set = set()
+    all_ids = list(dict.fromkeys(
+        BUILD_ID_RE.findall(text) + _resolve_shell_build_ids(text)))
+    for line in text.splitlines():
+        lids = BUILD_ID_RE.findall(line)
+        if not lids:
+            continue
+        if not TERMINAL_STATUS_TOKEN_RE.search(line):
+            continue
+        if LIVE_STATUS_RE.search(line):
+            continue
+        for lid in lids:
+            out.add(lid)
+    if len(all_ids) == 1:
+        rid = all_ids[0]
+        if (STATUS_TERMINAL_RE.search(text)
+                or TASKS_SUMMARY_ALL_OK_RE.search(text)
+                or CATALOG_OK_RE.search(text)):
+            out.add(rid)
+    return out
+
+
+def invalidate_terminal_open_work(open_work: list, terminal_ids) -> list:
+    """Drop waiting_monitor items whose primary (or all) resource id is terminal.
+
+    next_on_success handoffs are kept — they are the post-success action,
+    not a wait. Items without a concrete id are left alone (cannot prove
+    terminal).
+    """
+    if not terminal_ids:
+        return list(open_work or [])
+    term = set(terminal_ids)
+    out = []
+    for item in (open_work or []):
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        if item.get("kind") != "waiting_monitor":
+            out.append(item)
+            continue
+        ids = [i for i in (item.get("resource_ids") or []) if isinstance(i, str)]
+        if not ids:
+            out.append(item)
+            continue
+        primary = _primary_resource_id(ids)
+        if primary and primary in term:
+            continue
+        if all(i in term for i in ids):
+            continue
+        out.append(item)
+    return out
+
+
+def _open_work_item_is_terminal(item: dict, terminal_ids) -> bool:
+    """True if a waiting_monitor item's primary/all ids are terminal."""
+    if not terminal_ids or not isinstance(item, dict):
+        return False
+    if item.get("kind") != "waiting_monitor":
+        return False
+    ids = [i for i in (item.get("resource_ids") or []) if isinstance(i, str)]
+    if not ids:
+        return False
+    term = set(terminal_ids)
+    primary = _primary_resource_id(ids)
+    if primary and primary in term:
+        return True
+    return all(i in term for i in ids)
+
+
 def extract_open_work_from_text(text: str) -> list:
     """Mechanical wait/on-success extraction from a single assistant message.
 
@@ -990,20 +1094,36 @@ def resolve_next_step(st: "TranscriptStats",
     pos = progress_position
     if not isinstance(pos, dict):
         pos = getattr(st, "progress_position", None)
+    terminal_ids = set(getattr(st, "terminal_resource_ids", None) or set())
+
     if isinstance(pos, dict) and pos.get("mode") == "wait":
-        brief = (pos.get("brief") or pos.get("summary") or "").strip()
-        if brief:
-            # Keep open_work:waiting_* tags so TS isWaitShapedStep + telemetry
-            # stay compatible with the waiting-state path.
-            if (pos.get("surface") or "") == "open_work":
-                return brief, "open_work:waiting_monitor"
-            surface = pos.get("surface") or "progress"
-            return brief, f"progress:{surface}"
+        # F1: skip wait-mode progress when its resource ids are terminal.
+        pos_ids = [i for i in (pos.get("resource_ids") or [])
+                   if isinstance(i, str)]
+        pos_terminal = bool(
+            pos_ids and (
+                (_primary_resource_id(pos_ids) in terminal_ids)
+                or all(i in terminal_ids for i in pos_ids)
+            )
+        )
+        if not pos_terminal:
+            brief = (pos.get("brief") or pos.get("summary") or "").strip()
+            if brief:
+                # Keep open_work:waiting_* tags so TS isWaitShapedStep + telemetry
+                # stay compatible with the waiting-state path.
+                if (pos.get("surface") or "") == "open_work":
+                    return brief, "open_work:waiting_monitor"
+                surface = pos.get("surface") or "progress"
+                return brief, f"progress:{surface}"
 
     open_work = [w for w in (getattr(st, "open_work", None) or [])
                  if isinstance(w, dict)]
     for item in reversed(open_work):
         if item.get("kind") != "waiting_monitor":
+            continue
+        # F1 belt: skip waiting items for resources already terminal in the
+        # transcript, even if open_work was not pruned upstream.
+        if _open_work_item_is_terminal(item, terminal_ids):
             continue
         brief = format_open_work_brief(item).strip()
         if brief:

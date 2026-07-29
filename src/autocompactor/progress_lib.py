@@ -501,16 +501,30 @@ def extract_todos(st) -> list[dict]:
 
 
 def extract_open_work_progress(st) -> list[dict]:
-    """Lift waiting open_work into ProgressHit mode=wait."""
+    """Lift waiting open_work into ProgressHit mode=wait.
+
+    F1: skip waiting_monitor items whose primary resource id is already
+    terminal in the transcript (succeeded/failed/…) so a finished build
+    cannot win mode=wait and arm poll loops.
+    """
     out = []
+    try:
+        from autocompactor import transcript_lib
+    except Exception:
+        transcript_lib = None  # type: ignore
+    terminal_ids = set(getattr(st, "terminal_resource_ids", None) or set())
     for item in list(getattr(st, "open_work", None) or []):
         if not isinstance(item, dict):
             continue
         kind = item.get("kind") or ""
         if kind != "waiting_monitor":
             continue
+        if transcript_lib is not None and transcript_lib._open_work_item_is_terminal(
+                item, terminal_ids):
+            continue
         try:
-            from autocompactor import transcript_lib
+            if transcript_lib is None:
+                raise RuntimeError("no transcript_lib")
             brief = transcript_lib.format_open_work_brief(item).strip()
         except Exception:
             brief = (item.get("summary") or "waiting").strip()

@@ -182,3 +182,191 @@ def test_bridge_prepare_reinject_surfaces_wait_next_step(tmp_path):
     assert int(data.get("waitPollS") or 0) == 60
     assert int(data.get("waitPollMax") or 0) == 20
     assert isinstance(data.get("openWork"), list) and data["openWork"]
+
+
+# ---------------------------------------------------------------------------
+# F1: terminal success invalidates waiting_monitor (optic-5c compact failure)
+# ---------------------------------------------------------------------------
+
+def test_extract_terminal_resource_ids_from_status_line():
+    text = (
+        "Build Y260728-170946\n"
+        "  status  : succeeded\n"
+        "  duration: 29m\n"
+    )
+    ids = transcript_lib.extract_terminal_resource_ids(text)
+    assert "Y260728-170946" in ids
+
+    still = transcript_lib.extract_terminal_resource_ids(
+        "Build Y260728-170946\n  status  : running\n")
+    assert "Y260728-170946" not in still
+
+    failed = transcript_lib.extract_terminal_resource_ids(
+        "Y260728-170946 status : failed (catalog)")
+    assert "Y260728-170946" in failed
+
+
+def test_invalidate_terminal_open_work_drops_waiting_monitor():
+    wait = {
+        "kind": "waiting_monitor",
+        "summary": "Y260728-170946 is running",
+        "monitor_cmds": ["yanos-builder show Y260728-170946"],
+        "resource_ids": ["Y260728-170946"],
+        "next_on_success": "flash the WIC",
+        "confidence": "high",
+    }
+    other = {
+        "kind": "next_on_success",
+        "summary": "flash the WIC",
+        "resource_ids": ["Y260728-170946"],
+        "next_on_success": "flash the WIC",
+        "confidence": "medium",
+    }
+    kept_wait = {
+        "kind": "waiting_monitor",
+        "summary": "Y260729-000001 still building",
+        "monitor_cmds": ["yanos-builder show Y260729-000001"],
+        "resource_ids": ["Y260729-000001"],
+        "confidence": "high",
+    }
+    pruned = transcript_lib.invalidate_terminal_open_work(
+        [wait, other, kept_wait], {"Y260728-170946"})
+    kinds_ids = [(w.get("kind"), w.get("resource_ids")) for w in pruned]
+    assert ("waiting_monitor", ["Y260728-170946"]) not in kinds_ids
+    assert ("waiting_monitor", ["Y260729-000001"]) in kinds_ids
+    assert ("next_on_success", ["Y260728-170946"]) in kinds_ids
+
+
+def test_terminal_success_invalidates_waiting_monitor_in_transcript(tmp_path):
+    """Wait language for build X, then later status : succeeded for X
+    → no waiting_monitor; resolve_next_step is not open_work:waiting_monitor.
+    """
+    path = _write_jsonl(tmp_path / "terminal_success.jsonl", [
+        {
+            "type": "message",
+            "id": "t1",
+            "parentId": None,
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "Build a working optic-5c image and flash it.",
+                }],
+            },
+        },
+        {
+            "type": "message",
+            "id": "t2",
+            "parentId": "t1",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Y260728-170946 is running via yanos-builder.\n"
+                        "Monitor:\n```bash\n"
+                        "yanos-builder show Y260728-170946\n```\n"
+                        "When it succeeds I'll flash the WIC. Leaving the "
+                        "build running; I can poll."
+                    ),
+                }],
+                "usage": {
+                    "input": 100, "output": 40, "cacheRead": 0,
+                    "cacheWrite": 0, "totalTokens": 140,
+                },
+            },
+        },
+        {
+            "type": "message",
+            "id": "t3",
+            "parentId": "t2",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Checking build status."},
+                    {
+                        "type": "toolCall",
+                        "id": "bash_show",
+                        "name": "bash",
+                        "arguments": {
+                            "command": "yanos-builder show Y260728-170946",
+                        },
+                    },
+                ],
+                "usage": {
+                    "input": 120, "output": 20, "cacheRead": 0,
+                    "cacheWrite": 0, "totalTokens": 140,
+                },
+            },
+        },
+        {
+            "type": "message",
+            "id": "t4",
+            "parentId": "t3",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "bash_show",
+                "isError": False,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Build Y260728-170946\n"
+                        "  status  : succeeded\n"
+                        "  image  : /srv/builds/Y260728-170946/optic-5c.wic\n"
+                        "Tasks Summary: all succeeded\n"
+                        "catalog: succeeded\n"
+                    ),
+                }],
+            },
+        },
+        {
+            "type": "message",
+            "id": "t5",
+            "parentId": "t4",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Build Y260728-170946 succeeded. Flash path is "
+                        "/srv/builds/Y260728-170946/optic-5c.wic."
+                    ),
+                }],
+                "usage": {
+                    "input": 140, "output": 20, "cacheRead": 0,
+                    "cacheWrite": 0, "totalTokens": 160,
+                },
+            },
+        },
+    ])
+    st = pi_session_lib.analyze(path)
+    assert "Y260728-170946" in (st.terminal_resource_ids or set())
+    assert not any(
+        w.get("kind") == "waiting_monitor" for w in (st.open_work or [])
+    ), st.open_work
+    step, src = transcript_lib.resolve_next_step(st)
+    assert src != "open_work:waiting_monitor", (step, src)
+    assert "WAITING:" not in (step or "")
+    instr = transcript_lib.build_preservation_instructions(st)
+    assert "WAITING: Y260728-170946" not in instr
+
+
+def test_resolve_next_step_skips_terminal_waiting_even_if_unpruned():
+    """Belt: resolve_next_step ignores waiting_monitor for terminal ids
+    even when open_work was not pruned (defensive)."""
+    st = transcript_lib.TranscriptStats()
+    st.open_work = [{
+        "kind": "waiting_monitor",
+        "summary": "Y260728-170946 is running",
+        "monitor_cmds": ["yanos-builder show Y260728-170946"],
+        "resource_ids": ["Y260728-170946"],
+        "next_on_success": "flash the WIC",
+        "confidence": "high",
+    }]
+    st.terminal_resource_ids = {"Y260728-170946"}
+    st.last_user_task = "Build a working optic-5c image and flash it."
+    step, src = transcript_lib.resolve_next_step(st)
+    assert src != "open_work:waiting_monitor"
+    assert "WAITING:" not in (step or "")
+    # Falls through to last_user_task (or next_on_success if present).
+    assert src in ("last_user_task", "open_work:next_on_success", "")
