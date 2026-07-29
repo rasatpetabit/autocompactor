@@ -732,8 +732,11 @@ def extract_terminal_resource_ids(text: str) -> set:
       1. Same line: Y-stamp + terminal token and not live (running/queued).
       2. Single-build block: exactly one Y-stamp in the text AND a
          `status : succeeded|failed` line / Tasks Summary all-ok / catalog ok.
+      3. yanos-builder show multi-line: `Build Y…` then later `status  : failed`
+         within a short window (no second Build header in between).
     Multi-build status dumps only mark ids that co-occur with a terminal
-    token on their own line (rule 1) — never the whole dump.
+    token on their own line (rule 1) or via rule 3 windows — never mark
+    every id from a mixed dump.
     """
     if not text or not text.strip():
         return set()
@@ -756,6 +759,22 @@ def extract_terminal_resource_ids(text: str) -> set:
                 or TASKS_SUMMARY_ALL_OK_RE.search(text)
                 or CATALOG_OK_RE.search(text)):
             out.add(rid)
+    # Rule 3: Build <id> header … status : terminal (yanos-builder show)
+    lines = text.splitlines()
+    current = None
+    for line in lines:
+        m = re.search(r"\bBuild\s+(Y\d{6}-\d{6})\b", line)
+        if m:
+            current = m.group(1)
+            continue
+        if current and STATUS_TERMINAL_RE.search(line) and not LIVE_STATUS_RE.search(line):
+            out.add(current)
+            current = None
+            continue
+        if current and LIVE_STATUS_RE.search(line) and re.search(
+                r"status\s*:", line, re.IGNORECASE):
+            # still running — do not mark terminal
+            current = None
     return out
 
 

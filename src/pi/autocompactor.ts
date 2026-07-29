@@ -499,8 +499,12 @@ export default function autocompactor(pi: ExtensionAPI) {
         `[autocompactor-nextstep] Polling open work after wait interval ` +
         `(${state.stepSrc || "open_work:waiting"}; remaining polls: ${state.remaining}).\n` +
         `${state.brief}\n\n` +
-        "Check the monitor command(s) now. If still running, report status and stop; " +
-        "if succeeded, complete the on-success handoff. Do not start unrelated work."
+        "Check the monitor command(s) now.\n" +
+        "If still running: report status and stop (do not start unrelated work).\n" +
+        "If status is terminal (succeeded|failed|aborted|cancelled) OR bitbake " +
+        "Tasks Summary all succeeded: clear this wait — do not re-poll this id; " +
+        "if a newer green BID supersedes a failed wait target, re-anchor to that BID; " +
+        "on success complete the on-success handoff."
       pi.sendMessage(
         {
           customType: "autocompactor.nextstep.poll",

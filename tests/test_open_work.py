@@ -370,3 +370,41 @@ def test_resolve_next_step_skips_terminal_waiting_even_if_unpruned():
     assert "WAITING:" not in (step or "")
     # Falls through to last_user_task (or next_on_success if present).
     assert src in ("last_user_task", "open_work:next_on_success", "")
+
+
+def test_extract_terminal_yanos_builder_show_multiline():
+    """yanos-builder show prints Build id then status on later lines."""
+    text = """
+Build Y260728-220858
+  project : optic-cm3-16gb-2gb-mgmt
+  status  : failed
+  channel : dev
+
+Build Y260728-234058
+  project : optic-cm3-16gb-2gb-mgmt
+  status  : succeeded
+"""
+    ids = transcript_lib.extract_terminal_resource_ids(text)
+    assert "Y260728-220858" in ids
+    assert "Y260728-234058" in ids
+
+
+def test_waiting_monitor_cleared_when_show_failed_in_transcript():
+    wait = {
+        "kind": "waiting_monitor",
+        "resource_ids": ["Y260728-220858"],
+        "monitor_cmds": ["yanos-builder show Y260728-220858"],
+        "summary": "enqueued Y260728-220858",
+        "next_on_success": "",
+        "source": "test",
+    }
+    later = """
+Build Y260728-220858
+  status  : failed
+  finished : 2026-07-29T05:12:47
+"""
+    term = transcript_lib.extract_terminal_resource_ids(later)
+    assert "Y260728-220858" in term
+    items = transcript_lib.invalidate_terminal_open_work([wait], term)
+    assert items == []
+

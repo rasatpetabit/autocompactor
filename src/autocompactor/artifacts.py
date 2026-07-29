@@ -229,22 +229,40 @@ def _sections(arts: dict) -> dict:
             cmds = "; ".join(item.get("monitor_cmds") or []) or "—"
             nxt = item.get("next_on_success") or "—"
             summary = (item.get("summary") or "")[:200]
+            term = " [may be terminal — re-check show; do not re-poll if finished]" if kind == "waiting_monitor" else ""
             ow_lines.append(
-                f"- [{kind}] {summary}\n  resources: {ids}\n"
+                f"- [{kind}]{term} {summary}\n  resources: {ids}\n"
                 f"  monitor: {cmds}\n  on success: {nxt}")
         if ow_lines:
             sections["open_work"] = (
-                "OPEN WORK (resume after compact — do not drop):\n"
+                "OPEN WORK (resume after compact — do not drop; "
+                "if a wait resource is already succeeded/failed, clear wait "
+                "and re-anchor — never poll a terminal BID):\n"
                 + "\n".join(ow_lines))
+    # RELEASE DESK: high-signal resume block for long build sessions (P0).
+    # Prefer working_commands + open_work resource ids already extracted.
+    desk_bits = []
+    for c in (arts.get("working_commands") or [])[-8:]:
+        if isinstance(c, str) and c.strip():
+            desk_bits.append(c.strip()[:240])
+    if desk_bits:
+        sections.setdefault(
+            "working_commands",
+            "KNOWN-WORKING COMMANDS / RELEASE DESK "
+            "(BID, tip, artifacts, verify — prefer over mid-task restart):\n"
+            + "\n".join("- " + c for c in desk_bits),
+        )
     if arts.get("error_ledger"):
         sections["error_ledger"] = ("ERRORS SEEN THIS SESSION (do not "
                                     "re-attempt known-bad paths):\n"
                                     + "\n".join(
                 f"- [{e['count']}x] {e['error']}" for e in arts["error_ledger"]))
     if arts.get("working_commands"):
-        sections["working_commands"] = ("KNOWN-WORKING COMMANDS:\n"
-                                        + "\n".join(
-                "- " + c for c in arts["working_commands"]))
+        sections["working_commands"] = (
+            "KNOWN-WORKING COMMANDS / RELEASE DESK "
+            "(preserve BID, tip SHA, artifact paths, verify gates; "
+            "do not restart mid-task from T1 if green build exists):\n"
+            + "\n".join("- " + c for c in arts["working_commands"]))
     if arts.get("hex_constants"):
         sections["hex_constants"] = ("CONSTANTS DISCOVERED (verbatim "
                                      "context):\n" + "\n".join(
