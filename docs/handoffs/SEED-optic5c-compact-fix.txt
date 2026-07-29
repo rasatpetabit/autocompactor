@@ -1,0 +1,9 @@
+Task: Fix autocompactor failures F1–F5 documented in:
+  docs/handoffs/2026-07-29-optic5c-compact-failures.md
+
+Repo: /srv/dev/ras/autocompactor
+Priority order recommended: F1 (stale wait polls after terminal success) → F3 (false corrections) → F2 (founding goal pollution) → F5 (wrapup+wait) → F4 (cancel messaging).
+
+Tests first: tests/test_open_work.py, tests/shim_wait_resume.test.ts, progress_lib open_work wait extraction.
+Extension source: src/pi/autocompactor.ts then python3 src/install_pi.py
+Do not touch optic-5c rebuild or yanos-builder.
