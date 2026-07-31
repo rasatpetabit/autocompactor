@@ -91,12 +91,11 @@ Pi adapter ships.
   (the shared Python core). State/telemetry live under `~/.autocompactor/pi/`.
   See `HANDOFF.md` ("Pi harness") for the architecture, actuate-vs-advise
   decision, and verified ground-truth pins.
-<!-- agent-dispatch:begin routing hash=91201f5fd8778421b77e96a3b48cdf126230bbc35f8af4bbf99d75e3cf7eb275 -->
+<!-- agent-dispatch:begin routing hash=9ca8f85c990b3cb5ba15928688e08dc71e705a59a3b56398ce80cea6493f9ce8 -->
 ## §routing — managed by agent-dispatch (do not hand-edit)
 
 Binding rules (enforced by PreToolUse guard):
-- haiku: override-only (live override grant required).
-- sonnet: override-only (live override grant required).
+- Some models are gated and require a live override grant; run `agent-dispatch digest` for current dispositions.
 - model param MUST be explicit — missing model is denied (exception: harness built-ins Explore/Plan inherit the frontier session model).
 
 For the full routing policy, fallback chains, and backend health:
