@@ -5,6 +5,7 @@ backtest_*.log
 *.tgz
 
 # Tooling state
+.worktrees/
 __pycache__/
 *.pyc
 .pytest_cache/
