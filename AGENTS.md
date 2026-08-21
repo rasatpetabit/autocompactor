@@ -91,12 +91,13 @@ Pi adapter ships.
   (the shared Python core). State/telemetry live under `~/.autocompactor/pi/`.
   See `HANDOFF.md` ("Pi harness") for the architecture, actuate-vs-advise
   decision, and verified ground-truth pins.
-<!-- agent-dispatch:begin routing hash=9ca8f85c990b3cb5ba15928688e08dc71e705a59a3b56398ce80cea6493f9ce8 -->
+<!-- agent-dispatch:begin routing hash=ab9bc373a67846a9f7ca9d9e4cff415f061bf461e385ef3020963d0799821040 -->
 ## §routing — managed by agent-dispatch (do not hand-edit)
 
 Binding rules (enforced by PreToolUse guard):
 - Some models are gated and require a live override grant; run `agent-dispatch digest` for current dispositions.
-- model param MUST be explicit — missing model is denied (exception: harness built-ins Explore/Plan inherit the frontier session model).
+- model param MUST be explicit — missing model is denied, EXCEPT the built-in read-only types below (Explore/Plan), which inherit the session model.
+- Route work to the roster role its class names (routing.yaml classes[].agent); the role pins the lane. Explore/Plan are exempt built-ins that BYPASS lane routing: dispatch them WITHOUT a model param (they inherit the session model; an explicit model outside the lineup is denied). Prefer the role.
 
 For the full routing policy, fallback chains, and backend health:
   agent-dispatch digest          # live, from the canonical policy file
