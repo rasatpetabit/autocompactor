@@ -143,7 +143,8 @@ def test_wide_threshold_scales_for_large_context_windows(tmp_path):
     # Regression: a 976K GLM-5.2 context window with flat SOFT_PCT/HARD_PCT
     # needs hundreds of K tokens to trigger. config.json sets _WIDE variants
     # (>=300K windows) so the gate stays practical — but not so low that
-    # CacheLane-pruned sessions thrash near the post-compact residual.
+    # sessions with heavily pruned tool output thrash near the post-compact
+    # residual.
     # 2026-07-17 retune: SOFT_WIDE 0.40 / HARD_WIDE 0.58 (was 0.25 / 0.40).
     state_dir = tmp_path / "state"
     fixture_path = REPO_ROOT / "tests" / "fixtures" / "pi" / "with_compaction.jsonl"

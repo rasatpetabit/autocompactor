@@ -23,10 +23,6 @@
   "DETAIL_COOLDOWN": 75000,
   "MAX_FULL_PARSE_MB": 8,
   "OBSERVE_ONLY": "error_resolved,tests_pass,idle_gap",
-  "CACHELANE_STATS": true,
-  "CACHELANE_SOFT_BIAS": false,
-  "CACHELANE_HOME": "",
-  "CACHELANE_MIN_SAVINGS_RATIO": 0.4,
   "ARTIFACT_BUDGET": 1500,
   "AUTO_WINDOW_TIERS": [
     200000,

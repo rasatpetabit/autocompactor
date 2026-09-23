@@ -160,9 +160,9 @@ def test_flat_config_preserves_effective_pi_values(monkeypatch):
     # the effective Pi value; the flat config must carry 0.90 (not revert
     # to pi_bridge's 0.50 default).
     assert config_lib.cfg.float("STALE_FRAC", default=0.50) == 0.90
-    # HARD_PCT_WIDE canary: 2026-07-17 CacheLane retune raised wide hard
-    # from 0.40 → 0.58 so actuate does not thrash near post-compact residual
-    # while CacheLane K-prunes tool bulk on the Pi/:7332 path.
+    # HARD_PCT_WIDE canary: 2026-07-17 retune raised wide hard from 0.40 →
+    # 0.58 so actuate does not thrash near the post-compact residual on
+    # large-window sessions with heavily pruned tool output.
     assert config_lib.cfg.float("HARD_PCT_WIDE", default=-1) == 0.58
     for k, v in PI_KEYS_FLOAT.items():
         assert config_lib.cfg.float(k, default=-1) == v, k
